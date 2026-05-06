@@ -56,11 +56,35 @@
 
 #import "sequel-ace-Swift.h"
 
+#import <os/log.h>
+
 @import FirebaseCore;
 @import FirebaseAnalytics;
 @import FirebaseCrashlytics;
 
 static const double SPDelayBeforeCheckingForNewReleases = 10;
+
+#ifdef DEBUG
+#define SAUIDiagnosticLog(fmt, ...) SAUIDiagnosticLogMessage((@"[SA UI Diagnostics] " fmt), ##__VA_ARGS__)
+#else
+#define SAUIDiagnosticLog(...)
+#endif
+
+static void SAUIDiagnosticLogMessage(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
+static void SAUIDiagnosticLogMessage(NSString *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    os_log(OS_LOG_DEFAULT, "%{public}@", message);
+}
+
+static NSTimeInterval SAUIMonotonicTime(void)
+{
+    return [[NSProcessInfo processInfo] systemUptime];
+}
 
 @interface SPAppController ()
 @property (strong) IBOutlet NSMenu *mainMenu;
@@ -79,6 +103,12 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 @property (readwrite, strong) NSFileManager *fileManager;
 
 @property (nonatomic, strong, readwrite) TabManager *tabManager;
+@property (nonatomic, strong) dispatch_source_t uiDiagnosticsWatchdogTimer;
+@property (atomic, assign) BOOL uiDiagnosticsBeatPending;
+@property (atomic, assign) NSUInteger uiDiagnosticsLastReportedStallSecond;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsLastBeatTime;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsPendingBeatTime;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsActivationStartTime;
 
 @end
 
@@ -197,12 +227,132 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
     [[NSScriptExecutionContext sharedScriptExecutionContext] setTopLevelObject:self];
 }
 
+#pragma mark -
+#pragma mark UI Diagnostics
+
+- (void)_startUIDiagnosticsWatchdog
+{
+#ifdef DEBUG
+    if (self.uiDiagnosticsWatchdogTimer) {
+        return;
+    }
+
+    self.uiDiagnosticsLastBeatTime = SAUIMonotonicTime();
+
+    dispatch_queue_t watchdogQueue = dispatch_queue_create("com.sequel-ace.ui-diagnostics.watchdog", DISPATCH_QUEUE_SERIAL);
+    self.uiDiagnosticsWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, watchdogQueue);
+    dispatch_source_set_timer(self.uiDiagnosticsWatchdogTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_MSEC * 100);
+
+    __weak SPAppController *weakSelf = self;
+    dispatch_source_set_event_handler(self.uiDiagnosticsWatchdogTimer, ^{
+        [weakSelf _uiDiagnosticsWatchdogTick];
+    });
+
+    dispatch_resume(self.uiDiagnosticsWatchdogTimer);
+    SAUIDiagnosticLog(@"watchdog started interval=1.0s threshold=2.0s");
+#endif
+}
+
+- (void)_uiDiagnosticsWatchdogTick
+{
+#ifdef DEBUG
+    NSTimeInterval now = SAUIMonotonicTime();
+
+    if (self.uiDiagnosticsBeatPending) {
+        NSTimeInterval stallDuration = now - self.uiDiagnosticsPendingBeatTime;
+        if (stallDuration >= 2.0) {
+            NSUInteger stallSecond = (NSUInteger)floor(stallDuration);
+            if (stallSecond != self.uiDiagnosticsLastReportedStallSecond) {
+                self.uiDiagnosticsLastReportedStallSecond = stallSecond;
+                SAUIDiagnosticLog(@"main thread has not serviced watchdog for %.3fs lastBeatAge=%.3fs", stallDuration, now - self.uiDiagnosticsLastBeatTime);
+            }
+        }
+        return;
+    }
+
+    self.uiDiagnosticsBeatPending = YES;
+    self.uiDiagnosticsPendingBeatTime = now;
+
+    __weak SPAppController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SPAppController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+
+        NSTimeInterval resumedAt = SAUIMonotonicTime();
+        NSTimeInterval delay = resumedAt - strongSelf.uiDiagnosticsPendingBeatTime;
+        if (delay >= 0.5) {
+            SAUIDiagnosticLog(@"main thread serviced watchdog after %.3fs context=%@", delay, [strongSelf _uiDiagnosticsContext]);
+        }
+
+        strongSelf.uiDiagnosticsBeatPending = NO;
+        strongSelf.uiDiagnosticsLastReportedStallSecond = 0;
+        strongSelf.uiDiagnosticsLastBeatTime = resumedAt;
+    });
+#endif
+}
+
+- (NSString *)_uiDiagnosticsContext
+{
+#ifdef DEBUG
+    if (![NSThread isMainThread]) {
+        return @"non-main-thread";
+    }
+
+    NSWindow *keyWindow = [NSApp keyWindow];
+    NSWindow *mainWindow = [NSApp mainWindow];
+    id firstResponder = keyWindow.firstResponder;
+    NSUInteger managedWindows = self.tabManager.windowControllers.count;
+    NSUInteger appWindows = NSApp.windows.count;
+
+    return [NSString stringWithFormat:@"active=%d keyWindow=%@ mainWindow=%@ firstResponder=%@ managedWindows=%lu appWindows=%lu",
+            NSApp.isActive,
+            keyWindow ? NSStringFromClass([keyWindow class]) : @"nil",
+            mainWindow ? NSStringFromClass([mainWindow class]) : @"nil",
+            firstResponder ? NSStringFromClass([firstResponder class]) : @"nil",
+            (unsigned long)managedWindows,
+            (unsigned long)appWindows];
+#else
+    return @"";
+#endif
+}
+
+- (void)applicationWillBecomeActive:(NSNotification *)notification
+{
+    self.uiDiagnosticsActivationStartTime = SAUIMonotonicTime();
+    SAUIDiagnosticLog(@"applicationWillBecomeActive context=%@", [self _uiDiagnosticsContext]);
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification
+{
+    NSTimeInterval now = SAUIMonotonicTime();
+    NSTimeInterval activationElapsed = self.uiDiagnosticsActivationStartTime > 0 ? now - self.uiDiagnosticsActivationStartTime : 0;
+    SAUIDiagnosticLog(@"applicationDidBecomeActive elapsedSinceWill=%.3fs context=%@", activationElapsed, [self _uiDiagnosticsContext]);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SAUIDiagnosticLog(@"applicationDidBecomeActive next-runloop context=%@", [self _uiDiagnosticsContext]);
+    });
+}
+
+- (void)applicationWillResignActive:(NSNotification *)notification
+{
+    SAUIDiagnosticLog(@"applicationWillResignActive context=%@", [self _uiDiagnosticsContext]);
+}
+
+- (void)applicationDidResignActive:(NSNotification *)notification
+{
+    SAUIDiagnosticLog(@"applicationDidResignActive context=%@", [self _uiDiagnosticsContext]);
+}
+
 /**
  * Initialisation stuff after launch is complete
  */
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 
     [FIRApp configure];
+    [self _startUIDiagnosticsWatchdog];
+    SAUIDiagnosticLog(@"applicationDidFinishLaunching context=%@", [self _uiDiagnosticsContext]);
 
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
     BOOL analyticsEnabled = [prefs boolForKey:SPSaveApplicationUsageAnalytics];
@@ -522,28 +672,48 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
  * Menu item validation.
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    NSTimeInterval validationStartTime = SAUIMonotonicTime();
+    BOOL isValid = YES;
     SEL action = [menuItem action];
     if (action == @selector(newWindow:) || action == @selector(openConnectionSheet:) || action == @selector(openStandaloneConnectionWindow:)) {
-        return YES;
+        isValid = YES;
+        goto validateMenuItemDone;
     }
     if (action == @selector(newTab:)) {
-        return ([[[self.tabManager activeWindowController] window] attachedSheet] == nil);
+        isValid = ([[[self.tabManager activeWindowController] window] attachedSheet] == nil);
+        goto validateMenuItemDone;
     }
     if (action == @selector(duplicateTab:)) {
-        return ([[self frontDocument] getConnection] != nil);
+        isValid = ([[self frontDocument] getConnection] != nil);
+        goto validateMenuItemDone;
     }
     if (action == @selector(openAboutPanel:) || action == @selector(openPreferences:) || action == @selector(visitWebsite:) || action == @selector(checkForNewVersionFromMenu)) {
-        return YES;
+        isValid = YES;
+        goto validateMenuItemDone;
     }
 
     if (action == @selector(visitHelpWebsite:) || action == @selector(visitFAQWebsite:) || action == @selector(viewKeyboardShortcuts:)) {
-        return YES;
+        isValid = YES;
+        goto validateMenuItemDone;
     }
 
     if (self.tabManager.activeWindowController.databaseDocument) {
-        return [self.tabManager.activeWindowController.databaseDocument validateMenuItem:menuItem];
+        isValid = [self.tabManager.activeWindowController.databaseDocument validateMenuItem:menuItem];
+        goto validateMenuItemDone;
     }
-    return YES;
+
+validateMenuItemDone:
+    {
+        NSTimeInterval validationElapsed = SAUIMonotonicTime() - validationStartTime;
+        if (validationElapsed >= 0.1) {
+            SAUIDiagnosticLog(@"slow validateMenuItem action=%@ elapsed=%.3fs result=%d context=%@",
+                    NSStringFromSelector(action),
+                    validationElapsed,
+                    isValid,
+                    [self _uiDiagnosticsContext]);
+        }
+    }
+    return isValid;
 }
 
 #pragma mark -
