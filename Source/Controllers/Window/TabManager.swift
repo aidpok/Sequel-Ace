@@ -53,13 +53,18 @@ import AppKit
     /// Falls back the first element if no window is main. Note that this would
     /// likely be an internal inconsistency we gracefully handle here.
     private var mainWindow: NSWindow? {
-        let mainManagedWindow = managedWindows.first { $0.window.isMainWindow }
+        if let mainManagedWindow = managedWindows.first(where: { $0.window.isMainWindow }) {
+            return mainManagedWindow.window
+        }
 
-        // In case we run into the inconsistency, let it crash in debug mode so we
-        // can fix our window management setup to prevent this from happening.
-        assert(mainManagedWindow != nil || managedWindows.isEmpty)
+        if let selectedTabWindows = NSApp.mainWindow?.tabGroup?.windows,
+           let selectedManagedWindow = managedWindows.first(where: { managedWindow in
+               selectedTabWindows.contains(where: { $0 === managedWindow.window })
+           }) {
+            return selectedManagedWindow.window
+        }
 
-        return (mainManagedWindow ?? managedWindows.first).map { $0.window }
+        return managedWindows.first?.window
     }
 
     // MARK: - Public properties
@@ -142,11 +147,12 @@ private extension TabManager {
         let newWindow = newManagement.window
 
         // In case user hits "+" in the UI in tab bar - system automatically creates a tab for us and adds it to the tabGroup - there is no way to avoid it and no way to work around it. In case user hits CMD+T or "New tab" in Menu, it's upon us to do so, so we add tabbed window manually
-        if managedWindows.first(where: { $0.window.isMainWindow }) != nil {
+        if managedWindows.first(where: { $0.window.isMainWindow }) != nil || window.tabGroup != nil {
             window.addTabbedWindow(newWindow, ordered: orderingMode)
         }
-        let index = window.tabGroup?.windows.firstIndex(of: newWindow) ?? 0
+        let index = managedWindowInsertIndex(for: newWindow, in: window.tabGroup?.windows)
         managedWindows.insert(newManagement, at: index)
+        window.tabGroup?.selectedWindow = newWindow
         newWindow.makeKeyAndOrderFront(nil)
     }
 
@@ -156,7 +162,7 @@ private extension TabManager {
         let newWindow = newManagement.window
 
         window.addChildWindow(newWindow, ordered: orderingMode)
-        let index = window.tabGroup?.windows.firstIndex(of: newWindow) ?? 0
+        let index = managedWindowInsertIndex(for: newWindow, in: window.tabGroup?.windows)
         managedWindows.insert(newManagement, at: index)
         newWindow.collectionBehavior = [newWindow.collectionBehavior, .participatesInCycle]
         newWindow.makeKeyAndOrderFront(nil)
@@ -175,6 +181,19 @@ private extension TabManager {
             self.removeManagedWindow(forWindow: window)
         }
         return ManagedWindow(windowController: windowController, window: window, closingSubscription: subscription)
+    }
+
+    private func managedWindowInsertIndex(for window: NSWindow, in tabWindows: [NSWindow]?) -> Int {
+        guard let tabWindows = tabWindows,
+              let tabIndex = tabWindows.firstIndex(of: window) else {
+            return 0
+        }
+
+        let managedTabWindows = tabWindows[..<tabIndex].filter { tabWindow in
+            managedWindows.contains(where: { $0.window === tabWindow })
+        }
+
+        return min(managedTabWindows.count, managedWindows.count)
     }
 
     func removeManagedWindow(forWindow window: NSWindow) {

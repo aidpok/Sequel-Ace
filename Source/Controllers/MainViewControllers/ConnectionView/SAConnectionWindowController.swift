@@ -109,20 +109,20 @@ import AppKit
     func connectionDidEstablish(_ connection: SPMySQLConnection, info: SAConnectionInfoObjC) {
         // 1. Create a new document tab via TabManager
         guard let appDelegate = NSApp.delegate as? SPAppController else { return }
-        let tabManager = appDelegate.tabManager
-        let windowController = tabManager?.newWindowForTab()
+        let windowController = appDelegate.tabManager.newWindowForTab()
 
-        guard let document = windowController?.databaseDocument else { return }
+        let document = windowController.databaseDocument
+        document.connectionController()?.applyConnectionInfo(info)
 
-        // 2. Hand off the established connection to the new document.
+        // Hand off the established connection to the new document.
         // setConnection: transitions the document out of connection mode
         // into the database UI (same as the embedded flow's addConnectionToDocument).
         document.setConnection(connection)
 
-        // 3. Mark handoff complete so windowWillClose doesn't cancel the connection
+        // Mark handoff complete so windowWillClose doesn't cancel the connection
         connectionHandedOff = true
 
-        // 4. Close the standalone connection window
+        // Close the standalone connection window
         close()
     }
 
@@ -217,5 +217,41 @@ extension SAConnectionWindowController: SADatabaseDocumentProviding {
 
     @objc func updateWindowTitle(_ sender: Any) {
         // Could update the window title with connection status if desired.
+    }
+}
+
+private extension SPConnectionController {
+
+    func applyConnectionInfo(_ info: SAConnectionInfoObjC) {
+        type = info.type.rawValue
+        name = info.name
+        host = info.host
+        user = info.user
+        password = info.password
+        database = info.database
+        socket = info.socket
+        port = info.port
+        colorIndex = info.colorIndex
+        useCompression = info.useCompression
+        timeZoneMode = SPConnectionTimeZoneMode(rawValue: info.timeZoneMode.rawValue)!
+        timeZoneIdentifier = info.timeZoneIdentifier
+        allowDataLocalInfile = info.allowDataLocalInfile
+        enableClearTextPlugin = info.enableClearTextPlugin
+        useAWSIAMAuth = info.useAWSIAMAuth
+        awsRegion = info.awsRegion
+        awsProfile = info.awsProfile
+        useSSL = info.useSSL
+        sslKeyFileLocationEnabled = info.sslKeyFileLocationEnabled
+        sslKeyFileLocation = info.sslKeyFileLocation
+        sslCertificateFileLocationEnabled = info.sslCertificateFileLocationEnabled
+        sslCertificateFileLocation = info.sslCertificateFileLocation
+        sslCACertFileLocationEnabled = info.sslCACertFileLocationEnabled
+        sslCACertFileLocation = info.sslCACertFileLocation
+        sshHost = info.sshHost
+        sshUser = info.sshUser
+        sshPassword = info.sshPassword
+        sshKeyLocationEnabled = info.sshKeyLocationEnabled
+        sshKeyLocation = info.sshKeyLocation
+        sshPort = info.sshPort
     }
 }

@@ -30,9 +30,11 @@ extension SPAppController {
 
     @IBAction func openStandaloneConnectionWindow(_ sender: Any) {
         let controller = SAConnectionWindowController()
+        Self.retainConnectionWindow(controller)
         controller.showWindow(sender)
+    }
 
-        // Retain the controller; remove when its window closes.
+    private static func retainConnectionWindow(_ controller: SAConnectionWindowController) {
         Self.standaloneConnectionWindows.append(controller)
         var token: NSObjectProtocol?
         token = NotificationCenter.default.addObserver(
