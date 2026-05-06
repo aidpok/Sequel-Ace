@@ -1712,7 +1712,7 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
 {
     if (queryLoadTimer) {
         [queryLoadTimer invalidate];
-        
+        queryLoadTimer = nil;
     }
 }
 

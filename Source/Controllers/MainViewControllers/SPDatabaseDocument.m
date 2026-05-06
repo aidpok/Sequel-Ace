@@ -1258,6 +1258,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // If the window has been fully faded in, clean up the timer.
     if (alphaValue == 1.0) {
         [taskDrawTimer invalidate];
+        taskDrawTimer = nil;
     }
 }
 
@@ -1368,6 +1369,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         if (taskDrawTimer) {
             SPLog(@"Cancel the draw timer if it exists");
             [taskDrawTimer invalidate];
+            taskDrawTimer = nil;
         }
 
         if (queryExecutionTimer) {
@@ -1376,6 +1378,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self showQueryExecutionTime];
             SPLog(@"queryExecutionTimer invalidate");
             [queryExecutionTimer invalidate];
+            queryExecutionTimer = nil;
         }
 
         // Hide the task interface and reset to indeterminate
@@ -6575,9 +6578,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
             if (taskDrawTimer) {
                 [taskDrawTimer invalidate];
+                taskDrawTimer = nil;
             }
             if (queryExecutionTimer) {
                 [queryExecutionTimer invalidate];
+                queryExecutionTimer = nil;
             }
         }
     }

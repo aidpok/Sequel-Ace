@@ -1180,7 +1180,7 @@ static id configureDataCell(SPTableContent *tc, NSDictionary *colDefs, NSString 
 {
 	if (tableLoadTimer) {
 		[tableLoadTimer invalidate];
-		
+		tableLoadTimer = nil;
 	}
 }
 

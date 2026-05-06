@@ -77,6 +77,18 @@
     }
 }
 
+- (void)viewDidHide
+{
+	[super viewDidHide];
+	[self actuallyStopAnimation];
+}
+
+- (void)viewDidUnhide
+{
+	[super viewDidUnhide];
+	if (_isAnimating) [self actuallyStartAnimation];
+}
+
 - (void)drawRect:(NSRect)rect
 {
 	NSInteger i;
@@ -155,6 +167,11 @@
 
 - (void)updateFrame:(NSTimer *)timer;
 {
+	if (!_isAnimating || ![self window] || [self isHiddenOrHasHiddenAncestor]) {
+		[self actuallyStopAnimation];
+		return;
+	}
+
     if(_position > 0) {
         _position--;
     }
@@ -209,7 +226,7 @@
     // Just to be safe kill any existing timer.
     [self actuallyStopAnimation];
 
-    if ([self window]) {
+    if ([self window] && ![self isHiddenOrHasHiddenAncestor]) {
         // Why animate if not visible?  viewDidMoveToWindow will re-call this method when needed.
         if (_usesThreadedAnimation) {
             _animationThread = [[NSThread alloc] initWithTarget:self selector:@selector(animateInBackgroundThread) object:nil];
@@ -245,7 +262,9 @@
         [_animationTimer invalidate];
         _animationTimer = nil;
     }
-    [self setNeedsDisplay:YES];
+    if ([self window] && ![self isHiddenOrHasHiddenAncestor]) {
+        [self setNeedsDisplay:YES];
+    }
 }
 
 # pragma mark Not Implemented
@@ -295,8 +314,8 @@
 {
     if (_drawBackground != value) {
         _drawBackground = value;
+		[self setNeedsDisplay:YES];
     }
-    [self setNeedsDisplay:YES];
 }
 
 - (NSShadow *)shadow
@@ -319,6 +338,7 @@
 
 - (void)setIndeterminate:(BOOL)isIndeterminate
 {
+	if (_isIndeterminate == isIndeterminate) return;
 	_isIndeterminate = isIndeterminate;
 	if (!_isIndeterminate && _isAnimating) [self stopAnimation:self];
     [self setNeedsDisplay:YES];
@@ -335,6 +355,7 @@
     if (_isIndeterminate) {
         [self setIndeterminate:NO];
     }
+	if (_currentValue == doubleValue) return;
 	_currentValue = doubleValue;
 	[self setNeedsDisplay:YES];
 }
@@ -350,6 +371,7 @@
 
 - (void)setMaxValue:(double)maxValue
 {
+	if (_maxValue == maxValue) return;
 	_maxValue = maxValue;
     [self setNeedsDisplay:YES];
 }
