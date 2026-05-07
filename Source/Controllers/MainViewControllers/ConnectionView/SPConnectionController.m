@@ -2494,7 +2494,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     SPLog(@"addConnectionToDocument");
     // Restore the database content view via coordinator
-    [self.viewCoordinator restoreDatabaseViewRemovingConnectionView:connectionView];
+    [self restoreDatabaseView];
 
     // Restore the toolbar icons
     NSArray *toolbarItems = [[[dbDocument parentWindowControllerWindow] toolbar] items];
@@ -2510,6 +2510,11 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         // Legacy path: pass the connection directly to the document.
         [dbDocument setConnection:mySQLConnection];
     }
+}
+
+- (void)restoreDatabaseView
+{
+    [self.viewCoordinator restoreDatabaseViewRemovingConnectionView:connectionView];
 }
 
 /**

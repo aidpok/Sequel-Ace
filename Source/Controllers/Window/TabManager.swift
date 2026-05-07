@@ -128,7 +128,7 @@ import AppKit
     }
 
     @objc func windowControllerWithDocument(processID: String) -> SPWindowController? {
-        return managedWindows.first(where: { $0.windowController.databaseDocument.processID == processID })?.windowController
+        return managedWindows.first(where: { $0.windowController.loadedDatabaseDocumentIfAvailable()?.processID == processID })?.windowController
     }
 }
 

@@ -334,6 +334,10 @@
 	NSUInteger i, j, viewCount = [[self subviews] count];
 	CGFloat dividerThickness = [self dividerThickness];
 
+	if (viewCount == 0) {
+		return;
+	}
+
 	// Amend the total length by non-hidden dividers
 	for (i = 0; i < viewCount - 1; i++) {
 		if (![self splitView:self shouldHideDividerAtIndex:i]) {
@@ -704,7 +708,9 @@
 	NSUInteger l = [[self subviews] count];
 	viewMinimumSizes = [[NSMutableArray alloc] initWithCapacity:l];
 	viewMaximumSizes = [[NSMutableArray alloc] initWithCapacity:l];
-	[self _ensureDefaultSubviewSizesToIndex:l-1];
+	if (l > 0) {
+		[self _ensureDefaultSubviewSizesToIndex:l-1];
+	}
 
 	delegate = (id<NSSplitViewDelegate, AllowSplitViewResizing>)[super delegate];
 	
@@ -717,6 +723,10 @@
  */
 - (void)_ensureDefaultSubviewSizesToIndex:(NSUInteger)anIndex
 {
+	if (anIndex == NSNotFound) {
+		return;
+	}
+
 	if ([viewMinimumSizes count] > anIndex) {
 		return;
 	}
@@ -1121,4 +1131,3 @@
 }
 
 @end
-

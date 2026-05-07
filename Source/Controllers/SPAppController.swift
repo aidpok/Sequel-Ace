@@ -85,35 +85,35 @@ extension SPAppController {
     // MARK: View menu actions
 
     @IBAction func viewStructure(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewStructure()
+        tabManager.activeWindowController?.viewStructure()
     }
 
     @IBAction func viewContent(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewContent()
+        tabManager.activeWindowController?.viewContent()
     }
 
     @IBAction func viewQuery(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewQuery()
+        tabManager.activeWindowController?.viewQuery()
     }
 
     @IBAction func viewStatus(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewStatus()
+        tabManager.activeWindowController?.viewStatus()
     }
 
     @IBAction func viewRelations(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewRelations()
+        tabManager.activeWindowController?.viewRelations()
     }
 
     @IBAction func viewTriggers(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.viewTriggers()
+        tabManager.activeWindowController?.viewTriggers()
     }
 
     @IBAction func backForwardInHistory(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.backForwardInHistory(sender)
+        tabManager.activeWindowController?.backForwardInHistory(sender)
     }
 
     @IBAction func toggleConsole(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.toggleConsole()
+        tabManager.activeWindowController?.showConsole()
     }
 
     @IBAction func toggleNavigator(_ sender: Any) {

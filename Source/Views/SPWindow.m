@@ -140,7 +140,10 @@
  */
 - (NSUndoManager *)undoManager {
     if ([[self windowController] isKindOfClass:[SPWindowController class]]) {
-		return [[(SPWindowController *)[self windowController] databaseDocument] undoManager];
+		SPDatabaseDocument *databaseDocument = [(SPWindowController *)[self windowController] loadedDatabaseDocumentIfAvailable];
+		if (databaseDocument) {
+			return [databaseDocument undoManager];
+		}
 
 	}
 	return [super undoManager];

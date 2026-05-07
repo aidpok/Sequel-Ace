@@ -339,6 +339,7 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 
 - (void)mySQLConnectionEstablished;
 - (void)addConnectionToDocument;
+- (void)restoreDatabaseView;
 
 - (void)failConnectionWithTitle:(NSString *)theTitle errorMessage:(NSString *)theErrorMessage detail:(NSString *)errorDetail;
 

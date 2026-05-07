@@ -675,6 +675,7 @@ static NSTimeInterval SAUIMonotonicTime(void)
     NSTimeInterval validationStartTime = SAUIMonotonicTime();
     BOOL isValid = YES;
     SEL action = [menuItem action];
+    SPDatabaseDocument *activeDocument = nil;
     if (action == @selector(newWindow:) || action == @selector(openConnectionSheet:) || action == @selector(openStandaloneConnectionWindow:)) {
         isValid = YES;
         goto validateMenuItemDone;
@@ -697,8 +698,9 @@ static NSTimeInterval SAUIMonotonicTime(void)
         goto validateMenuItemDone;
     }
 
-    if (self.tabManager.activeWindowController.databaseDocument) {
-        isValid = [self.tabManager.activeWindowController.databaseDocument validateMenuItem:menuItem];
+    activeDocument = [self.tabManager.activeWindowController loadedDatabaseDocumentIfAvailable];
+    if (activeDocument) {
+        isValid = [activeDocument validateMenuItem:menuItem];
         goto validateMenuItemDone;
     }
 
@@ -1550,7 +1552,7 @@ validateMenuItemDone:
  * Retrieve the frontmost document; returns nil if not found.
  */
 - (SPDatabaseDocument *)frontDocument {
-    return [[self.tabManager activeWindowController] databaseDocument];
+    return [[self.tabManager activeWindowController] loadedDatabaseDocumentIfAvailable];
 }
 
 - (NSDictionary *)spfSessionDocData
