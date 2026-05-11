@@ -89,6 +89,10 @@ final class SALightweightStructureViewController: NSViewController {
     private var indexes: [[String: String]] = []
     private var loadToken = UUID()
     private var isSaving = false
+    private var didSetInitialTablesIndexesSplitPosition = false
+
+    private let tablesIndexesSplitView = SPSplitView(frame: .zero)
+    private let indexesHeaderView = NSView(frame: .zero)
 
     private lazy var structureFilterField: NSSearchField = {
         let field = NSSearchField(frame: .zero)
@@ -110,6 +114,10 @@ final class SALightweightStructureViewController: NSViewController {
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.style = .plain
+        tableView.allowsExpansionToolTips = true
+        tableView.intercellSpacing = NSSize(width: 3, height: 2)
+        tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
         tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
 
@@ -150,6 +158,14 @@ final class SALightweightStructureViewController: NSViewController {
         return label
     }()
 
+    private lazy var indexesGrabberView: NSImageView = {
+        let imageView = NSImageView(frame: .zero)
+        imageView.image = NSImage(named: NSImage.Name("grabber-horizontal"))
+        imageView.imageScaling = .scaleNone
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        return imageView
+    }()
+
     private lazy var indexesTableView: NSTableView = {
         let tableView = NSTableView(frame: .zero)
         tableView.identifier = NSUserInterfaceItemIdentifier("IndexesTable")
@@ -160,6 +176,10 @@ final class SALightweightStructureViewController: NSViewController {
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.style = .plain
+        tableView.allowsExpansionToolTips = true
+        tableView.intercellSpacing = NSSize(width: 3, height: 2)
+        tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
         tableView.rowHeight = structureTableView.rowHeight
 
@@ -180,23 +200,29 @@ final class SALightweightStructureViewController: NSViewController {
         return tableView
     }()
 
-    private lazy var addFieldButton = toolbarButton(title: "+", action: #selector(addField(_:)))
-    private lazy var removeFieldButton = toolbarButton(title: "-", action: #selector(removeField(_:)))
-    private lazy var duplicateFieldButton = toolbarButton(title: "+", action: #selector(duplicateField(_:)))
-    private lazy var reloadFieldsButton = toolbarButton(title: "↻", action: #selector(reloadTable(_:)))
-    private lazy var addIndexButton = toolbarButton(title: "+", action: #selector(addIndex(_:)))
-    private lazy var removeIndexButton = toolbarButton(title: "-", action: #selector(removeIndex(_:)))
-    private lazy var refreshIndexesButton = toolbarButton(title: "↻", action: #selector(reloadTable(_:)))
+    private lazy var addFieldButton = toolbarButton(imageName: "NSAddTemplate", toolTip: NSLocalizedString("Add field (⌥⌘A)", comment: "add field tooltip"), keyEquivalent: "a", modifierMask: [.command, .option], action: #selector(addField(_:)))
+    private lazy var removeFieldButton = toolbarButton(imageName: "NSRemoveTemplate", toolTip: NSLocalizedString("Delete selected field (⌫)", comment: "remove field tooltip"), keyEquivalent: "\u{7F}", action: #selector(removeField(_:)))
+    private lazy var duplicateFieldButton = toolbarButton(imageName: "button_duplicateTemplate", toolTip: NSLocalizedString("Duplicate selected field (⌘D)", comment: "duplicate field tooltip"), keyEquivalent: "d", modifierMask: .command, action: #selector(duplicateField(_:)))
+    private lazy var reloadFieldsButton = toolbarButton(imageName: "NSRefreshTemplate", toolTip: NSLocalizedString("Refresh table structure (⌘R)", comment: "refresh structure tooltip"), keyEquivalent: "r", modifierMask: .command, action: #selector(reloadTable(_:)))
+    private lazy var addIndexButton = toolbarButton(imageName: "NSAddTemplate", toolTip: NSLocalizedString("Add index", comment: "add index tooltip"), action: #selector(addIndex(_:)))
+    private lazy var removeIndexButton = toolbarButton(imageName: "NSRemoveTemplate", toolTip: NSLocalizedString("Delete selected index", comment: "remove index tooltip"), action: #selector(removeIndex(_:)))
+    private lazy var refreshIndexesButton = toolbarButton(imageName: "NSRefreshTemplate", toolTip: NSLocalizedString("Refresh table indexes (⌘R)", comment: "refresh indexes tooltip"), keyEquivalent: "r", modifierMask: .command, action: #selector(reloadTable(_:)))
 
     override func loadView() {
         let rootView = NSView(frame: .zero)
 
+        tablesIndexesSplitView.dividerStyle = .thin
+        tablesIndexesSplitView.isVertical = false
+        tablesIndexesSplitView.delegate = self
+
         let structurePane = NSView(frame: .zero)
-        structurePane.translatesAutoresizingMaskIntoConstraints = false
         let structureScrollView = NSScrollView(frame: .zero)
+        structureScrollView.borderType = .noBorder
+        structureScrollView.focusRingType = .none
         structureScrollView.hasVerticalScroller = true
         structureScrollView.hasHorizontalScroller = true
         structureScrollView.autohidesScrollers = true
+        structureScrollView.contentView.drawsBackground = false
         structureScrollView.documentView = structureTableView
         structureScrollView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -204,37 +230,42 @@ final class SALightweightStructureViewController: NSViewController {
         structurePane.addSubview(structureFilterField)
         structurePane.addSubview(structureScrollView)
         structurePane.addSubview(structureToolbar)
-        rootView.addSubview(structurePane)
+        tablesIndexesSplitView.addSubview(structurePane)
 
         let indexPane = NSView(frame: .zero)
-        indexPane.translatesAutoresizingMaskIntoConstraints = false
         let indexScrollView = NSScrollView(frame: .zero)
+        indexScrollView.borderType = .noBorder
+        indexScrollView.focusRingType = .none
         indexScrollView.hasVerticalScroller = true
         indexScrollView.hasHorizontalScroller = true
         indexScrollView.autohidesScrollers = true
+        indexScrollView.contentView.drawsBackground = false
         indexScrollView.documentView = indexesTableView
         indexScrollView.translatesAutoresizingMaskIntoConstraints = false
 
         let indexToolbar = toolbarView(buttons: [addIndexButton, removeIndexButton, refreshIndexesButton])
-        indexPane.addSubview(indexesLabel)
+        indexesHeaderView.addSubview(indexesLabel)
+        indexesHeaderView.addSubview(indexesGrabberView)
+        indexPane.addSubview(indexesHeaderView)
         indexPane.addSubview(indexScrollView)
         indexPane.addSubview(indexToolbar)
-        rootView.addSubview(indexPane)
+        tablesIndexesSplitView.addSubview(indexPane)
+        rootView.addSubview(tablesIndexesSplitView)
+        tablesIndexesSplitView.setMinSize(130, ofSubviewAt: 0)
+        tablesIndexesSplitView.setMinSize(130, ofSubviewAt: 1)
+        tablesIndexesSplitView.setAdditionalDragHandle(indexesHeaderView)
 
+        tablesIndexesSplitView.translatesAutoresizingMaskIntoConstraints = false
+        indexesHeaderView.translatesAutoresizingMaskIntoConstraints = false
         structureFilterField.translatesAutoresizingMaskIntoConstraints = false
         structureToolbar.translatesAutoresizingMaskIntoConstraints = false
         indexToolbar.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            structurePane.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            structurePane.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            structurePane.topAnchor.constraint(equalTo: rootView.topAnchor),
-            structurePane.bottomAnchor.constraint(equalTo: indexPane.topAnchor),
-
-            indexPane.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            indexPane.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            indexPane.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
-            indexPane.heightAnchor.constraint(equalToConstant: 210),
+            tablesIndexesSplitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            tablesIndexesSplitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            tablesIndexesSplitView.topAnchor.constraint(equalTo: rootView.topAnchor),
+            tablesIndexesSplitView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
 
             structureFilterField.leadingAnchor.constraint(equalTo: structurePane.leadingAnchor, constant: 4),
             structureFilterField.trailingAnchor.constraint(equalTo: structurePane.trailingAnchor, constant: -4),
@@ -251,14 +282,22 @@ final class SALightweightStructureViewController: NSViewController {
             structureToolbar.bottomAnchor.constraint(equalTo: structurePane.bottomAnchor),
             structureToolbar.heightAnchor.constraint(equalToConstant: 26),
 
-            indexesLabel.leadingAnchor.constraint(equalTo: indexPane.leadingAnchor, constant: 6),
-            indexesLabel.trailingAnchor.constraint(equalTo: indexPane.trailingAnchor, constant: -6),
-            indexesLabel.topAnchor.constraint(equalTo: indexPane.topAnchor, constant: 3),
-            indexesLabel.heightAnchor.constraint(equalToConstant: 17),
+            indexesHeaderView.leadingAnchor.constraint(equalTo: indexPane.leadingAnchor),
+            indexesHeaderView.trailingAnchor.constraint(equalTo: indexPane.trailingAnchor),
+            indexesHeaderView.topAnchor.constraint(equalTo: indexPane.topAnchor),
+            indexesHeaderView.heightAnchor.constraint(equalToConstant: 20),
+
+            indexesLabel.leadingAnchor.constraint(equalTo: indexesHeaderView.leadingAnchor, constant: 6),
+            indexesLabel.centerYAnchor.constraint(equalTo: indexesHeaderView.centerYAnchor),
+
+            indexesGrabberView.trailingAnchor.constraint(equalTo: indexesHeaderView.trailingAnchor, constant: -7),
+            indexesGrabberView.centerYAnchor.constraint(equalTo: indexesHeaderView.centerYAnchor),
+            indexesGrabberView.widthAnchor.constraint(equalToConstant: 10),
+            indexesGrabberView.heightAnchor.constraint(equalToConstant: 13),
 
             indexScrollView.leadingAnchor.constraint(equalTo: indexPane.leadingAnchor),
             indexScrollView.trailingAnchor.constraint(equalTo: indexPane.trailingAnchor),
-            indexScrollView.topAnchor.constraint(equalTo: indexesLabel.bottomAnchor),
+            indexScrollView.topAnchor.constraint(equalTo: indexesHeaderView.bottomAnchor),
             indexScrollView.bottomAnchor.constraint(equalTo: indexToolbar.topAnchor),
 
             indexToolbar.leadingAnchor.constraint(equalTo: indexPane.leadingAnchor),
@@ -268,6 +307,16 @@ final class SALightweightStructureViewController: NSViewController {
         ])
 
         view = rootView
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+
+        if !didSetInitialTablesIndexesSplitPosition && tablesIndexesSplitView.bounds.height > 0 {
+            let initialDividerPosition = max(130, tablesIndexesSplitView.bounds.height - 202)
+            tablesIndexesSplitView.setPosition(initialDividerPosition, ofDividerAt: 0)
+            didSetInitialTablesIndexesSplitPosition = true
+        }
     }
 
     func loadStructure(for table: String, database: String, connection: SPMySQLConnection) {
@@ -324,7 +373,7 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func loadIndexes(table: String, connection: SPMySQLConnection) -> [[String: String]] {
-        let result = connection.queryString("SHOW INDEX FROM \(Self.backtickQuoted(table))")
+        let result = connection.queryString("SHOW INDEX FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))")
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -444,7 +493,7 @@ final class SALightweightStructureViewController: NSViewController {
         if row.isNew {
             query = addColumnQuery(for: row, at: index)
         } else {
-            query = "ALTER TABLE \(Self.backtickQuoted(table)) CHANGE \(Self.backtickQuoted(oldRow.originalName ?? oldRow.name)) \(columnDefinition(for: row))"
+            query = "ALTER TABLE \(tableReference()) CHANGE \(Self.backtickQuoted(oldRow.originalName ?? oldRow.name)) \(columnDefinition(for: row))"
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -470,7 +519,7 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func addColumnQuery(for row: StructureRow, at index: Int) -> String {
-        var query = "ALTER TABLE \(Self.backtickQuoted(table)) ADD \(columnDefinition(for: row))"
+        var query = "ALTER TABLE \(tableReference()) ADD \(columnDefinition(for: row))"
         if index == 0 {
             query += " FIRST"
         } else if index - 1 < rows.count {
@@ -590,10 +639,10 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func updateButtonState() {
         let hasStructureSelection = structureTableView.selectedRow >= 0
-        removeFieldButton.isEnabled = hasStructureSelection && rows.count > 1
-        duplicateFieldButton.isEnabled = hasStructureSelection
-        removeIndexButton.isEnabled = indexesTableView.selectedRow >= 0
-        addIndexButton.isEnabled = hasStructureSelection
+        removeFieldButton.isEnabled = !isSaving && hasStructureSelection && rows.count > 1
+        duplicateFieldButton.isEnabled = !isSaving && hasStructureSelection
+        removeIndexButton.isEnabled = !isSaving && indexesTableView.selectedRow >= 0
+        addIndexButton.isEnabled = !isSaving && !rows.isEmpty
     }
 
     private func isStructureTable(_ tableView: NSTableView) -> Bool {
@@ -604,12 +653,15 @@ final class SALightweightStructureViewController: NSViewController {
         return tableView.identifier?.rawValue == "IndexesTable"
     }
 
-    private func toolbarButton(title: String, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .texturedRounded
-        button.isBordered = false
-        button.font = NSFont.systemFont(ofSize: 15)
-        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+    private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
+        let button = NSButton(image: NSImage(named: NSImage.Name(imageName)) ?? NSImage(), target: self, action: action)
+        button.bezelStyle = .smallSquare
+        button.imagePosition = .imageOnly
+        button.toolTip = toolTip
+        button.keyEquivalent = keyEquivalent
+        button.keyEquivalentModifierMask = modifierMask
+        button.contentTintColor = .labelColor
+        button.widthAnchor.constraint(equalToConstant: 25).isActive = true
         return button
     }
 
@@ -646,6 +698,10 @@ final class SALightweightStructureViewController: NSViewController {
 
     private static func backtickQuoted(_ value: String) -> String {
         return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
+    }
+
+    private func tableReference() -> String {
+        return "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
     }
 }
 
@@ -711,7 +767,7 @@ private extension SALightweightStructureViewController {
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            let query = "ALTER TABLE \(Self.backtickQuoted(self.table)) DROP \(Self.backtickQuoted(row.name))"
+            let query = "ALTER TABLE \(self.tableReference()) DROP \(Self.backtickQuoted(row.name))"
             connection.queryString(query)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
@@ -733,7 +789,7 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func addIndex(_ sender: Any?) {
-        let selectedRow = structureTableView.selectedRow
+        let selectedRow = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow : 0
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), let connection = connection else { return }
         let field = rows[sourceIndex].name
 
@@ -758,7 +814,7 @@ private extension SALightweightStructureViewController {
 
         let type = typePopup.titleOfSelectedItem ?? "INDEX"
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        var query = "ALTER TABLE \(Self.backtickQuoted(table)) ADD \(type)"
+        var query = "ALTER TABLE \(tableReference()) ADD \(type)"
         if type != "PRIMARY KEY", !name.isEmpty {
             query += " \(Self.backtickQuoted(name))"
         }
@@ -796,8 +852,8 @@ private extension SALightweightStructureViewController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         let query = indexName == "PRIMARY"
-            ? "ALTER TABLE \(Self.backtickQuoted(table)) DROP PRIMARY KEY"
-            : "ALTER TABLE \(Self.backtickQuoted(table)) DROP INDEX \(Self.backtickQuoted(indexName))"
+            ? "ALTER TABLE \(tableReference()) DROP PRIMARY KEY"
+            : "ALTER TABLE \(tableReference()) DROP INDEX \(Self.backtickQuoted(indexName))"
 
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -908,7 +964,7 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
 
         let movingRow = rows[sourceIndex]
         let destinationIndex = max(0, min(destinationRow, rows.count))
-        var query = "ALTER TABLE \(Self.backtickQuoted(table)) MODIFY COLUMN \(columnDefinition(for: movingRow))"
+        var query = "ALTER TABLE \(tableReference()) MODIFY COLUMN \(columnDefinition(for: movingRow))"
         if destinationIndex == 0 {
             query += " FIRST"
         } else {
@@ -936,5 +992,19 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
         }
 
         return true
+    }
+}
+
+extension SALightweightStructureViewController: NSSplitViewDelegate {
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        return true
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return proposedMaximumPosition - 130
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return proposedMinimumPosition + 130
     }
 }

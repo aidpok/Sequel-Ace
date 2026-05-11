@@ -750,7 +750,8 @@
 	}
 
     id<NSWindowDelegate> windowController = [[NSApp keyWindow] delegate];
-    if ([windowController isKindOfClass:[SPWindowController class]] && [[[(SPWindowController *)windowController databaseDocument] connectionID] isEqualToString:@"_"]) {
+    SPDatabaseDocument *databaseDocument = [windowController isKindOfClass:[SPWindowController class]] ? [(SPWindowController *)windowController loadedDatabaseDocumentIfAvailable] : nil;
+    if ([[databaseDocument connectionID] isEqualToString:@"_"]) {
         return menu;
     }
 

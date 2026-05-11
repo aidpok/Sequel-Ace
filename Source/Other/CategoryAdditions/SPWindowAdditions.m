@@ -29,7 +29,6 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPWindowAdditions.h"
-#import "SPDatabaseDocument.h"
 
 #import "sequel-ace-Swift.h"
 
@@ -72,17 +71,15 @@
 {
 	if (![[self delegate] isKindOfClass:[SPWindowController class]]) return;
 
-	id frontDoc = [(SPWindowController *)[self delegate] databaseDocument];
+	NSMenuItem *historyItem = [[NSMenuItem alloc] init];
 
-	if (frontDoc && [frontDoc isKindOfClass:[SPDatabaseDocument class]] && [frontDoc valueForKeyPath:@"spHistoryControllerInstance"] && ![frontDoc isWorking])
-	{
-#warning Private ivar accessed from outside (#2978)
-		if ([event deltaX] == -1.0f) {
-			[[frontDoc valueForKeyPath:@"spHistoryControllerInstance"] valueForKey:@"goForwardInHistory"];
-		}
-		else if ([event deltaX] == 1.0f) {
-			[[frontDoc valueForKeyPath:@"spHistoryControllerInstance"] valueForKey:@"goBackInHistory"];
-		}
+	if ([event deltaX] == -1.0f) {
+		[historyItem setTag:1];
+		[(SPWindowController *)[self delegate] backForwardInHistory:historyItem];
+	}
+	else if ([event deltaX] == 1.0f) {
+		[historyItem setTag:0];
+		[(SPWindowController *)[self delegate] backForwardInHistory:historyItem];
 	}
 }
 

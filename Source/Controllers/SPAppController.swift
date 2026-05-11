@@ -77,9 +77,15 @@ extension SPAppController {
 
     // Override default "CMD+F" for find and if we are on content view, perform Show filter
     @IBAction func performFindPanelAction(_ sender: Any) {
-        if tabManager.activeWindowController?.databaseDocument.currentlySelectedView() == .content {
-            tabManager.activeWindowController?.databaseDocument.focusOnTableContentFilter()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            if document.currentlySelectedView() == .content {
+                document.focusOnTableContentFilter()
+            }
+            return
         }
+
+        windowController.focusActiveLightweightContentFilter()
     }
 
     // MARK: View menu actions
@@ -123,7 +129,13 @@ extension SPAppController {
     // MARK: Database menu actions
 
     @IBAction func showGotoDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showGotoDatabase()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showGotoDatabase()
+            return
+        }
+
+        windowController.showLegacyGotoDatabase()
     }
 
     @IBAction func addDatabase(_ sender: Any) {
@@ -147,7 +159,13 @@ extension SPAppController {
     }
 
     @IBAction func refreshTables(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.refreshTables()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.refreshTables()
+            return
+        }
+
+        windowController.refreshLightweightTables()
     }
 
     @IBAction func flushPrivileges(_ sender: Any) {
@@ -155,7 +173,13 @@ extension SPAppController {
     }
 
     @IBAction func setDatabases(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.setDatabases()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.setDatabases()
+            return
+        }
+
+        windowController.refreshLightweightDatabases()
     }
 
     @IBAction func showUserManager(_ sender: Any) {
@@ -185,53 +209,93 @@ extension SPAppController {
     // MARK: Table menu actions
 
     @IBAction func focusOnTableContentFilter(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.focusOnTableContentFilter()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.focusOnTableContentFilter()
+            return
+        }
+
+        windowController.focusLightweightContentFilter()
     }
 
     @IBAction func showFilterTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showFilterTable()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showFilterTable()
+            return
+        }
+
+        windowController.showLightweightFilterTable()
     }
 
     @IBAction func makeTableListFilterHaveFocus(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.makeTableListFilterHaveFocus(nil)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.makeTableListFilterHaveFocus(nil)
+            return
+        }
+
+        windowController.focusLightweightTableFilter()
     }
 
     @IBAction func copyCreateTableSyntax(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.copyCreateTableSyntax(nil)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.copyCreateTableSyntax(nil)
+            return
+        }
+
+        windowController.copyLightweightCreateTableSyntax(sender)
     }
 
     @IBAction func showCreateTableSyntax(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showCreateTableSyntax(nil)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showCreateTableSyntax(nil)
+            return
+        }
+
+        windowController.showLightweightCreateTableSyntax(sender)
     }
 
     @IBAction func checkTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.checkTable()
+        performTableMaintenanceAction(legacy: { $0.checkTable() }, lightweight: { $0.checkLightweightTable() })
     }
 
     @IBAction func repairTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.repairTable()
+        performTableMaintenanceAction(legacy: { $0.repairTable() }, lightweight: { $0.repairLightweightTable() })
     }
 
     @IBAction func analyzeTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.analyzeTable()
+        performTableMaintenanceAction(legacy: { $0.analyzeTable() }, lightweight: { $0.analyzeLightweightTable() })
     }
 
     @IBAction func optimizeTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.optimizeTable()
+        performTableMaintenanceAction(legacy: { $0.optimizeTable() }, lightweight: { $0.optimizeLightweightTable() })
     }
 
     @IBAction func flushTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.flushTable()
+        performTableMaintenanceAction(legacy: { $0.flushTable() }, lightweight: { $0.flushLightweightTable() })
     }
 
     @IBAction func checksumTable(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.checksumTable()
+        performTableMaintenanceAction(legacy: { $0.checksumTable() }, lightweight: { $0.checksumLightweightTable() })
     }
 
     // MARK: Help menu actions
 
     @IBAction func showMySQLHelp(_ sender: Any) {
         tabManager.activeWindowController?.databaseDocument.showMySQLHelp()
+    }
+
+    private func performTableMaintenanceAction(legacy: (SPDatabaseDocument) -> Void, lightweight: (SPWindowController) -> Void) {
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            legacy(document)
+            return
+        }
+
+        lightweight(windowController)
     }
 }
 

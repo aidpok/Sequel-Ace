@@ -246,7 +246,10 @@
 		51B09FE72F768E39003BAFFF /* SAConnectionViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51B09FE62F768E39003BAFFF /* SAConnectionViewCoordinator.swift */; };
 		51B09FEC2F7696C7003BAFFF /* SAConnectionWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51B09FEB2F7696C7003BAFFF /* SAConnectionWindowController.swift */; };
 		51BC153325BE13C400F1CDC9 /* SALightweightContentViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */; };
+		51BC153525BE13C400F1CDC9 /* SALightweightQueryViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */; };
 		51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */; };
+		51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */; };
+		51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */; };
 		51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */; };
 		51BB391C25F82B060048CA69 /* SPAppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BB391B25F82B060048CA69 /* SPAppController.swift */; };
 		51BC14F825BE135500F1CDC9 /* SPWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC14F725BE135500F1CDC9 /* SPWindowController.swift */; };
@@ -963,7 +966,10 @@
 		51BB3E0425AEF0D7005AAE44 /* zh-Hant */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		51BC14F725BE135500F1CDC9 /* SPWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPWindowController.swift; sourceTree = "<group>"; };
 		51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightContentViewController.swift; sourceTree = "<group>"; };
+		51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightQueryViewController.swift; sourceTree = "<group>"; };
 		51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightStructureViewController.swift; sourceTree = "<group>"; };
+		51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightTableInfoViewController.swift; sourceTree = "<group>"; };
+		51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightMetadataViewController.swift; sourceTree = "<group>"; };
 		51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SADatabaseToolbarController.swift; sourceTree = "<group>"; };
 		51BC150525BE13C400F1CDC9 /* NSViewExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NSViewExtension.swift; sourceTree = "<group>"; };
 		51C04C98261E4CF5001F5554 /* pt-BR */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "pt-BR"; path = "pt-BR.lproj/Localizable.strings"; sourceTree = "<group>"; };
@@ -1689,7 +1695,10 @@
 				5132930925F586A900D803AD /* NotificationToken.swift */,
 				51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */,
 				51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */,
+				51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */,
 				51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */,
+				51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */,
+				51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */,
 				51BC14F725BE135500F1CDC9 /* SPWindowController.swift */,
 				5132930A25F586A900D803AD /* TabManager.swift */,
 			);
@@ -3159,7 +3168,10 @@
 				3876E15D1CC0BA0300D85154 /* SPTableFooterPopUpButtonCell.m in Sources */,
 				51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */,
 				51BC153325BE13C400F1CDC9 /* SALightweightContentViewController.swift in Sources */,
+				51BC153525BE13C400F1CDC9 /* SALightweightQueryViewController.swift in Sources */,
 				51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */,
+				51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */,
+				51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */,
 				51BC14F825BE135500F1CDC9 /* SPWindowController.swift in Sources */,
 				173C4366104455E0001F3A30 /* SPQueryFavoriteManager.m in Sources */,
 				FD6DFF872ADB40630057B713 /* SPTableHistoryManager.swift in Sources */,

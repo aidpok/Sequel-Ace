@@ -83,6 +83,13 @@ final class SADatabaseToolbarController: NSObject {
         }
     }
 
+    func setHistoryNavigationEnabled(canGoBack: Bool, canGoForward: Bool) {
+        historyControl.isEnabled = canGoBack || canGoForward
+        historyControl.setEnabled(canGoBack, forSegment: 0)
+        historyControl.setEnabled(canGoForward, forSegment: 1)
+        toolbar.items.first(where: { $0.itemIdentifier == .historyNavigation })?.isEnabled = canGoBack || canGoForward
+    }
+
     func showDatabaseLoadingState() {
         databasePopUpButton.removeAllItems()
         databasePopUpButton.addItem(withTitle: NSLocalizedString("Loading Databases...", comment: "lightweight database shell database loading item"))

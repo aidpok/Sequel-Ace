@@ -105,7 +105,7 @@
 	SPDatabaseDocument *parentTableDocument = nil;
 	
 	if ([[[[[self window] delegate] class] description] isEqualToString:@"SPWindowController"]) {
-		parentTableDocument = [(SPWindowController *)[[self window] delegate] databaseDocument];
+		parentTableDocument = [(SPWindowController *)[[self window] delegate] loadedDatabaseDocumentIfAvailable];
 	}
 
 	// If SPDatabaseDocument is performing a task suppress any context menu

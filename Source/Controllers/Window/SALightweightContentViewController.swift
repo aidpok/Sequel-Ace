@@ -51,6 +51,7 @@ final class SALightweightContentViewController: NSViewController {
     private var filteredColumns: [Int] = []
     private var loadToken = UUID()
     private var pageIndex = 0
+    private var totalRowCount: Int?
     private var hasNextPage = false
     private var isLoading = false
     private var sortColumn: String?
@@ -116,6 +117,18 @@ final class SALightweightContentViewController: NSViewController {
         tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
         return tableView
     }()
+
+    override func deleteBackward(_ sender: Any?) {
+        deleteRows(sender)
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        deleteRows(sender)
+    }
+
+    func focusRowFilter() {
+        view.window?.makeFirstResponder(rowFilterField)
+    }
 
     override func loadView() {
         let rootView = NSView(frame: .zero)
@@ -241,6 +254,7 @@ private extension SALightweightContentViewController {
         columnInfo = []
         rows = []
         filteredColumns = []
+        totalRowCount = nil
         hasNextPage = false
         rebuildColumns()
         statusLabel.stringValue = NSLocalizedString("Loading rows...", comment: "lightweight content loading rows")
@@ -251,7 +265,9 @@ private extension SALightweightContentViewController {
 
             _ = connection.selectDatabase(self.database)
             let columnInfo = self.loadColumnInfo(connection: connection)
-            let query = self.contentQuery(offset: offset, limit: pageSize + 1, columnInfo: columnInfo, connection: connection)
+            let whereClause = self.rowFilterWhereClause(columnInfo: columnInfo, connection: connection)
+            let totalRowCount = self.rowCount(whereClause: whereClause, connection: connection)
+            let query = self.contentQuery(offset: offset, limit: pageSize + 1, whereClause: whereClause)
             let result = connection.queryString(query)
             result?.returnDataAsStrings = true
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
@@ -281,6 +297,7 @@ private extension SALightweightContentViewController {
                     self.columnInfo = []
                     self.rows = []
                     self.filteredColumns = []
+                    self.totalRowCount = nil
                     self.hasNextPage = false
                     self.rebuildColumns()
                     self.statusLabel.stringValue = error
@@ -291,6 +308,7 @@ private extension SALightweightContentViewController {
                 self.columns = fieldNames
                 self.columnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
                 self.rows = loadedRows
+                self.totalRowCount = totalRowCount
                 self.hasNextPage = hasNextPage
                 self.applyColumnFilter()
                 self.rebuildColumns()
@@ -300,10 +318,10 @@ private extension SALightweightContentViewController {
         }
     }
 
-    private func contentQuery(offset: Int, limit: Int, columnInfo: [ColumnInfo], connection: SPMySQLConnection) -> String {
+    private func contentQuery(offset: Int, limit: Int, whereClause: String?) -> String {
         var query = "SELECT * FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
 
-        if let whereClause = rowFilterWhereClause(columnInfo: columnInfo, connection: connection) {
+        if let whereClause = whereClause {
             query += " WHERE \(whereClause)"
         }
 
@@ -313,6 +331,20 @@ private extension SALightweightContentViewController {
 
         query += " LIMIT \(offset),\(limit)"
         return query
+    }
+
+    private func rowCount(whereClause: String?, connection: SPMySQLConnection) -> Int? {
+        var query = "SELECT COUNT(1) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+
+        if let whereClause = whereClause {
+            query += " WHERE \(whereClause)"
+        }
+
+        guard let result = connection.queryString(query),
+              let row = result.getRowAsArray() as? [Any],
+              let value = row.first else { return nil }
+
+        return Int(Self.displayString(for: value))
     }
 
     private func loadColumnInfo(connection: SPMySQLConnection) -> [ColumnInfo] {
@@ -441,6 +473,10 @@ private extension SALightweightContentViewController {
         }
     }
 
+    @objc func removeRow(_ sender: Any?) {
+        deleteRows(sender)
+    }
+
     func runMutation(status: String, mutation: @escaping (SPMySQLConnection) -> Void) {
         guard let connection = connection else { return }
 
@@ -477,20 +513,36 @@ private extension SALightweightContentViewController {
             return
         }
 
+        let filterTerms = filter
+            .lowercased()
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !filterTerms.isEmpty else {
+            filteredColumns = Array(columns.indices)
+            return
+        }
+
         filteredColumns = columns.indices.filter { index in
-            columns[index].range(of: filter, options: .caseInsensitive) != nil
+            let columnName = columns[index].lowercased()
+            return filterTerms.contains { columnName.contains($0) }
         }
     }
 
     func rebuildColumns() {
+        let preservedColumnWidths = Dictionary(uniqueKeysWithValues: tableView.tableColumns.map { ($0.identifier.rawValue, $0.width) })
+
         tableView.tableColumns.forEach { tableView.removeTableColumn($0) }
 
         for columnIndex in filteredColumns {
             let columnName = columns[columnIndex]
-            let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(columnIndex)"))
+            let identifier = NSUserInterfaceItemIdentifier("\(columnIndex)")
+            let tableColumn = NSTableColumn(identifier: identifier)
             tableColumn.title = columnName
-            tableColumn.width = max(90, min(260, CGFloat(columnName.count * 9 + 32)))
+            tableColumn.width = preservedColumnWidths[identifier.rawValue] ?? max(90, min(260, CGFloat(columnName.count * 9 + 32)))
             tableColumn.minWidth = 40
+            tableColumn.headerToolTip = columnName
             tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(columnIndex)", ascending: true)
 
             let cell = NSTextFieldCell(textCell: "")
@@ -506,14 +558,36 @@ private extension SALightweightContentViewController {
     }
 
     func updateStatus() {
+        let filter = rowFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isFiltered = !filter.isEmpty
+        let selectedRows = tableView.numberOfSelectedRows
+        let selectionText: String
+
+        if selectedRows == 1 {
+            selectionText = NSLocalizedString("; 1 row selected", comment: "lightweight content one row selected")
+        } else if selectedRows > 1 {
+            selectionText = String(format: NSLocalizedString("; %ld rows selected", comment: "lightweight content rows selected"), selectedRows)
+        } else {
+            selectionText = ""
+        }
+
         guard !rows.isEmpty else {
-            statusLabel.stringValue = NSLocalizedString("No rows", comment: "lightweight content no rows")
+            statusLabel.stringValue = (isFiltered
+                ? NSLocalizedString("No rows match filter", comment: "lightweight content no filtered rows")
+                : NSLocalizedString("No rows in table", comment: "lightweight content no rows")) + selectionText
             return
         }
 
         let start = pageIndex * pageSize + 1
         let end = start + rows.count - 1
-        statusLabel.stringValue = String(format: NSLocalizedString("Rows %ld-%ld loaded", comment: "lightweight content row range"), start, end)
+
+        if isFiltered {
+            statusLabel.stringValue = String(format: NSLocalizedString("Rows %ld - %ld from filtered matches", comment: "lightweight content filtered row range"), start, end) + selectionText
+        } else if let totalRowCount = totalRowCount {
+            statusLabel.stringValue = String(format: NSLocalizedString("Rows %ld - %ld of %ld from table", comment: "lightweight content row range of total"), start, end, totalRowCount) + selectionText
+        } else {
+            statusLabel.stringValue = String(format: NSLocalizedString("Rows %ld - %ld from table", comment: "lightweight content row range"), start, end) + selectionText
+        }
     }
 
     func updateControls() {
@@ -523,7 +597,12 @@ private extension SALightweightContentViewController {
         reloadButton.isEnabled = !isLoading
         previousPageButton.isEnabled = !isLoading && pageIndex > 0
         nextPageButton.isEnabled = !isLoading && hasNextPage
-        pageLabel.stringValue = String(format: NSLocalizedString("Page %ld", comment: "lightweight content page label"), pageIndex + 1)
+        if let totalRowCount = totalRowCount {
+            let maxPage = max(1, Int(ceil(Double(totalRowCount) / Double(pageSize))))
+            pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maxPage)
+        } else {
+            pageLabel.stringValue = String(format: NSLocalizedString("Page %ld", comment: "lightweight content page label"), pageIndex + 1)
+        }
     }
 
     func toolbarButton(title: String, action: Selector) -> NSButton {
@@ -667,6 +746,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        updateStatus()
         updateControls()
     }
 
@@ -677,5 +757,31 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         sortAscending = descriptor.ascending
         pageIndex = 0
         loadCurrentPage()
+    }
+}
+
+extension SALightweightContentViewController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let action = menuItem.action else { return true }
+
+        switch action {
+        case #selector(removeRow(_:)), #selector(deleteRows(_:)), #selector(deleteBackward(_:)), #selector(deleteForward(_:)):
+            menuItem.title = tableView.numberOfSelectedRows > 1
+                ? NSLocalizedString("Delete Rows", comment: "delete rows menu item plural")
+                : NSLocalizedString("Delete Row", comment: "delete row menu item singular")
+            return !isLoading && tableView.numberOfSelectedRows > 0
+
+        case #selector(duplicateRow(_:)):
+            return !isLoading && tableView.numberOfSelectedRows == 1
+
+        case #selector(addRow(_:)):
+            return !isLoading
+
+        case #selector(reloadContent(_:)):
+            return !isLoading
+
+        default:
+            return true
+        }
     }
 }
