@@ -865,6 +865,9 @@ private extension SPWindowController {
         structureView.frame = lightweightDetailView.bounds
         structureView.autoresizingMask = [.width, .height]
         lightweightDetailView.addSubview(structureView)
+        lightweightStructureController.tableStructureDidChange = { [weak self] in
+            self?.lightweightContentController.clearCachedTables()
+        }
         lightweightStructureController.loadStructure(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
@@ -999,6 +1002,8 @@ private extension SPWindowController {
         }
 
         guard activeConnection != nil, let selectedDatabase = selectedDatabase else { return }
+        lightweightStructureController.clearCachedTables()
+        lightweightContentController.clearCachedTables()
         loadTables(for: selectedDatabase, preservingSelection: true)
     }
 
@@ -1008,6 +1013,8 @@ private extension SPWindowController {
             return
         }
 
+        lightweightStructureController.clearCachedTables()
+        lightweightContentController.clearCachedTables()
         requestLightweightDatabases(forceReload: true)
     }
 

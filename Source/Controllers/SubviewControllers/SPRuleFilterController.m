@@ -997,11 +997,12 @@ static void _addIfNotNil(NSMutableArray *array, id toAdd);
 
 - (void)_resize
 {
-    SPMainQSync(^{
-        CGFloat wantsHeight = [self->filterRuleEditor rowHeight] * MAX([self->filterRuleEditor numberOfRows], 1);
-        [self setPreferredHeight:wantsHeight];
-        [[NSNotificationCenter defaultCenter] postNotificationName:SPRuleFilterHeightChangedNotification object:self];
-    });
+	SPMainQSync(^{
+		CGFloat wantsHeight = [self->filterRuleEditor rowHeight] * MAX([self->filterRuleEditor numberOfRows], 1);
+		if(self.preferredHeight == wantsHeight) return;
+		[self setPreferredHeight:wantsHeight];
+		[[NSNotificationCenter defaultCenter] postNotificationName:SPRuleFilterHeightChangedNotification object:self];
+	});
 }
 
 
@@ -1009,6 +1010,7 @@ static void _addIfNotNil(NSMutableArray *array, id toAdd);
 {
 	//TODO find a better way to trigger resize
 	// We can't do this here, because it will cause rows to jump around when removing them (the add case works fine, though)
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_resize) object:nil];
 	[self performSelector:@selector(_resize) withObject:nil afterDelay:0.2];
 	//[self _resize];
 	[self _updateButtonStates];
@@ -1166,16 +1168,12 @@ static void _addIfNotNil(NSMutableArray *array, id toAdd);
 						[tip replaceOccurrencesOfRegex:@"(?<!\\\\)\\$BINARY" withString:@""];
 						[tip appendString:NSLocalizedString(@"\n\nPress ⇧ for binary search (case-sensitive).", @"\n\npress shift for binary search tooltip message")];
 					}
-                    // don't log here ... it's called hundreds of times.
 					[tip flushCachedRegexData];
-                    // the regex below is causing a crash so I've added logging to RegexLite exception generation.
 
-                    SPLog(@"tip: %@", tip);
-
-                    // FIXME: oh ... is the regex is wrong.
-                    // (?<foo>bar) = Define a named group named "foo" consisting of pattern bar.
-                    // so (?<!\\\\)\\$CURRENT_FIELD" looks like the start of a group name,
-                    [tip replaceOccurrencesOfRegex:@"(?<!\\\\)\\$CURRENT_FIELD" withString:[NSRegularExpression escapedPatternForString:[[colNode name] backtickQuotedString]]];
+					// FIXME: oh ... is the regex is wrong.
+					// (?<foo>bar) = Define a named group named "foo" consisting of pattern bar.
+					// so (?<!\\\\)\\$CURRENT_FIELD" looks like the start of a group name,
+					[tip replaceOccurrencesOfRegex:@"(?<!\\\\)\\$CURRENT_FIELD" withString:[NSRegularExpression escapedPatternForString:[[colNode name] backtickQuotedString]]];
 
 					[tip flushCachedRegexData];
 					tooltip = [NSString stringWithString:tip];

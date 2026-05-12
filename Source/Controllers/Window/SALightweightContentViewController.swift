@@ -48,6 +48,47 @@ final class SALightweightContentViewController: NSViewController {
         var originalValues: [ContentValue]
     }
 
+    private struct ContentCacheEntry {
+        let columns: [String]
+        let columnInfo: [ColumnInfo]
+        let rows: [ContentRow]
+        let pageIndex: Int
+        let pageSize: Int
+        let totalRowCount: Int?
+        let totalRowCountIsEstimate: Bool
+        let hasNextPage: Bool
+        let sortColumn: String?
+        let sortAscending: Bool
+        let isRuleFilterActive: Bool
+        let serializedRuleFilter: NSDictionary?
+    }
+
+    fileprivate struct ContentFilterDefinition {
+        let title: String
+        let clause: String
+        let numberOfArguments: Int
+        let conjunctionLabels: [String]
+        let suppressLeadingFieldPlaceholder: Bool
+        let filterType: String
+        let rawDefinition: NSDictionary
+    }
+
+    fileprivate struct FilterRule {
+        let id: UUID
+        var isEnabled: Bool
+        var columnName: String
+        var operatorTitle: String
+        var values: [String]
+
+        init(id: UUID = UUID(), isEnabled: Bool = true, columnName: String, operatorTitle: String, values: [String] = []) {
+            self.id = id
+            self.isEnabled = isEnabled
+            self.columnName = columnName
+            self.operatorTitle = operatorTitle
+            self.values = values
+        }
+    }
+
     fileprivate enum ContentValue {
         case null
         case notLoaded
@@ -74,9 +115,15 @@ final class SALightweightContentViewController: NSViewController {
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
     private var ruleFilterColumnsKey = ""
+    private var filterRules: [FilterRule] = []
+    private var defaultContentFilters: [String: [ContentFilterDefinition]] = [:]
     private var restoredRuleFilters: [String: NSDictionary] = [:]
     private var restoredActiveRuleFilters = Set<String>()
+    private var contentCache: [String: ContentCacheEntry] = [:]
+    private var contentCacheOrder: [String] = []
+    private let maximumContentCacheEntries = 6
     private var ruleFilterHeightConstraint: NSLayoutConstraint?
+    private var isRestoringCachedContent = false
     var requestLegacyContentFallback: (() -> Void)?
     private var pageSize: Int {
         let preferredPageSize = UserDefaults.standard.integer(forKey: SPLimitResultsValue)
@@ -126,40 +173,21 @@ final class SALightweightContentViewController: NSViewController {
         return tableView
     }()
 
-    private lazy var ruleFilterController: SPRuleFilterController = {
-        let controller = SPRuleFilterController()
-        controller.setValue(ruleEditor, forKey: "filterRuleEditor")
-        controller.setValue(applyFilterButton, forKey: "filterButton")
-        controller.setValue(addFilterButton, forKey: "addFilterButton")
-        ruleEditor.delegate = controller as? NSRuleEditorDelegate
-        ruleEditor.target = controller
-        ruleEditor.action = Selector(("_menuItemInRuleEditorClicked:"))
-        controller.awakeFromNib()
-        applyFilterButton.target = controller
-        applyFilterButton.action = Selector(("filterTable:"))
-        addFilterButton.target = controller
-        addFilterButton.action = Selector(("addFilter:"))
-        controller.target = self
-        controller.action = #selector(applyRuleFilter(_:))
-        return controller
-    }()
-
     private lazy var ruleFilterContainer: NSView = {
         let container = NSView(frame: .zero)
         container.isHidden = !isRuleFilterVisible
         return container
     }()
 
-    private lazy var ruleEditor: NSRuleEditor = {
-        let editor = NSRuleEditor(frame: NSRect(x: 0, y: 0, width: 576, height: 29))
-        editor.nestingMode = .compound
-        editor.canRemoveAllRows = true
-        editor.rowHeight = 29
-        editor.autoresizingMask = [.width, .height]
-        return editor
+    private lazy var filterRowsStackView: NSStackView = {
+        let stackView = NSStackView()
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.spacing = 0
+        return stackView
     }()
 
-    private lazy var ruleEditorScrollView: NSScrollView = {
+    private lazy var filterRowsScrollView: NSScrollView = {
         let scrollView = NSScrollView(frame: .zero)
         scrollView.borderType = .noBorder
         scrollView.hasHorizontalScroller = false
@@ -170,12 +198,12 @@ final class SALightweightContentViewController: NSViewController {
         scrollView.usesPredominantAxisScrolling = false
         scrollView.horizontalScrollElasticity = .none
         scrollView.contentView.drawsBackground = false
-        scrollView.documentView = ruleEditor
+        scrollView.documentView = filterRowsStackView
         return scrollView
     }()
 
     private lazy var applyFilterButton: NSButton = {
-        let button = NSButton(title: NSLocalizedString("Apply Filter(s)", comment: "apply content filters button"), target: nil, action: nil)
+        let button = NSButton(title: NSLocalizedString("Apply Filter(s)", comment: "apply content filters button"), target: self, action: #selector(applyRuleFilter(_:)))
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 11)
@@ -183,7 +211,7 @@ final class SALightweightContentViewController: NSViewController {
     }()
 
     private lazy var addFilterButton: NSButton = {
-        let button = NSButton(title: NSLocalizedString("Add Filter", comment: "add content filter button"), target: nil, action: nil)
+        let button = NSButton(title: NSLocalizedString("Add Filter", comment: "add content filter button"), target: self, action: #selector(addFilterRule(_:)))
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 11)
@@ -200,7 +228,12 @@ final class SALightweightContentViewController: NSViewController {
 
     func focusRowFilter() {
         setRuleFilterVisible(true, animate: false)
-        ruleFilterController.focusFirstInputField()
+        focusFirstFilterValueField()
+    }
+
+    func clearCachedTables() {
+        contentCache.removeAll()
+        contentCacheOrder.removeAll()
     }
 
     override func loadView() {
@@ -222,7 +255,7 @@ final class SALightweightContentViewController: NSViewController {
         rootView.addSubview(ruleFilterContainer)
         rootView.addSubview(scrollView)
         rootView.addSubview(toolbarView)
-        ruleFilterContainer.addSubview(ruleEditorScrollView)
+        ruleFilterContainer.addSubview(filterRowsScrollView)
         ruleFilterContainer.addSubview(applyFilterButton)
         ruleFilterContainer.addSubview(addFilterButton)
         toolbarView.addSubview(addRowButton)
@@ -237,7 +270,8 @@ final class SALightweightContentViewController: NSViewController {
         toolbarView.addSubview(statusLabel)
 
         ruleFilterContainer.translatesAutoresizingMaskIntoConstraints = false
-        ruleEditorScrollView.translatesAutoresizingMaskIntoConstraints = false
+        filterRowsScrollView.translatesAutoresizingMaskIntoConstraints = false
+        filterRowsStackView.translatesAutoresizingMaskIntoConstraints = false
         applyFilterButton.translatesAutoresizingMaskIntoConstraints = false
         addFilterButton.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -262,10 +296,10 @@ final class SALightweightContentViewController: NSViewController {
             ruleFilterContainer.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 7),
             ruleFilterHeightConstraint,
 
-            ruleEditorScrollView.leadingAnchor.constraint(equalTo: ruleFilterContainer.leadingAnchor, constant: 2),
-            ruleEditorScrollView.topAnchor.constraint(equalTo: ruleFilterContainer.topAnchor),
-            ruleEditorScrollView.bottomAnchor.constraint(equalTo: ruleFilterContainer.bottomAnchor),
-            ruleEditorScrollView.trailingAnchor.constraint(equalTo: applyFilterButton.leadingAnchor, constant: -1),
+            filterRowsScrollView.leadingAnchor.constraint(equalTo: ruleFilterContainer.leadingAnchor, constant: 2),
+            filterRowsScrollView.topAnchor.constraint(equalTo: ruleFilterContainer.topAnchor),
+            filterRowsScrollView.bottomAnchor.constraint(equalTo: ruleFilterContainer.bottomAnchor),
+            filterRowsScrollView.trailingAnchor.constraint(equalTo: applyFilterButton.leadingAnchor, constant: -6),
 
             applyFilterButton.trailingAnchor.constraint(equalTo: ruleFilterContainer.trailingAnchor, constant: -5),
             applyFilterButton.centerYAnchor.constraint(equalTo: ruleFilterContainer.centerYAnchor),
@@ -340,8 +374,9 @@ final class SALightweightContentViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        loadDefaultContentFilters()
+        NotificationCenter.default.addObserver(self, selector: #selector(contentFiltersHaveBeenUpdated(_:)), name: .SPContentFiltersHaveBeenUpdated, object: nil)
         registerPreferenceObserversIfNeeded()
-        NotificationCenter.default.addObserver(self, selector: #selector(ruleFilterHeightChanged(_:)), name: .SPRuleFilterHeightChanged, object: ruleFilterController)
         applyTablePreferences(rebuildColumns: false)
         updateRuleFilterVisibility(animated: false)
     }
@@ -349,7 +384,7 @@ final class SALightweightContentViewController: NSViewController {
     override func viewDidLayout() {
         super.viewDidLayout()
 
-        updateRuleEditorFrame()
+        updateFilterRowsFrame()
     }
 
     deinit {
@@ -377,7 +412,10 @@ final class SALightweightContentViewController: NSViewController {
         case SPDisplayBinaryDataAsHex, SPNullValue:
             tableView.reloadData()
             autosizeContentColumns()
+            cacheCurrentContentState()
         case SPLoadBlobsAsNeeded:
+            contentCache.removeAll()
+            contentCacheOrder.removeAll()
             loadCurrentPage()
         default:
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
@@ -385,16 +423,24 @@ final class SALightweightContentViewController: NSViewController {
     }
 
     func loadContent(for table: String, database: String, connection: SPMySQLConnection) {
+        cacheCurrentContentState()
         storeCurrentRuleFilterState()
 
         self.table = table
         self.database = database
         self.connection = connection
+        loadToken = UUID()
+        isRuleFilterActive = restoredActiveRuleFilters.contains(ruleFilterStorageKey(database: database, table: table))
+        ruleFilterColumnsKey = ""
+        filterRules = []
+
+        if restoreCachedContent(for: contentCacheKey(database: database, table: table)) {
+            return
+        }
+
         pageIndex = 0
         sortColumn = nil
         sortAscending = true
-        isRuleFilterActive = restoredActiveRuleFilters.contains(ruleFilterStorageKey(database: database, table: table))
-        ruleFilterColumnsKey = ""
         tableView.sortDescriptors = []
 
         loadCurrentPage()
@@ -456,6 +502,7 @@ private extension SALightweightContentViewController {
         let filter = ruleFilterStringForCurrentState(showError: true)
         guard !filter.failed else { return }
 
+        invalidateCurrentContentCache()
         loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset)
     }
 
@@ -535,6 +582,7 @@ private extension SALightweightContentViewController {
                 self.rebuildColumns()
                 self.updateStatus()
                 self.updateControls()
+                self.cacheCurrentContentState()
             }
         }
     }
@@ -631,9 +679,14 @@ private extension SALightweightContentViewController {
         loadCurrentPage()
     }
 
-    @objc func ruleFilterHeightChanged(_ notification: Notification) {
-        guard isRuleFilterVisible else { return }
-        updateRuleFilterVisibility(animated: true)
+    @objc func addFilterRule(_ sender: Any?) {
+        addFilterRule(after: filterRules.last?.id)
+    }
+
+    @objc func contentFiltersHaveBeenUpdated(_ notification: Notification) {
+        defaultContentFilters.removeAll()
+        loadDefaultContentFilters()
+        configureRuleFilterColumnsIfNeeded()
     }
 
     @objc func showLegacyContentFeature(_ sender: Any?) {
@@ -641,6 +694,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func reloadContent(_ sender: Any?) {
+        invalidateCurrentContentCache()
         loadCurrentPage()
     }
 
@@ -746,6 +800,7 @@ private extension SALightweightContentViewController {
                     return
                 }
 
+                self.invalidateCurrentContentCache()
                 self.loadCurrentPage()
             }
         }
@@ -818,7 +873,9 @@ private extension SALightweightContentViewController {
         deleteRowButton.isEnabled = !isLoading && tableView.numberOfSelectedRows > 0
         reloadButton.isEnabled = !isLoading
         editModeButton.isEnabled = !isLoading
-        ruleFilterController.setEnabled(isRuleFilterVisible && !isLoading && !columnInfo.isEmpty)
+        applyFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty && !filterRules.isEmpty
+        addFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty
+        filterRowsStackView.arrangedSubviews.forEach { $0.subviews.forEach { ($0 as? NSControl)?.isEnabled = !isLoading } }
         previousPageButton.isEnabled = !isLoading && pageIndex > 0
         paginationButton.isEnabled = !isLoading
         nextPageButton.isEnabled = !isLoading && hasNextPage
@@ -838,16 +895,18 @@ private extension SALightweightContentViewController {
         }
 
         ruleFilterColumnsKey = key
-        ruleFilterController.setColumns(columnInfo.map { $0.legacyDefinition })
 
         if let restoredFilter = restoredRuleFilters[ruleFilterStorageKey()] as? [AnyHashable: Any] {
-            ruleFilterController.restoreSerializedFilters(restoredFilter)
+            filterRules = filterRules(from: restoredFilter)
+        } else {
+            filterRules = []
         }
 
-        if isRuleFilterVisible, ruleFilterController.isEmpty() {
-            ruleFilterController.addFilterExpression()
+        if isRuleFilterVisible, filterRules.isEmpty, !columnInfo.isEmpty {
+            filterRules = [defaultFilterRule()]
         }
 
+        rebuildFilterRows()
         updateRuleFilterVisibility(animated: false)
     }
 
@@ -857,12 +916,12 @@ private extension SALightweightContentViewController {
 
         if visible {
             configureRuleFilterColumnsIfNeeded()
-            if !columnInfo.isEmpty, ruleFilterController.isEmpty() {
-                ruleFilterController.addFilterExpression()
+            if !columnInfo.isEmpty, filterRules.isEmpty {
+                filterRules = [defaultFilterRule()]
+                rebuildFilterRows()
             }
-            ruleFilterController.focusFirstInputField()
+            focusFirstFilterValueField()
         } else {
-            ruleFilterController.setEnabled(false)
             if isRuleFilterActive {
                 isRuleFilterActive = false
                 storeCurrentRuleFilterState()
@@ -874,18 +933,20 @@ private extension SALightweightContentViewController {
     }
 
     func updateRuleFilterVisibility(animated: Bool) {
-        let preferredHeight = max(29, ruleFilterController.preferredHeight)
+        let preferredHeight = max(29, CGFloat(max(filterRules.count, 1)) * LightweightFilterRuleRowView.rowHeight)
         let maximumHeight = max(29, view.bounds.height / 3)
         let targetHeight = isRuleFilterVisible ? min(preferredHeight, maximumHeight) : 0
 
         ruleFilterContainer.isHidden = false
         ruleFilterHeightConstraint?.constant = targetHeight
-        ruleEditorScrollView.hasVerticalScroller = preferredHeight > targetHeight
-        ruleFilterController.setEnabled(isRuleFilterVisible && !isLoading && !columnInfo.isEmpty)
+        filterRowsScrollView.hasVerticalScroller = preferredHeight > targetHeight
+        applyFilterButton.isHidden = filterRules.isEmpty
+        addFilterButton.isHidden = !filterRules.isEmpty
+        updateControls()
 
         let layout = {
             self.view.layoutSubtreeIfNeeded()
-            self.updateRuleEditorFrame()
+            self.updateFilterRowsFrame()
             if targetHeight == 0 {
                 self.ruleFilterContainer.isHidden = true
             }
@@ -901,25 +962,334 @@ private extension SALightweightContentViewController {
         }
     }
 
-    func updateRuleEditorFrame() {
+    func updateFilterRowsFrame() {
         guard isViewLoaded else { return }
 
-        let visibleBounds = ruleEditorScrollView.contentView.bounds
-        let preferredHeight = max(29, ruleFilterController.preferredHeight)
+        let visibleBounds = filterRowsScrollView.contentView.bounds
+        let preferredHeight = max(29, CGFloat(max(filterRules.count, 1)) * LightweightFilterRuleRowView.rowHeight)
         let width = max(visibleBounds.width, 760)
         let height = max(visibleBounds.height, preferredHeight)
         let frame = NSRect(x: 0, y: 0, width: width, height: height)
 
-        if ruleEditor.frame != frame {
-            ruleEditor.frame = frame
-            ruleEditor.needsLayout = true
-            ruleEditor.needsDisplay = true
+        if filterRowsStackView.frame != frame {
+            filterRowsStackView.frame = frame
+            filterRowsStackView.needsLayout = true
+            filterRowsStackView.needsDisplay = true
         }
 
         if visibleBounds.origin != .zero {
-            ruleEditorScrollView.contentView.scroll(to: .zero)
-            ruleEditorScrollView.reflectScrolledClipView(ruleEditorScrollView.contentView)
+            filterRowsScrollView.contentView.scroll(to: .zero)
+            filterRowsScrollView.reflectScrolledClipView(filterRowsScrollView.contentView)
         }
+    }
+
+    func loadDefaultContentFilters() {
+        guard defaultContentFilters.isEmpty else { return }
+
+        let path = Bundle.main.path(forResource: "ContentFilters", ofType: "plist")
+            ?? Bundle.main.path(forResource: "ContentFilters.plist", ofType: nil)
+        guard let path = path,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let filters = plist as? [String: [NSDictionary]] else { return }
+
+        defaultContentFilters = filters.mapValues { definitions in
+            definitions.compactMap { contentFilterDefinition(from: $0, filterType: "") }
+        }
+    }
+
+    func contentFilterDefinition(from dictionary: NSDictionary, filterType: String) -> ContentFilterDefinition? {
+        guard let title = dictionary["MenuLabel"] as? String,
+              let clause = dictionary["Clause"] as? String else { return nil }
+
+        return ContentFilterDefinition(
+            title: title,
+            clause: clause,
+            numberOfArguments: (dictionary["NumberOfArguments"] as? NSNumber)?.intValue ?? 0,
+            conjunctionLabels: dictionary["ConjunctionLabels"] as? [String] ?? [],
+            suppressLeadingFieldPlaceholder: (dictionary["SuppressLeadingFieldPlaceholder"] as? NSNumber)?.boolValue ?? false,
+            filterType: filterType,
+            rawDefinition: dictionary
+        )
+    }
+
+    func contentFilters(for filterType: String) -> [ContentFilterDefinition] {
+        var filters = defaultContentFilters[filterType] ?? []
+
+        if let userFilters = UserDefaults.standard.object(forKey: SPContentFilters) as? [String: Any],
+           let typedUserFilters = userFilters[filterType] as? [NSDictionary] {
+            filters.append(contentsOf: typedUserFilters.compactMap { contentFilterDefinition(from: $0, filterType: filterType) })
+        }
+
+        return filters.map {
+            ContentFilterDefinition(
+                title: $0.title,
+                clause: $0.clause,
+                numberOfArguments: $0.numberOfArguments,
+                conjunctionLabels: $0.conjunctionLabels,
+                suppressLeadingFieldPlaceholder: $0.suppressLeadingFieldPlaceholder,
+                filterType: filterType,
+                rawDefinition: $0.rawDefinition
+            )
+        }
+    }
+
+    func filterType(for column: ColumnInfo) -> String {
+        switch column.typeGrouping {
+        case "date":
+            return "date"
+        case "string", "binary", "textdata", "blobdata", "enum":
+            return "string"
+        case "bit", "integer", "float":
+            return "number"
+        case "geometry":
+            return "spatial"
+        default:
+            return "string"
+        }
+    }
+
+    func columnInfo(named name: String) -> ColumnInfo? {
+        return columnInfo.first { $0.name == name }
+    }
+
+    func operators(for columnName: String) -> [ContentFilterDefinition] {
+        guard let column = columnInfo(named: columnName) else { return [] }
+        return contentFilters(for: filterType(for: column))
+    }
+
+    func operatorDefinition(for rule: FilterRule) -> ContentFilterDefinition? {
+        let operators = operators(for: rule.columnName)
+        return operators.first { $0.title == rule.operatorTitle } ?? operators.first
+    }
+
+    func defaultFilterRule() -> FilterRule {
+        let columnName = columnInfo.first?.name ?? ""
+        let operatorTitle = operators(for: columnName).first?.title ?? "="
+        return FilterRule(columnName: columnName, operatorTitle: operatorTitle)
+    }
+
+    func addFilterRule(after id: UUID?) {
+        guard !columnInfo.isEmpty else { return }
+
+        let newRule = defaultFilterRule()
+        if let id = id, let index = filterRules.firstIndex(where: { $0.id == id }) {
+            filterRules.insert(newRule, at: index + 1)
+        } else {
+            filterRules.append(newRule)
+        }
+
+        rebuildFilterRows()
+        storeCurrentRuleFilterState()
+        updateRuleFilterVisibility(animated: false)
+        focusValueField(for: newRule.id)
+    }
+
+    func removeFilterRule(id: UUID) {
+        filterRules.removeAll { $0.id == id }
+        rebuildFilterRows()
+        storeCurrentRuleFilterState()
+        updateRuleFilterVisibility(animated: false)
+
+        if filterRules.isEmpty {
+            applyRuleFilter(nil)
+        }
+    }
+
+    func updateFilterRule(id: UUID, update: (inout FilterRule) -> Void) {
+        guard let index = filterRules.firstIndex(where: { $0.id == id }) else { return }
+
+        update(&filterRules[index])
+        normalizeFilterRule(at: index)
+        rebuildFilterRows()
+        storeCurrentRuleFilterState()
+        updateRuleFilterVisibility(animated: false)
+    }
+
+    func normalizeFilterRule(at index: Int) {
+        guard filterRules.indices.contains(index) else { return }
+
+        if columnInfo(named: filterRules[index].columnName) == nil {
+            filterRules[index].columnName = columnInfo.first?.name ?? ""
+        }
+
+        let operators = operators(for: filterRules[index].columnName)
+        if !operators.contains(where: { $0.title == filterRules[index].operatorTitle }) {
+            filterRules[index].operatorTitle = operators.first?.title ?? "="
+        }
+
+        let argumentCount = operatorDefinition(for: filterRules[index])?.numberOfArguments ?? 0
+        if filterRules[index].values.count > argumentCount {
+            filterRules[index].values = Array(filterRules[index].values.prefix(argumentCount))
+        }
+        while filterRules[index].values.count < argumentCount {
+            filterRules[index].values.append("")
+        }
+    }
+
+    func rebuildFilterRows() {
+        filterRowsStackView.arrangedSubviews.forEach { view in
+            filterRowsStackView.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        for rule in filterRules {
+            guard let definition = operatorDefinition(for: rule) else { continue }
+            let rowView = LightweightFilterRuleRowView()
+            rowView.configure(
+                rule: rule,
+                columnNames: columnInfo.map { $0.name },
+                operators: operators(for: rule.columnName),
+                selectedOperator: definition
+            )
+            rowView.onEnabledChanged = { [weak self] id, isEnabled in
+                self?.updateFilterRule(id: id) { $0.isEnabled = isEnabled }
+            }
+            rowView.onColumnChanged = { [weak self] id, columnName in
+                self?.updateFilterRule(id: id) {
+                    $0.columnName = columnName
+                    $0.operatorTitle = self?.operators(for: columnName).first?.title ?? "="
+                    $0.values = []
+                }
+            }
+            rowView.onOperatorChanged = { [weak self] id, operatorTitle in
+                self?.updateFilterRule(id: id) {
+                    $0.operatorTitle = operatorTitle
+                    $0.values = []
+                }
+            }
+            rowView.onValuesChanged = { [weak self] id, values in
+                guard let self = self, let index = self.filterRules.firstIndex(where: { $0.id == id }) else { return }
+                self.filterRules[index].values = values
+                self.normalizeFilterRule(at: index)
+                self.storeCurrentRuleFilterState()
+            }
+            rowView.onAdd = { [weak self] id in
+                self?.addFilterRule(after: id)
+            }
+            rowView.onRemove = { [weak self] id in
+                self?.removeFilterRule(id: id)
+            }
+            rowView.onApply = { [weak self] in
+                self?.applyRuleFilter(self)
+            }
+
+            filterRowsStackView.addArrangedSubview(rowView)
+            rowView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                rowView.heightAnchor.constraint(equalToConstant: LightweightFilterRuleRowView.rowHeight),
+                rowView.widthAnchor.constraint(equalTo: filterRowsStackView.widthAnchor)
+            ])
+        }
+
+        updateFilterRowsFrame()
+    }
+
+    func focusFirstFilterValueField() {
+        guard let firstRule = filterRules.first else { return }
+        focusValueField(for: firstRule.id)
+    }
+
+    func focusValueField(for id: UUID) {
+        guard let rowView = filterRowsStackView.arrangedSubviews.compactMap({ $0 as? LightweightFilterRuleRowView }).first(where: { $0.ruleID == id }) else { return }
+        rowView.focusValueField()
+    }
+
+    func sqlWhereExpressionForCurrentFilter(binary: Bool) throws -> String {
+        let expressions = try filterRules.compactMap { rule -> String? in
+            guard rule.isEnabled else { return nil }
+            guard let definition = operatorDefinition(for: rule) else { return nil }
+            guard let parser = SPTableFilterParser(filterClause: definition.clause, numberOfArguments: UInt(definition.numberOfArguments)) else {
+                throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
+            }
+
+            parser.currentField = rule.columnName
+            parser.suppressLeadingTablePlaceholder = definition.suppressLeadingFieldPlaceholder
+            parser.caseSensitive = binary
+
+            if definition.numberOfArguments > 0 {
+                parser.argument = rule.values.indices.contains(0) ? rule.values[0] : ""
+            }
+            if definition.numberOfArguments > 1 {
+                parser.firstBetweenArgument = rule.values.indices.contains(0) ? rule.values[0] : ""
+                parser.secondBetweenArgument = rule.values.indices.contains(1) ? rule.values[1] : ""
+            }
+
+            guard let filterString = parser.filterString(), !filterString.isEmpty else {
+                throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
+            }
+
+            return filterString
+        }
+
+        return expressions.joined(separator: " AND ")
+    }
+
+    func filterError(_ message: String) -> NSError {
+        return NSError(domain: "SALightweightContentFilter", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    func serializedFilter() -> NSDictionary {
+        let children = filterRules.map { rule -> NSDictionary in
+            let definition = operatorDefinition(for: rule)
+            let filterType = definition?.filterType ?? columnInfo(named: rule.columnName).map(filterType(for:)) ?? ""
+            return [
+                "filterClass": "expressionNode",
+                "column": rule.columnName,
+                "filterType": filterType,
+                "filterComparison": rule.operatorTitle,
+                "filterValues": rule.values,
+                "enabled": rule.isEnabled
+            ]
+        }
+
+        if children.count == 1 {
+            return children[0]
+        }
+
+        return [
+            "filterClass": "groupNode",
+            "isConjunction": true,
+            "children": children
+        ]
+    }
+
+    func filterRules(from serialized: [AnyHashable: Any]) -> [FilterRule] {
+        let filterClass = serialized["filterClass"] as? String
+        if filterClass == "groupNode", (serialized["isConjunction"] as? NSNumber)?.boolValue ?? (serialized["isConjunction"] as? Bool ?? false),
+           let children = serialized["children"] as? [[AnyHashable: Any]] {
+            return children.flatMap { filterRules(from: $0) }
+        }
+
+        guard filterClass == "expressionNode" else { return [] }
+        guard let columnName = serialized["column"] as? String,
+              columnInfo(named: columnName) != nil else { return [] }
+
+        let operatorTitle = serialized["filterComparison"] as? String ?? operators(for: columnName).first?.title ?? "="
+        let values = serialized["filterValues"] as? [String] ?? []
+        let isEnabled = (serialized["enabled"] as? NSNumber)?.boolValue ?? (serialized["enabled"] as? Bool ?? true)
+        return [normalizedFilterRule(FilterRule(isEnabled: isEnabled, columnName: columnName, operatorTitle: operatorTitle, values: values))]
+    }
+
+    func normalizedFilterRule(_ rule: FilterRule) -> FilterRule {
+        var normalizedRule = rule
+        if columnInfo(named: normalizedRule.columnName) == nil {
+            normalizedRule.columnName = columnInfo.first?.name ?? ""
+        }
+
+        let operators = operators(for: normalizedRule.columnName)
+        if !operators.contains(where: { $0.title == normalizedRule.operatorTitle }) {
+            normalizedRule.operatorTitle = operators.first?.title ?? "="
+        }
+
+        let argumentCount = operators.first(where: { $0.title == normalizedRule.operatorTitle })?.numberOfArguments ?? 0
+        if normalizedRule.values.count > argumentCount {
+            normalizedRule.values = Array(normalizedRule.values.prefix(argumentCount))
+        }
+        while normalizedRule.values.count < argumentCount {
+            normalizedRule.values.append("")
+        }
+        return normalizedRule
     }
 
     func ruleFilterStringForCurrentState(showError: Bool) -> (whereClause: String?, failed: Bool) {
@@ -928,7 +1298,7 @@ private extension SALightweightContentViewController {
         let caseSensitive = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
         let filter: String
         do {
-            filter = try ruleFilterController.sqlWhereExpression(withBinary: caseSensitive)
+            filter = try sqlWhereExpressionForCurrentFilter(binary: caseSensitive)
         } catch {
             if showError {
                 showInvalidRuleFilterAlert(error: error)
@@ -944,10 +1314,10 @@ private extension SALightweightContentViewController {
         guard !database.isEmpty, !table.isEmpty else { return }
 
         let key = ruleFilterStorageKey()
-        if ruleFilterController.isEmpty() {
+        if filterRules.isEmpty {
             restoredRuleFilters.removeValue(forKey: key)
         } else {
-            restoredRuleFilters[key] = ruleFilterController.serializedFilter() as NSDictionary
+            restoredRuleFilters[key] = serializedFilter() as NSDictionary
         }
 
         if isRuleFilterActive {
@@ -959,6 +1329,98 @@ private extension SALightweightContentViewController {
 
     func ruleFilterStorageKey(database: String? = nil, table: String? = nil) -> String {
         return "\(database ?? self.database)\u{0}\(table ?? self.table)"
+    }
+
+    func contentCacheKey(database: String? = nil, table: String? = nil) -> String {
+        return "\(database ?? self.database)\u{0}\(table ?? self.table)"
+    }
+
+    func restoreCachedContent(for key: String) -> Bool {
+        guard let cached = contentCache[key], cached.pageSize == pageSize else {
+            contentCache.removeValue(forKey: key)
+            contentCacheOrder.removeAll { $0 == key }
+            return false
+        }
+
+        isRestoringCachedContent = true
+        defer { isRestoringCachedContent = false }
+
+        columns = cached.columns
+        columnInfo = cached.columnInfo
+        rows = cached.rows
+        pageIndex = cached.pageIndex
+        totalRowCount = cached.totalRowCount
+        totalRowCountIsEstimate = cached.totalRowCountIsEstimate
+        hasNextPage = cached.hasNextPage
+        sortColumn = cached.sortColumn
+        sortAscending = cached.sortAscending
+        isRuleFilterActive = cached.isRuleFilterActive
+
+        if let serializedRuleFilter = cached.serializedRuleFilter {
+            restoredRuleFilters[ruleFilterStorageKey()] = serializedRuleFilter
+        } else {
+            restoredRuleFilters.removeValue(forKey: ruleFilterStorageKey())
+        }
+
+        if isRuleFilterActive {
+            restoredActiveRuleFilters.insert(ruleFilterStorageKey())
+        } else {
+            restoredActiveRuleFilters.remove(ruleFilterStorageKey())
+        }
+
+        if let sortColumn = sortColumn, let columnIndex = columns.firstIndex(of: sortColumn) {
+            tableView.sortDescriptors = [NSSortDescriptor(key: "\(columnIndex)", ascending: sortAscending)]
+        } else {
+            tableView.sortDescriptors = []
+        }
+
+        isLoading = false
+        filteredColumns = []
+        configureRuleFilterColumnsIfNeeded()
+        applyColumnFilter()
+        rebuildColumns()
+        updateStatus()
+        updateControls()
+        noteContentCacheUse(for: key)
+        return true
+    }
+
+    func cacheCurrentContentState() {
+        guard !database.isEmpty, !table.isEmpty, !columns.isEmpty else { return }
+
+        storeCurrentRuleFilterState()
+        let key = contentCacheKey()
+        contentCache[key] = ContentCacheEntry(
+            columns: columns,
+            columnInfo: columnInfo,
+            rows: rows,
+            pageIndex: pageIndex,
+            pageSize: pageSize,
+            totalRowCount: totalRowCount,
+            totalRowCountIsEstimate: totalRowCountIsEstimate,
+            hasNextPage: hasNextPage,
+            sortColumn: sortColumn,
+            sortAscending: sortAscending,
+            isRuleFilterActive: isRuleFilterActive,
+            serializedRuleFilter: restoredRuleFilters[ruleFilterStorageKey()]
+        )
+        noteContentCacheUse(for: key)
+    }
+
+    func noteContentCacheUse(for key: String) {
+        contentCacheOrder.removeAll { $0 == key }
+        contentCacheOrder.append(key)
+
+        while contentCacheOrder.count > maximumContentCacheEntries {
+            let oldKey = contentCacheOrder.removeFirst()
+            contentCache.removeValue(forKey: oldKey)
+        }
+    }
+
+    func invalidateCurrentContentCache() {
+        let key = contentCacheKey()
+        contentCache.removeValue(forKey: key)
+        contentCacheOrder.removeAll { $0 == key }
     }
 
     func showInvalidRuleFilterAlert(error: Error?) {
@@ -1381,6 +1843,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         rows[row].originalValues[columnIndex] = Self.contentValue(for: value)
         tableView.reloadData()
         autosizeContentColumns()
+        cacheCurrentContentState()
         return true
     }
 
@@ -1439,6 +1902,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                 self.updateControls()
                 self.tableView.reloadData()
                 self.autosizeContentColumns()
+                self.cacheCurrentContentState()
             }
         }
     }
@@ -1470,11 +1934,12 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard !isLoading, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key, let columnIndex = Int(key), columnIndex < columns.count else { return }
+        guard !isLoading, !isRestoringCachedContent, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key, let columnIndex = Int(key), columnIndex < columns.count else { return }
 
         sortColumn = columns[columnIndex]
         sortAscending = descriptor.ascending
         pageIndex = 0
+        invalidateCurrentContentCache()
         loadCurrentPage()
     }
 }
@@ -1502,5 +1967,202 @@ extension SALightweightContentViewController: NSMenuItemValidation {
         default:
             return true
         }
+    }
+}
+
+fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegate {
+    static let rowHeight: CGFloat = 29
+
+    private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let columnPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let operatorPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let firstValueField = NSTextField(frame: .zero)
+    private let conjunctionLabel = NSTextField(labelWithString: "")
+    private let secondValueField = NSTextField(frame: .zero)
+    private let addButton = NSButton(image: NSImage(named: NSImage.Name("NSAddTemplate")) ?? NSImage(), target: nil, action: nil)
+    private let removeButton = NSButton(image: NSImage(named: NSImage.Name("NSRemoveTemplate")) ?? NSImage(), target: nil, action: nil)
+
+    var ruleID: UUID?
+    var onEnabledChanged: ((UUID, Bool) -> Void)?
+    var onColumnChanged: ((UUID, String) -> Void)?
+    var onOperatorChanged: ((UUID, String) -> Void)?
+    var onValuesChanged: ((UUID, [String]) -> Void)?
+    var onAdd: ((UUID) -> Void)?
+    var onRemove: ((UUID) -> Void)?
+    var onApply: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        checkbox.toolTip = NSLocalizedString("When unchecked this filter expression will not be applied", comment: "table Content : rule filter editor : row : enable filter expression checkbox : tooltip")
+        checkbox.target = self
+        checkbox.action = #selector(enabledChanged(_:))
+
+        [columnPopup, operatorPopup].forEach { popup in
+            popup.controlSize = .small
+            popup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            popup.target = self
+        }
+        columnPopup.action = #selector(columnChanged(_:))
+        operatorPopup.action = #selector(operatorChanged(_:))
+
+        [firstValueField, secondValueField].forEach { field in
+            field.controlSize = .small
+            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.usesSingleLineMode = true
+            field.cell?.wraps = false
+            field.cell?.isScrollable = true
+            field.delegate = self
+            field.target = self
+            field.action = #selector(valueAction(_:))
+            field.toolTip = NSLocalizedString("Enter the value to apply the filter condition with.\nPress ↩ to apply the filter.", comment: "table content : lightweight filter editor : text input field : tooltip")
+        }
+
+        conjunctionLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        conjunctionLabel.textColor = .secondaryLabelColor
+        conjunctionLabel.alignment = .center
+
+        [addButton, removeButton].forEach { button in
+            button.bezelStyle = .smallSquare
+            button.imagePosition = .imageOnly
+            button.contentTintColor = .labelColor
+            button.target = self
+        }
+        addButton.toolTip = NSLocalizedString("Add filter", comment: "lightweight content add filter row tooltip")
+        addButton.action = #selector(addRule(_:))
+        removeButton.toolTip = NSLocalizedString("Remove filter", comment: "lightweight content remove filter row tooltip")
+        removeButton.action = #selector(removeRule(_:))
+
+        addSubview(checkbox)
+        addSubview(columnPopup)
+        addSubview(operatorPopup)
+        addSubview(firstValueField)
+        addSubview(conjunctionLabel)
+        addSubview(secondValueField)
+        addSubview(removeButton)
+        addSubview(addButton)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(
+        rule: SALightweightContentViewController.FilterRule,
+        columnNames: [String],
+        operators: [SALightweightContentViewController.ContentFilterDefinition],
+        selectedOperator: SALightweightContentViewController.ContentFilterDefinition
+    ) {
+        ruleID = rule.id
+        checkbox.state = rule.isEnabled ? .on : .off
+
+        columnPopup.removeAllItems()
+        columnPopup.addItems(withTitles: columnNames)
+        columnPopup.selectItem(withTitle: rule.columnName)
+
+        operatorPopup.removeAllItems()
+        operatorPopup.addItems(withTitles: operators.map { $0.title })
+        operatorPopup.selectItem(withTitle: selectedOperator.title)
+
+        let values = rule.values
+        firstValueField.stringValue = values.indices.contains(0) ? values[0] : ""
+        secondValueField.stringValue = values.indices.contains(1) ? values[1] : ""
+
+        let numberOfArguments = selectedOperator.numberOfArguments
+        firstValueField.isHidden = numberOfArguments == 0
+        conjunctionLabel.isHidden = numberOfArguments < 2
+        secondValueField.isHidden = numberOfArguments < 2
+        conjunctionLabel.stringValue = selectedOperator.conjunctionLabels.first ?? NSLocalizedString("AND", comment: "lightweight content filter conjunction")
+
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+
+        let rowHeight = Self.rowHeight
+        let controlHeight: CGFloat = 22
+        let y = floor((rowHeight - controlHeight) / 2)
+        let buttonSize: CGFloat = 22
+        let gap: CGFloat = 5
+
+        checkbox.frame = NSRect(x: 0, y: y + 2, width: 20, height: 18)
+        columnPopup.frame = NSRect(x: checkbox.frame.maxX + gap, y: y, width: 260, height: controlHeight)
+        operatorPopup.frame = NSRect(x: columnPopup.frame.maxX + gap, y: y, width: 92, height: controlHeight)
+        addButton.frame = NSRect(x: bounds.width - buttonSize, y: y, width: buttonSize, height: controlHeight)
+        removeButton.frame = NSRect(x: addButton.frame.minX - buttonSize - 3, y: y, width: buttonSize, height: controlHeight)
+
+        let valueX = operatorPopup.frame.maxX + gap
+        let valueWidth = max(80, removeButton.frame.minX - valueX - gap)
+        if secondValueField.isHidden {
+            firstValueField.frame = NSRect(x: valueX, y: y, width: valueWidth, height: controlHeight)
+        } else {
+            let labelWidth: CGFloat = 34
+            let fieldWidth = max(60, floor((valueWidth - labelWidth - gap * 2) / 2))
+            firstValueField.frame = NSRect(x: valueX, y: y, width: fieldWidth, height: controlHeight)
+            conjunctionLabel.frame = NSRect(x: firstValueField.frame.maxX + gap, y: y + 3, width: labelWidth, height: controlHeight - 4)
+            secondValueField.frame = NSRect(x: conjunctionLabel.frame.maxX + gap, y: y, width: fieldWidth, height: controlHeight)
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        return NSSize(width: 760, height: Self.rowHeight)
+    }
+
+    func focusValueField() {
+        if !firstValueField.isHidden {
+            window?.makeFirstResponder(firstValueField)
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    @objc private func enabledChanged(_ sender: Any?) {
+        guard let ruleID = ruleID else { return }
+        onEnabledChanged?(ruleID, checkbox.state == .on)
+    }
+
+    @objc private func columnChanged(_ sender: Any?) {
+        guard let ruleID = ruleID, let title = columnPopup.selectedItem?.title else { return }
+        onColumnChanged?(ruleID, title)
+    }
+
+    @objc private func operatorChanged(_ sender: Any?) {
+        guard let ruleID = ruleID, let title = operatorPopup.selectedItem?.title else { return }
+        onOperatorChanged?(ruleID, title)
+    }
+
+    @objc private func valueAction(_ sender: Any?) {
+        sendValuesChanged()
+        onApply?()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        sendValuesChanged()
+    }
+
+    private func sendValuesChanged() {
+        guard let ruleID = ruleID else { return }
+        var values: [String] = []
+        if !firstValueField.isHidden {
+            values.append(firstValueField.stringValue)
+        }
+        if !secondValueField.isHidden {
+            values.append(secondValueField.stringValue)
+        }
+        onValuesChanged?(ruleID, values)
+    }
+
+    @objc private func addRule(_ sender: Any?) {
+        guard let ruleID = ruleID else { return }
+        onAdd?(ruleID)
+    }
+
+    @objc private func removeRule(_ sender: Any?) {
+        guard let ruleID = ruleID else { return }
+        onRemove?(ruleID)
     }
 }

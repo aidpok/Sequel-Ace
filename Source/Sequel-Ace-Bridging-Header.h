@@ -56,6 +56,7 @@
 #import "SPTextAndLinkCell.h"
 #import "SPDataCellFormatter.h"
 #import "SPRuleFilterController.h"
+#import "SPTableFilterParser.h"
 #import "SPTextView.h"
 #import "SPComboPopupButton.h"
 #import "SPSQLParser.h"

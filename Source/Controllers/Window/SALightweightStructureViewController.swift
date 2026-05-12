@@ -56,6 +56,12 @@ final class SALightweightStructureViewController: NSViewController {
         let minWidth: CGFloat
     }
 
+    private struct StructureCacheEntry {
+        let rows: [StructureRow]
+        let indexes: [[String: String]]
+        let filterString: String
+    }
+
     private let structureColumns: [StructureColumn] = [
         StructureColumn(title: NSLocalizedString("Field", comment: "table structure field column"), key: "name", width: 54.5, minWidth: 50, maxWidth: 1000, isBoolean: false, editable: true),
         StructureColumn(title: NSLocalizedString("Type", comment: "table structure type column"), key: "type", width: 69.5, minWidth: 65, maxWidth: 1000, isBoolean: false, editable: true),
@@ -99,6 +105,10 @@ final class SALightweightStructureViewController: NSViewController {
     private var isSaving = false
     private var didSetInitialTablesIndexesSplitPosition = false
     private var didRegisterPreferenceObservers = false
+    private var structureCache: [String: StructureCacheEntry] = [:]
+    private var structureCacheOrder: [String] = []
+    private let maximumStructureCacheEntries = 12
+    var tableStructureDidChange: (() -> Void)?
 
     private let tablesIndexesSplitView = SPSplitView(frame: .zero)
     private let indexesHeaderView = NSView(frame: .zero)
@@ -350,12 +360,23 @@ final class SALightweightStructureViewController: NSViewController {
         }
     }
 
-    func loadStructure(for table: String, database: String, connection: SPMySQLConnection) {
+    func clearCachedTables() {
+        structureCache.removeAll()
+        structureCacheOrder.removeAll()
+    }
+
+    func loadStructure(for table: String, database: String, connection: SPMySQLConnection, useCache: Bool = true) {
+        cacheCurrentStructureState()
+
         self.table = table
         self.database = database
         self.connection = connection
         loadToken = UUID()
         let token = loadToken
+
+        if useCache, restoreCachedStructure(for: structureCacheKey(database: database, table: table)) {
+            return
+        }
 
         rows = []
         filteredRows = nil
@@ -382,6 +403,7 @@ final class SALightweightStructureViewController: NSViewController {
                 self.autosizeIndexColumns()
                 self.resetScrollPositionsAfterLayout()
                 self.updateButtonState()
+                self.cacheCurrentStructureState()
 
                 DispatchQueue.main.async {
                     guard self.loadToken == token else { return }
@@ -554,7 +576,9 @@ final class SALightweightStructureViewController: NSViewController {
                 row.isNew = false
                 row.originalName = row.name
                 self.rows[index] = row
-                self.loadStructure(for: self.table, database: self.database, connection: connection)
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
     }
@@ -878,6 +902,7 @@ final class SALightweightStructureViewController: NSViewController {
 private extension SALightweightStructureViewController {
     @objc func filterChanged(_ sender: NSSearchField) {
         reloadVisibleRows()
+        cacheCurrentStructureState()
     }
 
     @objc func addField(_ sender: Any?) {
@@ -948,14 +973,62 @@ private extension SALightweightStructureViewController {
                     return
                 }
 
-                self.loadStructure(for: self.table, database: self.database, connection: connection)
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
     }
 
     @objc func reloadTable(_ sender: Any?) {
         guard let connection = connection else { return }
-        loadStructure(for: table, database: database, connection: connection)
+        invalidateCurrentStructureCache()
+        loadStructure(for: table, database: database, connection: connection, useCache: false)
+    }
+
+    private func structureCacheKey(database: String? = nil, table: String? = nil) -> String {
+        return "\(database ?? self.database)\u{0}\(table ?? self.table)"
+    }
+
+    private func restoreCachedStructure(for key: String) -> Bool {
+        guard let cached = structureCache[key] else { return false }
+
+        rows = cached.rows
+        indexes = cached.indexes
+        structureFilterField.stringValue = cached.filterString
+        applyFilter()
+        structureTableView.reloadData()
+        indexesTableView.reloadData()
+        autosizeStructureColumns()
+        autosizeIndexColumns()
+        resetScrollPositionsAfterLayout()
+        updateButtonState()
+        noteStructureCacheUse(for: key)
+        return true
+    }
+
+    private func cacheCurrentStructureState() {
+        guard !database.isEmpty, !table.isEmpty, !rows.isEmpty else { return }
+
+        let key = structureCacheKey()
+        structureCache[key] = StructureCacheEntry(rows: rows, indexes: indexes, filterString: structureFilterField.stringValue)
+        noteStructureCacheUse(for: key)
+    }
+
+    private func noteStructureCacheUse(for key: String) {
+        structureCacheOrder.removeAll { $0 == key }
+        structureCacheOrder.append(key)
+
+        while structureCacheOrder.count > maximumStructureCacheEntries {
+            let oldKey = structureCacheOrder.removeFirst()
+            structureCache.removeValue(forKey: oldKey)
+        }
+    }
+
+    private func invalidateCurrentStructureCache() {
+        let key = structureCacheKey()
+        structureCache.removeValue(forKey: key)
+        structureCacheOrder.removeAll { $0 == key }
     }
 
     @objc func addIndex(_ sender: Any?) {
@@ -1003,7 +1076,9 @@ private extension SALightweightStructureViewController {
                     return
                 }
 
-                self.loadStructure(for: self.table, database: self.database, connection: connection)
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
     }
@@ -1038,7 +1113,9 @@ private extension SALightweightStructureViewController {
                     return
                 }
 
-                self.loadStructure(for: self.table, database: self.database, connection: connection)
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
     }
@@ -1157,7 +1234,9 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
                     return
                 }
 
-                self.loadStructure(for: self.table, database: self.database, connection: connection)
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
 
