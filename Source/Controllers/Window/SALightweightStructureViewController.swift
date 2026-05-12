@@ -35,6 +35,8 @@ final class SALightweightStructureViewController: NSViewController {
         let title: String
         let key: String
         let width: CGFloat
+        let minWidth: CGFloat
+        let maxWidth: CGFloat
         let isBoolean: Bool
         let editable: Bool
     }
@@ -51,35 +53,41 @@ final class SALightweightStructureViewController: NSViewController {
         let title: String
         let key: String
         let width: CGFloat
+        let minWidth: CGFloat
     }
 
     private let structureColumns: [StructureColumn] = [
-        StructureColumn(title: NSLocalizedString("Field", comment: "table structure field column"), key: "name", width: 210, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Type", comment: "table structure type column"), key: "type", width: 125, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Length", comment: "table structure length column"), key: "length", width: 80, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Unsigned", comment: "table structure unsigned column"), key: "unsigned", width: 86, isBoolean: true, editable: true),
-        StructureColumn(title: NSLocalizedString("Zerofill", comment: "table structure zerofill column"), key: "zerofill", width: 78, isBoolean: true, editable: true),
-        StructureColumn(title: NSLocalizedString("Binary", comment: "table structure binary column"), key: "binary", width: 70, isBoolean: true, editable: true),
-        StructureColumn(title: NSLocalizedString("Allow Null", comment: "table structure allow null column"), key: "null", width: 88, isBoolean: true, editable: true),
-        StructureColumn(title: NSLocalizedString("Key", comment: "table structure key column"), key: "Key", width: 56, isBoolean: false, editable: false),
-        StructureColumn(title: NSLocalizedString("Default", comment: "table structure default column"), key: "default", width: 120, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Extra", comment: "table structure extra column"), key: "Extra", width: 145, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Encoding", comment: "table structure encoding column"), key: "encodingName", width: 130, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Collation", comment: "table structure collation column"), key: "collationName", width: 160, isBoolean: false, editable: true),
-        StructureColumn(title: NSLocalizedString("Comment", comment: "table structure comment column"), key: "comment", width: 220, isBoolean: false, editable: true)
+        StructureColumn(title: NSLocalizedString("Field", comment: "table structure field column"), key: "name", width: 54.5, minWidth: 50, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Type", comment: "table structure type column"), key: "type", width: 69.5, minWidth: 65, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Length", comment: "table structure length column"), key: "length", width: 33.5, minWidth: 25, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Unsigned", comment: "table structure unsigned column"), key: "unsigned", width: 54, minWidth: 14, maxWidth: 82, isBoolean: true, editable: true),
+        StructureColumn(title: NSLocalizedString("Zerofill", comment: "table structure zerofill column"), key: "zerofill", width: 41, minWidth: 14, maxWidth: 84, isBoolean: true, editable: true),
+        StructureColumn(title: NSLocalizedString("Binary", comment: "table structure binary column"), key: "binary", width: 37, minWidth: 14, maxWidth: 39, isBoolean: true, editable: true),
+        StructureColumn(title: NSLocalizedString("Allow Null", comment: "table structure allow null column"), key: "null", width: 57, minWidth: 14, maxWidth: 78, isBoolean: true, editable: true),
+        StructureColumn(title: NSLocalizedString("Key", comment: "table structure key column"), key: "Key", width: 26, minWidth: 26, maxWidth: 60, isBoolean: false, editable: false),
+        StructureColumn(title: NSLocalizedString("Default", comment: "table structure default column"), key: "default", width: 39, minWidth: 34, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Extra", comment: "table structure extra column"), key: "Extra", width: 65, minWidth: 60, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Encoding", comment: "table structure encoding column"), key: "encodingName", width: 48.5, minWidth: 10, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Collation", comment: "table structure collation column"), key: "collationName", width: 54.5, minWidth: 10, maxWidth: 1000, isBoolean: false, editable: true),
+        StructureColumn(title: NSLocalizedString("Comment", comment: "table structure comment column"), key: "comment", width: 32.5, minWidth: 10, maxWidth: 1000, isBoolean: false, editable: true)
     ]
 
     private let indexColumns: [IndexColumn] = [
-        IndexColumn(title: "Non_unique", key: "Non_unique", width: 80),
-        IndexColumn(title: "Key_name", key: "Key_name", width: 120),
-        IndexColumn(title: "Seq_in_index", key: "Seq_in_index", width: 90),
-        IndexColumn(title: "Column_name", key: "Column_name", width: 140),
-        IndexColumn(title: "Collation", key: "Collation", width: 86),
-        IndexColumn(title: "Cardinality", key: "Cardinality", width: 92),
-        IndexColumn(title: "Sub_part", key: "Sub_part", width: 80),
-        IndexColumn(title: "Packed", key: "Packed", width: 80),
-        IndexColumn(title: "Comment", key: "Comment", width: 180)
+        IndexColumn(title: "Non_unique", key: "Non_unique", width: 73.5, minWidth: 40),
+        IndexColumn(title: "Key_name", key: "Key_name", width: 64.5, minWidth: 40),
+        IndexColumn(title: "Seq_in_index", key: "Seq_in_index", width: 77, minWidth: 10),
+        IndexColumn(title: "Column_name", key: "Column_name", width: 85, minWidth: 10),
+        IndexColumn(title: "Collation", key: "Collation", width: 55.5, minWidth: 10),
+        IndexColumn(title: "Cardinality", key: "Cardinality", width: 65.5, minWidth: 10),
+        IndexColumn(title: "Sub_part", key: "Sub_part", width: 56, minWidth: 10),
+        IndexColumn(title: "Packed", key: "Packed", width: 43, minWidth: 10),
+        IndexColumn(title: "Comment", key: "Comment", width: 106, minWidth: 56)
     ]
+
+    private let typeSuggestions = ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL", "DECIMAL", "BIT", "SERIAL", "BOOL", "BOOLEAN", "DEC", "FIXED", "NUMERIC", "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "MEDIUMBLOB", "BLOB", "LONGBLOB", "BINARY", "VARBINARY", "JSON", "ENUM", "SET", "DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR", "GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"]
+    private let extraSuggestions = ["None", "auto_increment", "on update CURRENT_TIMESTAMP", "SERIAL DEFAULT VALUE"]
+    private let encodingSuggestions = ["", "armscii8", "ascii", "big5", "binary", "cp1250", "cp1251", "cp1256", "cp1257", "cp850", "cp852", "cp866", "cp932", "dec8", "eucjpms", "euckr", "gb18030", "gb2312", "gbk", "geostd8", "greek", "hebrew", "hp8", "keybcs2", "koi8r", "koi8u", "latin1", "latin2", "latin5", "latin7", "macce", "macroman", "sjis", "swe7", "tis620", "ucs2", "ujis", "utf8", "utf8mb4", "utf16", "utf16le", "utf32"]
+    private let collationSuggestions = ["", "utf8_general_ci", "utf8_unicode_ci", "utf8_bin", "utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_bin", "latin1_swedish_ci", "latin1_general_ci", "latin1_bin"]
 
     private weak var connection: SPMySQLConnection?
     private var database = ""
@@ -90,6 +98,7 @@ final class SALightweightStructureViewController: NSViewController {
     private var loadToken = UUID()
     private var isSaving = false
     private var didSetInitialTablesIndexesSplitPosition = false
+    private var didRegisterPreferenceObservers = false
 
     private let tablesIndexesSplitView = SPSplitView(frame: .zero)
     private let indexesHeaderView = NSView(frame: .zero)
@@ -105,28 +114,30 @@ final class SALightweightStructureViewController: NSViewController {
     }()
 
     private lazy var structureTableView: NSTableView = {
-        let tableView = NSTableView(frame: .zero)
-        tableView.identifier = NSUserInterfaceItemIdentifier("StructureTable")
+        let tableView = SPTableView(frame: .zero)
+        tableView.identifier = NSUserInterfaceItemIdentifier("TableStructureColumnsTableView")
         tableView.dataSource = self
         tableView.delegate = self
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = false
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.style = .plain
         tableView.allowsExpansionToolTips = true
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
         tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
+        tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
 
         for column in structureColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
             tableColumn.title = column.title
             tableColumn.width = column.width
-            tableColumn.minWidth = 40
+            tableColumn.minWidth = column.minWidth
+            tableColumn.maxWidth = column.maxWidth
             tableColumn.isEditable = column.editable
+            tableColumn.resizingMask = .userResizingMask
 
             if column.isBoolean {
                 let cell = NSButtonCell()
@@ -134,6 +145,8 @@ final class SALightweightStructureViewController: NSViewController {
                 cell.title = ""
                 cell.allowsMixedState = false
                 tableColumn.dataCell = cell
+            } else if let comboCell = comboBoxCell(for: column.key) {
+                tableColumn.dataCell = comboCell
             } else {
                 let cell = NSTextFieldCell(textCell: "")
                 cell.isEditable = column.editable
@@ -167,27 +180,29 @@ final class SALightweightStructureViewController: NSViewController {
     }()
 
     private lazy var indexesTableView: NSTableView = {
-        let tableView = NSTableView(frame: .zero)
-        tableView.identifier = NSUserInterfaceItemIdentifier("IndexesTable")
+        let tableView = SPTableView(frame: .zero)
+        tableView.identifier = NSUserInterfaceItemIdentifier("TableStructureIndexesTableView")
         tableView.dataSource = self
         tableView.delegate = self
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = false
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.style = .plain
         tableView.allowsExpansionToolTips = true
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
         tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = structureTableView.rowHeight
+        tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
 
         for column in indexColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
             tableColumn.title = column.title
             tableColumn.width = column.width
-            tableColumn.minWidth = 40
+            tableColumn.minWidth = column.minWidth
+            tableColumn.maxWidth = 1000
+            tableColumn.resizingMask = .userResizingMask
             let cell = NSTextFieldCell(textCell: "")
             cell.isEditable = false
             cell.isSelectable = true
@@ -222,6 +237,8 @@ final class SALightweightStructureViewController: NSViewController {
         structureScrollView.hasVerticalScroller = true
         structureScrollView.hasHorizontalScroller = true
         structureScrollView.autohidesScrollers = true
+        structureScrollView.verticalLineScroll = 27
+        structureScrollView.horizontalLineScroll = 27
         structureScrollView.contentView.drawsBackground = false
         structureScrollView.documentView = structureTableView
         structureScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -239,6 +256,8 @@ final class SALightweightStructureViewController: NSViewController {
         indexScrollView.hasVerticalScroller = true
         indexScrollView.hasHorizontalScroller = true
         indexScrollView.autohidesScrollers = true
+        indexScrollView.verticalLineScroll = 18
+        indexScrollView.horizontalLineScroll = 18
         indexScrollView.contentView.drawsBackground = false
         indexScrollView.documentView = indexesTableView
         indexScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -306,7 +325,19 @@ final class SALightweightStructureViewController: NSViewController {
             indexToolbar.heightAnchor.constraint(equalToConstant: 26)
         ])
 
+        applyTableFont()
+        UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines, options: .new, context: nil)
+        didRegisterPreferenceObservers = true
+
         view = rootView
+    }
+
+    deinit {
+        guard didRegisterPreferenceObservers else { return }
+
+        UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
+        UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines)
     }
 
     override func viewDidLayout() {
@@ -347,8 +378,18 @@ final class SALightweightStructureViewController: NSViewController {
                 self.applyFilter()
                 self.structureTableView.reloadData()
                 self.indexesTableView.reloadData()
-                self.resetScrollPositions()
+                self.autosizeStructureColumns()
+                self.autosizeIndexColumns()
+                self.resetScrollPositionsAfterLayout()
                 self.updateButtonState()
+
+                DispatchQueue.main.async {
+                    guard self.loadToken == token else { return }
+
+                    self.autosizeStructureColumns()
+                    self.autosizeIndexColumns()
+                    self.resetScrollPositionsAfterLayout()
+                }
             }
         }
     }
@@ -623,18 +664,119 @@ final class SALightweightStructureViewController: NSViewController {
     private func reloadVisibleRows() {
         applyFilter()
         structureTableView.reloadData()
-        resetScrollPositions()
+        autosizeStructureColumns()
+        resetScrollPositionsAfterLayout()
     }
 
-    private func resetScrollPositions() {
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        if keyPath == SPGlobalFontSettings {
+            applyTableFont()
+            structureTableView.reloadData()
+            indexesTableView.reloadData()
+            autosizeStructureColumns()
+            autosizeIndexColumns()
+            return
+        }
+
+        if keyPath == SPDisplayTableViewVerticalGridlines {
+            let gridStyle: NSTableView.GridLineStyle = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+            structureTableView.gridStyleMask = gridStyle
+            indexesTableView.gridStyleMask = gridStyle
+            return
+        }
+
+        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+    }
+
+    private func applyTableFont() {
+        let tableFont = UserDefaults.getFont()
+        let rowHeight = Self.tableRowHeight(for: tableFont)
+
+        structureTableView.rowHeight = rowHeight
+        indexesTableView.rowHeight = rowHeight
+
+        for tableColumn in structureTableView.tableColumns {
+            (tableColumn.dataCell as? NSCell)?.font = tableFont
+        }
+
+        for tableColumn in indexesTableView.tableColumns {
+            (tableColumn.dataCell as? NSCell)?.font = tableFont
+        }
+    }
+
+    private static func tableRowHeight(for font: NSFont) -> CGFloat {
+        return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
+    }
+
+    private func autosizeStructureColumns() {
+        let rowsToMeasure = displayRows()
+        for column in structureColumns {
+            guard let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.key)) else { continue }
+
+            var targetWidth = measuredHeaderWidth(for: tableColumn)
+            if column.isBoolean {
+                targetWidth = max(targetWidth, 22)
+            } else {
+                for row in rowsToMeasure {
+                    let value = row.values[column.key] ?? ""
+                    targetWidth = max(targetWidth, measuredCellWidth(value, in: tableColumn))
+                }
+            }
+
+            targetWidth += 18
+            targetWidth = ceil(max(targetWidth, column.minWidth))
+            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
+            tableColumn.width = targetWidth
+        }
+    }
+
+    private func autosizeIndexColumns() {
+        for column in indexColumns {
+            guard let tableColumn = indexesTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.key)) else { continue }
+
+            var targetWidth = measuredHeaderWidth(for: tableColumn)
+            for row in indexes {
+                targetWidth = max(targetWidth, measuredCellWidth(row[column.key] ?? "", in: tableColumn))
+            }
+
+            targetWidth = ceil(max(targetWidth + 18, column.minWidth))
+            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
+            tableColumn.width = targetWidth
+        }
+    }
+
+    private func measuredHeaderWidth(for tableColumn: NSTableColumn) -> CGFloat {
+        let headerCell = tableColumn.headerCell
+        let title = headerCell.stringValue as NSString
+        let font = headerCell.font ?? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+
+        return max(headerCell.cellSize.width, title.size(withAttributes: [.font: font]).width)
+    }
+
+    private func measuredCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
+        guard let cell = (tableColumn.dataCell as? NSCell)?.copy() as? NSCell else {
+            return (value as NSString).size(withAttributes: [.font: UserDefaults.getFont()]).width
+        }
+
+        cell.stringValue = value
+        let font = cell.font ?? UserDefaults.getFont()
+
+        return max(cell.cellSize.width, (value as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    private func resetScrollPositionsAfterLayout() {
+        structureTableView.layoutSubtreeIfNeeded()
+        indexesTableView.layoutSubtreeIfNeeded()
         structureTableView.scrollColumnToVisible(0)
-        structureTableView.scrollRowToVisible(0)
         indexesTableView.scrollColumnToVisible(0)
-        indexesTableView.scrollRowToVisible(0)
-        structureTableView.enclosingScrollView?.contentView.scroll(to: .zero)
-        indexesTableView.enclosingScrollView?.contentView.scroll(to: .zero)
-        structureTableView.enclosingScrollView?.reflectScrolledClipView(structureTableView.enclosingScrollView!.contentView)
-        indexesTableView.enclosingScrollView?.reflectScrolledClipView(indexesTableView.enclosingScrollView!.contentView)
+
+        if structureTableView.numberOfRows > 0 {
+            structureTableView.scrollRowToVisible(0)
+        }
+
+        if indexesTableView.numberOfRows > 0 {
+            indexesTableView.scrollRowToVisible(0)
+        }
     }
 
     private func updateButtonState() {
@@ -646,11 +788,39 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func isStructureTable(_ tableView: NSTableView) -> Bool {
-        return tableView.identifier?.rawValue == "StructureTable"
+        return tableView.identifier?.rawValue == "TableStructureColumnsTableView"
     }
 
     private func isIndexesTable(_ tableView: NSTableView) -> Bool {
-        return tableView.identifier?.rawValue == "IndexesTable"
+        return tableView.identifier?.rawValue == "TableStructureIndexesTableView"
+    }
+
+    private func comboBoxCell(for key: String) -> NSComboBoxCell? {
+        let values: [String]
+        switch key {
+        case "type":
+            values = typeSuggestions
+        case "Extra":
+            values = extraSuggestions
+        case "encodingName":
+            values = encodingSuggestions
+        case "collationName":
+            values = collationSuggestions
+        default:
+            return nil
+        }
+
+        let cell = NSComboBoxCell(textCell: "")
+        cell.addItems(withObjectValues: values)
+        cell.isEditable = true
+        cell.isSelectable = true
+        cell.usesDataSource = false
+        cell.completes = true
+        cell.numberOfVisibleItems = key == "Extra" ? 4 : 10
+        cell.isButtonBordered = false
+        cell.lineBreakMode = .byTruncatingTail
+        cell.font = UserDefaults.getFont()
+        return cell
     }
 
     private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {

@@ -90,6 +90,10 @@ final class SADatabaseToolbarController: NSObject {
         toolbar.items.first(where: { $0.itemIdentifier == .historyNavigation })?.isEnabled = canGoBack || canGoForward
     }
 
+    func selectViewMode(_ mode: SAViewMode) {
+        toolbar.selectedItemIdentifier = mode.toolbarIdentifier
+    }
+
     func showDatabaseLoadingState() {
         databasePopUpButton.removeAllItems()
         databasePopUpButton.addItem(withTitle: NSLocalizedString("Loading Databases...", comment: "lightweight database shell database loading item"))
@@ -176,6 +180,17 @@ extension SADatabaseToolbarController: NSToolbarDelegate, NSMenuDelegate {
             .flexibleSpace,
             .space,
             .separator
+        ]
+    }
+
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return [
+            SAViewMode.structure.toolbarIdentifier,
+            SAViewMode.content.toolbarIdentifier,
+            SAViewMode.query.toolbarIdentifier,
+            SAViewMode.status.toolbarIdentifier,
+            SAViewMode.relations.toolbarIdentifier,
+            SAViewMode.triggers.toolbarIdentifier
         ]
     }
 

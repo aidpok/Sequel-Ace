@@ -2908,7 +2908,34 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMax ofSubviewAt:(NSInteger)dividerIndex
 {
-    return 145.f;
+	return 145.f;
+}
+
+#pragma mark -
+#pragma mark Favorites outline datasource bridge
+
+- (NSInteger)outlineView:(NSOutlineView *)outlineView numberOfChildrenOfItem:(id)item
+{
+	id <NSOutlineViewDataSource> dataSource = (id <NSOutlineViewDataSource>)self.favoritesListDataSource;
+	return dataSource ? [dataSource outlineView:outlineView numberOfChildrenOfItem:item] : 0;
+}
+
+- (id)outlineView:(NSOutlineView *)outlineView child:(NSInteger)index ofItem:(id)item
+{
+	id <NSOutlineViewDataSource> dataSource = (id <NSOutlineViewDataSource>)self.favoritesListDataSource;
+	return dataSource ? [dataSource outlineView:outlineView child:index ofItem:item] : nil;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item
+{
+	id <NSOutlineViewDataSource> dataSource = (id <NSOutlineViewDataSource>)self.favoritesListDataSource;
+	return dataSource ? [dataSource outlineView:outlineView isItemExpandable:item] : NO;
+}
+
+- (id)outlineView:(NSOutlineView *)outlineView objectValueForTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
+{
+	id <NSOutlineViewDataSource> dataSource = (id <NSOutlineViewDataSource>)self.favoritesListDataSource;
+	return dataSource ? [dataSource outlineView:outlineView objectValueForTableColumn:tableColumn byItem:item] : nil;
 }
 
 #pragma mark -

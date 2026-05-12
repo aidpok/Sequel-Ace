@@ -48,6 +48,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     private let loadingMessage: String
     private var rows: [[String: String]] = []
     private var isLoading = false
+    private var didRegisterPreferenceObservers = false
 
     var selectionDidChange: (() -> Void)?
     var doubleClickAction: (() -> Void)?
@@ -76,7 +77,10 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         tableView.selectionHighlightStyle = .regular
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
-        tableView.rowHeight = 22
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.backgroundColor = .controlBackgroundColor
+        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+        tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
         tableView.target = self
         tableView.doubleAction = #selector(doubleClickTable(_:))
         if #available(macOS 11.0, *) {
@@ -118,12 +122,41 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         view.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let scrollView = NSScrollView(frame: view.bounds)
+        scrollView.borderType = .noBorder
+        scrollView.focusRingType = .none
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.contentView.drawsBackground = false
         scrollView.autoresizingMask = [.width, .height]
         scrollView.documentView = tableView
         view.addSubview(scrollView)
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        registerPreferenceObserversIfNeeded()
+        applyTablePreferences()
+    }
+
+    deinit {
+        if didRegisterPreferenceObservers {
+            UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines)
+            UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
+        }
+    }
+
+    override func observeValue(forKeyPath keyPath: String?,
+                               of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        if keyPath == SPDisplayTableViewVerticalGridlines || keyPath == SPGlobalFontSettings {
+            applyTablePreferences()
+            return
+        }
+
+        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
 
     func showPlaceholder(_ message: String) {
@@ -215,6 +248,36 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
             view.addSubview(placeholderLabel)
         }
     }
+
+    private func registerPreferenceObserversIfNeeded() {
+        guard !didRegisterPreferenceObservers else { return }
+
+        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
+        didRegisterPreferenceObservers = true
+    }
+
+    private func applyTablePreferences() {
+        let tableFont = UserDefaults.getFont()
+        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+        tableView.rowHeight = Self.tableRowHeight(for: tableFont)
+
+        for column in tableView.tableColumns {
+            (column.dataCell as? NSCell)?.font = tableFont
+            column.headerCell.font = Self.headerFont(for: tableFont)
+        }
+
+        tableView.headerView?.needsDisplay = true
+        tableView.reloadData()
+    }
+
+    private static func tableRowHeight(for font: NSFont) -> CGFloat {
+        return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
+    }
+
+    private static func headerFont(for font: NSFont) -> NSFont {
+        return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
+    }
 }
 
 final class SALightweightRelationsViewController: NSViewController {
@@ -225,12 +288,13 @@ final class SALightweightRelationsViewController: NSViewController {
     private var table = ""
 
     private let tableController = SALightweightMetadataTableViewController(columns: [
-        SALightweightMetadataColumn(identifier: "constraint", title: NSLocalizedString("Constraint", comment: "relations constraint column"), width: 185, minWidth: 100),
-        SALightweightMetadataColumn(identifier: "column", title: NSLocalizedString("Column", comment: "relations column column"), width: 150, minWidth: 90),
-        SALightweightMetadataColumn(identifier: "referencedTable", title: NSLocalizedString("Referenced Table", comment: "relations referenced table column"), width: 190, minWidth: 110),
-        SALightweightMetadataColumn(identifier: "referencedColumn", title: NSLocalizedString("Referenced Column", comment: "relations referenced column column"), width: 180, minWidth: 110),
-        SALightweightMetadataColumn(identifier: "updateRule", title: NSLocalizedString("On Update", comment: "relations update rule column"), width: 120, minWidth: 80),
-        SALightweightMetadataColumn(identifier: "deleteRule", title: NSLocalizedString("On Delete", comment: "relations delete rule column"), width: 120, minWidth: 80)
+        SALightweightMetadataColumn(identifier: "name", title: NSLocalizedString("Name", comment: "relations name column"), width: 120.5, minWidth: 8),
+        SALightweightMetadataColumn(identifier: "columns", title: NSLocalizedString("Columns", comment: "relations columns column"), width: 83.5, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "fk_database", title: NSLocalizedString("FK Database", comment: "relations foreign key database column"), width: 81, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "fk_table", title: NSLocalizedString("FK Table", comment: "relations foreign key table column"), width: 90, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "fk_columns", title: NSLocalizedString("FK Columns", comment: "relations foreign key columns column"), width: 125, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "on_update", title: NSLocalizedString("On Update", comment: "relations update rule column"), width: 71, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "on_delete", title: NSLocalizedString("On Delete", comment: "relations delete rule column"), width: 65, minWidth: 10)
     ], loadingMessage: NSLocalizedString("Loading relations...", comment: "relations loading placeholder"))
 
     private lazy var titleLabel = NSTextField(labelWithString: "")
@@ -313,7 +377,7 @@ final class SALightweightRelationsViewController: NSViewController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         for row in selectedRows {
-            guard let constraint = row["constraint"], !constraint.isEmpty else { continue }
+            guard let constraint = row["name"], !constraint.isEmpty else { continue }
             let query = "ALTER TABLE \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(table)) DROP FOREIGN KEY \(SALightweightSchemaMetadataLoader.sqlIdentifier(constraint))"
             connection.queryString(query)
 
@@ -362,13 +426,13 @@ final class SALightweightTriggersViewController: NSViewController {
     private var table = ""
 
     private let tableController = SALightweightMetadataTableViewController(columns: [
-        SALightweightMetadataColumn(identifier: "name", title: NSLocalizedString("Trigger", comment: "triggers trigger column"), width: 180, minWidth: 100),
-        SALightweightMetadataColumn(identifier: "timing", title: NSLocalizedString("Timing", comment: "triggers timing column"), width: 90, minWidth: 70),
-        SALightweightMetadataColumn(identifier: "event", title: NSLocalizedString("Event", comment: "triggers event column"), width: 90, minWidth: 70),
-        SALightweightMetadataColumn(identifier: "statement", title: NSLocalizedString("Statement", comment: "triggers statement column"), width: 360, minWidth: 180),
-        SALightweightMetadataColumn(identifier: "created", title: NSLocalizedString("Created", comment: "triggers created column"), width: 150, minWidth: 100),
-        SALightweightMetadataColumn(identifier: "definer", title: NSLocalizedString("Definer", comment: "triggers definer column"), width: 180, minWidth: 100),
-        SALightweightMetadataColumn(identifier: "sqlMode", title: NSLocalizedString("SQL Mode", comment: "triggers sql mode column"), width: 220, minWidth: 120)
+        SALightweightMetadataColumn(identifier: "TriggerName", title: NSLocalizedString("Trigger", comment: "triggers trigger column"), width: 86.5, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerEvent", title: NSLocalizedString("Event", comment: "triggers event column"), width: 60, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerActionTime", title: NSLocalizedString("Timing", comment: "triggers timing column"), width: 59, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerStatement", title: NSLocalizedString("Statement", comment: "triggers statement column"), width: 224.2109375, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerDefiner", title: NSLocalizedString("Definer", comment: "triggers definer column"), width: 64, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerCreated", title: NSLocalizedString("Created", comment: "triggers created column"), width: 42, minWidth: 10),
+        SALightweightMetadataColumn(identifier: "TriggerSQLMode", title: NSLocalizedString("SQL Mode", comment: "triggers sql mode column"), width: 100.5, minWidth: 10)
     ], loadingMessage: NSLocalizedString("Loading triggers...", comment: "triggers loading placeholder"))
 
     private lazy var titleLabel = NSTextField(labelWithString: "")
@@ -451,7 +515,7 @@ final class SALightweightTriggersViewController: NSViewController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         for row in selectedRows {
-            guard let trigger = row["name"], !trigger.isEmpty else { continue }
+            guard let trigger = row["TriggerName"], !trigger.isEmpty else { continue }
             let query = "DROP TRIGGER \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(trigger))"
             connection.queryString(query)
 
@@ -495,7 +559,7 @@ final class SALightweightTriggersViewController: NSViewController {
 enum SALightweightSchemaMetadataLoader {
     static func relations(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
         let query = """
-            SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+            SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
                    COALESCE(rc.UPDATE_RULE, '') AS UPDATE_RULE, COALESCE(rc.DELETE_RULE, '') AS DELETE_RULE \
             FROM information_schema.KEY_COLUMN_USAGE kcu \
             LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
@@ -516,12 +580,13 @@ enum SALightweightSchemaMetadataLoader {
         var rows: [[String: String]] = []
         while let row = result.getRowAsDictionary() as? [String: Any] {
             rows.append([
-                "constraint": displayString(row["CONSTRAINT_NAME"]),
-                "column": displayString(row["COLUMN_NAME"]),
-                "referencedTable": displayString(row["REFERENCED_TABLE_NAME"]),
-                "referencedColumn": displayString(row["REFERENCED_COLUMN_NAME"]),
-                "updateRule": displayString(row["UPDATE_RULE"]),
-                "deleteRule": displayString(row["DELETE_RULE"])
+                "name": displayString(row["CONSTRAINT_NAME"]),
+                "columns": displayString(row["COLUMN_NAME"]),
+                "fk_database": displayString(row["REFERENCED_TABLE_SCHEMA"]),
+                "fk_table": displayString(row["REFERENCED_TABLE_NAME"]),
+                "fk_columns": displayString(row["REFERENCED_COLUMN_NAME"]),
+                "on_update": displayString(row["UPDATE_RULE"]),
+                "on_delete": displayString(row["DELETE_RULE"])
             ])
         }
 
@@ -549,13 +614,13 @@ enum SALightweightSchemaMetadataLoader {
         var rows: [[String: String]] = []
         while let row = result.getRowAsDictionary() as? [String: Any] {
             rows.append([
-                "name": displayString(row["TRIGGER_NAME"]),
-                "timing": displayString(row["ACTION_TIMING"]),
-                "event": displayString(row["EVENT_MANIPULATION"]),
-                "statement": displayString(row["ACTION_STATEMENT"]),
-                "created": displayDate(row["CREATED"]),
-                "definer": displayString(row["DEFINER"]),
-                "sqlMode": displayString(row["SQL_MODE"])
+                "TriggerName": displayString(row["TRIGGER_NAME"]),
+                "TriggerEvent": displayString(row["EVENT_MANIPULATION"]),
+                "TriggerActionTime": displayString(row["ACTION_TIMING"]),
+                "TriggerStatement": displayString(row["ACTION_STATEMENT"]),
+                "TriggerDefiner": displayString(row["DEFINER"]),
+                "TriggerCreated": displayDate(row["CREATED"]),
+                "TriggerSQLMode": displayString(row["SQL_MODE"])
             ])
         }
 

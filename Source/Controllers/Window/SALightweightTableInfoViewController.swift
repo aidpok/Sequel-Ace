@@ -82,7 +82,7 @@ enum SALightweightTableInfoLoader {
         }
 
         if let dataLength = integerValue(tableStatus["Data_length"]) {
-            rows.append(String(format: NSLocalizedString("size: %@", comment: "Table Info Section : table size on disk"), ByteCountFormatter.string(fromByteCount: dataLength, countStyle: .file)))
+            rows.append(String(format: NSLocalizedString("size: %@", comment: "Table Info Section : table size on disk"), ByteCountFormatter.string(byteSize: dataLength)))
         }
 
         if let collation = displayString(tableStatus["Collation"]) {
@@ -233,13 +233,13 @@ enum SALightweightTableInfoLoader {
 
     private static func addByteRow(key: String, label: String, status: [String: Any], rows: inout [SALightweightTableInfoRow]) {
         guard let value = integerValue(status[key]) else { return }
-        rows.append(SALightweightTableInfoRow(label, value: ByteCountFormatter.string(fromByteCount: value, countStyle: .file)))
+        rows.append(SALightweightTableInfoRow(label, value: ByteCountFormatter.string(byteSize: value) as String))
     }
 
     private static func addTotalSizeRow(tableStatus: [String: Any], rows: inout [SALightweightTableInfoRow]) {
         let totalSize = (integerValue(tableStatus["Data_length"]) ?? 0) + (integerValue(tableStatus["Index_length"]) ?? 0)
         guard totalSize > 0 else { return }
-        rows.append(SALightweightTableInfoRow(NSLocalizedString("total size", comment: "Table Info Section : total table size"), value: ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)))
+        rows.append(SALightweightTableInfoRow(NSLocalizedString("total size", comment: "Table Info Section : total table size"), value: ByteCountFormatter.string(byteSize: totalSize) as String))
     }
 
     private static func addEncodingRows(tableStatus: [String: Any], rows: inout [SALightweightTableInfoRow]) {
@@ -377,6 +377,12 @@ private enum SALightweightTableInfoObjectType {
 final class SALightweightTableInfoViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private var loadToken = UUID()
     private var rows: [SALightweightTableInfoRow] = []
+    private var didRegisterPreferenceObservers = false
+
+    private let tableContainerView = NSView(frame: .zero)
+    private let syntaxContainerView = NSView(frame: .zero)
+    private let tableScrollView = NSScrollView(frame: .zero)
+    private let syntaxScrollView = NSScrollView(frame: .zero)
 
     private lazy var placeholderLabel: NSTextField = {
         let label = NSTextField(labelWithString: "")
@@ -403,7 +409,9 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         tableView.selectionHighlightStyle = .none
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
-        tableView.rowHeight = 22
+        tableView.backgroundColor = .controlBackgroundColor
+        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+        tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
         if #available(macOS 11.0, *) {
             tableView.style = .plain
         }
@@ -436,6 +444,14 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         return tableView
     }()
 
+    private lazy var syntaxLabel: NSTextField = {
+        let label = NSTextField(labelWithString: NSLocalizedString("Create syntax:", comment: "table info create syntax label"))
+        label.alignment = .right
+        label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = .controlTextColor
+        return label
+    }()
+
     private lazy var syntaxTextView: NSTextView = {
         let textView = NSTextView(frame: .zero)
         textView.isEditable = false
@@ -454,30 +470,81 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
-        let tableScrollView = NSScrollView(frame: .zero)
+        tableScrollView.borderType = .noBorder
+        tableScrollView.focusRingType = .none
         tableScrollView.hasVerticalScroller = true
         tableScrollView.hasHorizontalScroller = true
         tableScrollView.autohidesScrollers = true
+        tableScrollView.contentView.drawsBackground = false
         tableScrollView.documentView = tableView
 
-        let syntaxScrollView = NSScrollView(frame: .zero)
+        syntaxScrollView.focusRingType = .none
         syntaxScrollView.hasVerticalScroller = true
-        syntaxScrollView.hasHorizontalScroller = true
+        syntaxScrollView.hasHorizontalScroller = false
         syntaxScrollView.autohidesScrollers = true
         syntaxScrollView.documentView = syntaxTextView
 
-        splitView.addArrangedSubview(tableScrollView)
-        splitView.addArrangedSubview(syntaxScrollView)
-        splitView.frame = view.bounds
+        tableContainerView.addSubview(tableScrollView)
+        syntaxContainerView.addSubview(syntaxLabel)
+        syntaxContainerView.addSubview(syntaxScrollView)
+        splitView.addArrangedSubview(tableContainerView)
+        splitView.addArrangedSubview(syntaxContainerView)
+        splitView.frame = view.bounds.insetBy(dx: 12, dy: 30)
         splitView.autoresizingMask = [.width, .height]
         view.addSubview(splitView)
+
+        tableScrollView.translatesAutoresizingMaskIntoConstraints = false
+        syntaxLabel.translatesAutoresizingMaskIntoConstraints = false
+        syntaxScrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint.activate([
+            tableScrollView.leadingAnchor.constraint(equalTo: tableContainerView.leadingAnchor),
+            tableScrollView.trailingAnchor.constraint(equalTo: tableContainerView.trailingAnchor),
+            tableScrollView.topAnchor.constraint(equalTo: tableContainerView.topAnchor),
+            tableScrollView.bottomAnchor.constraint(equalTo: tableContainerView.bottomAnchor),
+
+            syntaxLabel.leadingAnchor.constraint(equalTo: syntaxContainerView.leadingAnchor, constant: 3),
+            syntaxLabel.topAnchor.constraint(equalTo: syntaxContainerView.topAnchor, constant: 7),
+            syntaxLabel.widthAnchor.constraint(equalToConstant: 101),
+
+            syntaxScrollView.leadingAnchor.constraint(equalTo: syntaxContainerView.leadingAnchor, constant: 109),
+            syntaxScrollView.trailingAnchor.constraint(equalTo: syntaxContainerView.trailingAnchor),
+            syntaxScrollView.topAnchor.constraint(equalTo: syntaxContainerView.topAnchor),
+            syntaxScrollView.bottomAnchor.constraint(equalTo: syntaxContainerView.bottomAnchor)
+        ])
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        registerPreferenceObserversIfNeeded()
+        applyTablePreferences()
+    }
+
+    deinit {
+        if didRegisterPreferenceObservers {
+            UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines)
+            UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
+        }
+    }
+
+    override func observeValue(forKeyPath keyPath: String?,
+                               of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        if keyPath == SPDisplayTableViewVerticalGridlines || keyPath == SPGlobalFontSettings {
+            applyTablePreferences()
+            return
+        }
+
+        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
 
-        if splitView.arrangedSubviews.count == 2, splitView.arrangedSubviews[1].frame.height < 120 {
-            splitView.setPosition(max(220, view.bounds.height - 180), ofDividerAt: 0)
+        if splitView.arrangedSubviews.count == 2, splitView.arrangedSubviews[1].frame.height < 160 {
+            splitView.setPosition(max(120, splitView.bounds.height - 200), ofDividerAt: 0)
         }
     }
 
@@ -547,12 +614,48 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         return false
     }
 
-    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
-        guard let cell = cell as? SPTableTextFieldCell else { return }
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard row >= 0, row < rows.count else { return tableView.rowHeight }
+        return rows[row].isGroup ? 25 : tableView.rowHeight
+    }
 
-        cell.font = UserDefaults.getFont()
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard let cell = cell as? SPTableTextFieldCell, row >= 0, row < rows.count else { return }
+
+        cell.font = rows[row].isGroup ? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize) : UserDefaults.getFont()
         cell.setIndentationLevel(0)
         cell.setNote("")
-        cell.image = row > 0 && tableColumn?.identifier.rawValue == "name" ? NSImage(named: "table-property") : nil
+        cell.image = !rows[row].isGroup && tableColumn?.identifier.rawValue == "name" ? NSImage(named: "table-property") : nil
+    }
+
+    private func registerPreferenceObserversIfNeeded() {
+        guard !didRegisterPreferenceObservers else { return }
+
+        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
+        didRegisterPreferenceObservers = true
+    }
+
+    private func applyTablePreferences() {
+        let tableFont = UserDefaults.getFont()
+        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+        tableView.rowHeight = Self.tableRowHeight(for: tableFont)
+
+        for column in tableView.tableColumns {
+            (column.dataCell as? NSCell)?.font = tableFont
+            column.headerCell.font = Self.headerFont(for: tableFont)
+        }
+
+        syntaxTextView.font = tableFont
+        tableView.headerView?.needsDisplay = true
+        tableView.reloadData()
+    }
+
+    private static func tableRowHeight(for font: NSFont) -> CGFloat {
+        return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
+    }
+
+    private static func headerFont(for font: NSFont) -> NSFont {
+        return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
     }
 }

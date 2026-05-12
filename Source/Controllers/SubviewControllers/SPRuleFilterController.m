@@ -979,9 +979,10 @@ static void _addIfNotNil(NSMutableArray *array, id toAdd);
 - (void)resetFilter {
     SPTableContent *con = tableDocumentInstance.tableContentInstance;
 
-    con->toggleRuleFilterButton.state = !con->toggleRuleFilterButton.state;
-
-    [con toggleRuleEditorVisible:nil];
+    if (con) {
+        con->toggleRuleFilterButton.state = !con->toggleRuleFilterButton.state;
+        [con toggleRuleEditorVisible:nil];
+    }
 
 	[self _doChangeToRuleEditorData:^{
 		[[self->_modelContainer mutableArrayValueForKey:@"model"] removeAllObjects];

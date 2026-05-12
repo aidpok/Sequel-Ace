@@ -76,6 +76,7 @@ import SnapKit
     private let lightweightTableInfoPane = NSVisualEffectView(frame: .zero)
     private let lightweightSidebarButtonBar = NSView(frame: .zero)
     private let lightweightDetailView = NSView(frame: .zero)
+    private var didRegisterLightweightPreferenceObservers = false
 
     private lazy var tableFilterField: NSSearchField = {
         let field = NSSearchField(frame: .zero)
@@ -104,8 +105,8 @@ import SnapKit
         if #available(macOS 11.0, *) {
             tableView.style = .sourceList
         }
+        tableView.rowHeight = 25
         let tableFont = UserDefaults.getFont()
-        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: tableFont]).height
         let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tables"))
         tableColumn.width = 182
         tableColumn.minWidth = 50
@@ -134,12 +135,12 @@ import SnapKit
         tableView.selectionHighlightStyle = .sourceList
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = false
-        tableView.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        tableView.columnAutoresizingStyle = .sequentialColumnAutoresizingStyle
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
         if #available(macOS 11.0, *) {
             tableView.style = .sourceList
         }
-        tableView.rowHeight = 20
+        tableView.rowHeight = Self.lightweightInfoRowHeight(for: UserDefaults.getFont())
         let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tableInfo"))
         tableColumn.width = 182
         tableColumn.minWidth = 50
@@ -155,6 +156,15 @@ import SnapKit
         tableView.addTableColumn(tableColumn)
         return tableView
     }()
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+        if keyPath == SPGlobalFontSettings {
+            applyLightweightSidebarFontPreference()
+            return
+        }
+
+        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+    }
 
     private lazy var lightweightStatusLabel: NSTextField = {
         let label = NSTextField(labelWithString: NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
@@ -180,9 +190,11 @@ import SnapKit
     // MARK: - Accessory
     private lazy var tabAccessoryView: SPWindowTabAccessory = SPWindowTabAccessory()
 
-    deinit {
-        print("Deinit called")
-    }
+	deinit {
+		if didRegisterLightweightPreferenceObservers {
+			UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
+		}
+	}
 }
 
 // MARK: - Private API
@@ -270,8 +282,8 @@ private extension SPWindowController {
         static let sidebarMinimumWidth: CGFloat = 40
         static let detailMinimumWidth: CGFloat = 505
         static let sidebarPaneMinimumHeight: CGFloat = 20
-        static let dbViewAutosaveName = "SALightweightDBViewSplitter"
-        static let tableInfoAutosaveName = "SALightweightDbViewInfoPanelSplit"
+        static let dbViewAutosaveName = "DBViewSplitter"
+        static let tableInfoAutosaveName = "DbViewInfoPanelSplit"
     }
 
     func installLightweightDatabaseShell() {
@@ -280,12 +292,12 @@ private extension SPWindowController {
         connectionContentView.removeFromSuperviewWithoutNeedingDisplay()
         window?.toolbar = databaseToolbarController.toolbar
         databaseToolbarController.setDatabasePickerEnabled(true)
+        registerLightweightPreferenceObserversIfNeeded()
 
         let sidebarWidth = LightweightDBViewLayout.sidebarWidth
         let tableInfoHeight = LightweightDBViewLayout.tableInfoHeight
         let sidebarButtonBarHeight = LightweightDBViewLayout.sidebarButtonBarHeight
         let savedSidebarWidth = savedSplitViewFirstSubviewLength(forAutosaveName: LightweightDBViewLayout.dbViewAutosaveName, isVertical: true)
-        let savedTablesPaneHeight = savedSplitViewFirstSubviewLength(forAutosaveName: LightweightDBViewLayout.tableInfoAutosaveName, isVertical: false)
 
         lightweightShellView.removeFromSuperviewWithoutNeedingDisplay()
         lightweightShellView.frame = contentView.bounds
@@ -335,6 +347,7 @@ private extension SPWindowController {
         tableScrollView.hasHorizontalScroller = false
         tableScrollView.hasVerticalScroller = true
         tableScrollView.drawsBackground = false
+        tableScrollView.contentView.drawsBackground = false
         tablesListView.frame = tableScrollView.bounds
         tablesListView.autoresizingMask = [.width, .height]
         tableScrollView.documentView = tablesListView
@@ -354,6 +367,7 @@ private extension SPWindowController {
         tableInfoScrollView.hasHorizontalScroller = false
         tableInfoScrollView.hasVerticalScroller = false
         tableInfoScrollView.drawsBackground = false
+        tableInfoScrollView.contentView.drawsBackground = false
         lightweightTableInfoView.frame = tableInfoScrollView.bounds
         lightweightTableInfoView.autoresizingMask = [.width, .height]
         tableInfoScrollView.documentView = lightweightTableInfoView
@@ -389,7 +403,15 @@ private extension SPWindowController {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.lightweightContentSplitView.superview != nil else { return }
             self.lightweightContentSplitView.setPosition(savedSidebarWidth ?? sidebarWidth, ofDividerAt: 0)
-            self.lightweightSidebarSplitView.setPosition(savedTablesPaneHeight ?? max(LightweightDBViewLayout.sidebarPaneMinimumHeight, self.lightweightSidebarSplitView.bounds.height - tableInfoHeight), ofDividerAt: 0)
+            let defaultTablesPaneHeight = max(LightweightDBViewLayout.sidebarPaneMinimumHeight, self.lightweightSidebarSplitView.bounds.height - tableInfoHeight)
+            self.lightweightSidebarSplitView.setPosition(defaultTablesPaneHeight, ofDividerAt: 0)
+
+            if UserDefaults.standard.bool(forKey: SPTableInformationPanelCollapsed) {
+                self.lightweightSidebarSplitView.setCollapsibleSubviewCollapsed(true, animate: false)
+            } else {
+                self.lightweightSidebarSplitView.setCollapsibleSubviewCollapsed(false, animate: false)
+            }
+            self.applyLightweightSidebarFontPreference()
             self.resizeLightweightSidebarColumns()
         }
 
@@ -410,6 +432,7 @@ private extension SPWindowController {
         actionButton.bezelStyle = .regularSquare
         actionButton.image = NSImage(named: NSImage.actionTemplateName)
         actionButton.imagePosition = .imageOnly
+        actionButton.menu = NSMenu(title: "OtherViews")
         actionButton.menu?.removeAllItems()
         let imageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         imageItem.image = NSImage(named: NSImage.actionTemplateName)
@@ -420,13 +443,22 @@ private extension SPWindowController {
         addLightweightSidebarAction(NSLocalizedString("Duplicate Table...", comment: "duplicate table menu title"), #selector(duplicateLightweightTable(_:)), to: actionButton.menu)
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Truncate Table...", comment: "truncate table menu title"), #selector(truncateLightweightTable(_:)), to: actionButton.menu)
-        addLightweightSidebarAction(NSLocalizedString("Delete Table...", comment: "delete table menu title"), #selector(removeLightweightTable(_:)), to: actionButton.menu)
+        addLightweightSidebarAction(NSLocalizedString("Remove Table...", comment: "remove table menu title"), #selector(removeLightweightTable(_:)), to: actionButton.menu)
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Toggle Pin Table", comment: "toggle pin table menu item"), #selector(togglePinLightweightTable(_:)), to: actionButton.menu)
         addLightweightSidebarAction(NSLocalizedString("Open Table in New Tab", comment: "open table in new tab title"), #selector(openLightweightTableInNewTab(_:)), to: actionButton.menu)
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Refresh Tables", comment: "refresh tables menu item"), #selector(refreshLightweightTables), to: actionButton.menu)
         lightweightSidebarButtonBar.addSubview(actionButton)
+
+        let refreshButton = NSButton(frame: NSRect(x: 70, y: 0, width: 25, height: 25))
+        refreshButton.bezelStyle = .smallSquare
+        refreshButton.image = NSImage(named: NSImage.Name("NSRefreshTemplate"))
+        refreshButton.imagePosition = .imageOnly
+        refreshButton.toolTip = NSLocalizedString("Refresh table list", comment: "refresh table list tooltip")
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshLightweightTables)
+        lightweightSidebarButtonBar.addSubview(refreshButton)
 
         let quickLookButton = NSButton(frame: NSRect(x: 105, y: 0, width: 25, height: 25))
         quickLookButton.bezelStyle = .shadowlessSquare
@@ -435,6 +467,7 @@ private extension SPWindowController {
         quickLookButton.toolTip = NSLocalizedString("Toggle the visibility of the Information panel", comment: "toggle table information panel tooltip")
         quickLookButton.target = self
         quickLookButton.action = #selector(toggleLightweightTableInfoPane(_:))
+        lightweightSidebarSplitView.setToggleCollapse(quickLookButton)
         lightweightSidebarButtonBar.addSubview(quickLookButton)
 
         let handle = NSImageView(frame: NSRect(x: lightweightSidebarButtonBar.bounds.width - 25, y: 0, width: 25, height: 25))
@@ -443,6 +476,7 @@ private extension SPWindowController {
         if #available(macOS 10.14, *) {
             handle.contentTintColor = .labelColor
         }
+        lightweightContentSplitView.setAdditionalDragHandle(handle)
         lightweightSidebarButtonBar.addSubview(handle)
     }
 
@@ -543,6 +577,36 @@ private extension SPWindowController {
         }
 
         return values[lengthIndex]
+    }
+
+    func registerLightweightPreferenceObserversIfNeeded() {
+        guard !didRegisterLightweightPreferenceObservers else { return }
+
+        UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
+        didRegisterLightweightPreferenceObservers = true
+    }
+
+    func applyLightweightSidebarFontPreference() {
+        let tableFont = UserDefaults.getFont()
+        tablesListView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: tableFont]).height
+        lightweightTableInfoView.rowHeight = Self.lightweightInfoRowHeight(for: tableFont)
+
+        for column in tablesListView.tableColumns {
+            (column.dataCell as? NSCell)?.font = tableFont
+        }
+
+        for column in lightweightTableInfoView.tableColumns {
+            (column.dataCell as? NSCell)?.font = tableFont
+        }
+
+        tablesListView.reloadData()
+        lightweightTableInfoView.reloadData()
+        tablesListView.setNeedsDisplay(tablesListView.bounds)
+        lightweightTableInfoView.setNeedsDisplay(lightweightTableInfoView.bounds)
+    }
+
+    static func lightweightInfoRowHeight(for font: NSFont) -> CGFloat {
+        return ceil("{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height) + 1.0
     }
 
     func requestLightweightDatabasesIfNeeded() {
@@ -794,6 +858,7 @@ private extension SPWindowController {
         guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
 
         activeLightweightViewMode = .structure
+        databaseToolbarController.selectViewMode(.structure)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let structureView = lightweightStructureController.view
@@ -807,12 +872,17 @@ private extension SPWindowController {
         guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
 
         activeLightweightViewMode = .content
+        databaseToolbarController.selectViewMode(.content)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let contentView = lightweightContentController.view
         contentView.frame = lightweightDetailView.bounds
         contentView.autoresizingMask = [.width, .height]
         lightweightDetailView.addSubview(contentView)
+        lightweightContentController.requestLegacyContentFallback = { [weak self] in
+            guard let self = self else { return }
+            self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewContent()
+        }
         lightweightContentController.loadContent(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
@@ -820,6 +890,7 @@ private extension SPWindowController {
         guard let activeConnection = activeConnection else { return }
 
         activeLightweightViewMode = .query
+        databaseToolbarController.selectViewMode(.query)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let queryView = lightweightQueryController.view
@@ -840,6 +911,7 @@ private extension SPWindowController {
 
     func showLightweightStatus(for table: String?) {
         activeLightweightViewMode = .status
+        databaseToolbarController.selectViewMode(.status)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let tableInfoView = lightweightTableInfoController.view
@@ -857,6 +929,7 @@ private extension SPWindowController {
 
     func showLightweightRelations(for table: String?) {
         activeLightweightViewMode = .relations
+        databaseToolbarController.selectViewMode(.relations)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let relationsView = lightweightRelationsController.view
@@ -878,6 +951,7 @@ private extension SPWindowController {
 
     func showLightweightTriggers(for table: String?) {
         activeLightweightViewMode = .triggers
+        databaseToolbarController.selectViewMode(.triggers)
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let triggersView = lightweightTriggersController.view
@@ -1032,12 +1106,13 @@ private extension SPWindowController {
         if activeLightweightViewMode != .content {
             showLightweightContent(for: selectedTable)
         }
-
         lightweightContentController.focusRowFilter()
     }
 
     @objc func showLightweightFilterTable() {
-        focusLightweightContentFilter()
+        guard activeConnection != nil, loadedDatabaseDocument == nil else { return }
+
+        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).showFilterTable()
     }
 
     @objc func focusLightweightTableFilter() {
@@ -1557,7 +1632,9 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
         guard let cell = cell as? SPTableTextFieldCell else { return }
 
-        cell.font = UserDefaults.getFont()
+        cell.font = isLightweightTableInfoView(tableView) && row == 0
+            ? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+            : UserDefaults.getFont()
         cell.setIndentationLevel(0)
         cell.setNote("")
         if isLightweightTableInfoView(tableView) {

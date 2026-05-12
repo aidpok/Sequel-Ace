@@ -116,6 +116,8 @@ final class SALightweightQueryViewController: NSViewController {
     var currentQueryRange = NSRange(location: 0, length: 0)
     var requestLegacyQueryFallback: ((String?) -> Void)?
 
+    private let queryInfoPaneSplitView = SPSplitView(frame: .zero)
+    private let queryMainView = NSView(frame: .zero)
     private let queryEditorSplitView = SPSplitView(frame: .zero)
     private let queryScrollView = NSScrollView(frame: .zero)
     private let resultContainerView = NSView(frame: .zero)
@@ -124,8 +126,8 @@ final class SALightweightQueryViewController: NSViewController {
     private let bottomBarView = NSView(frame: .zero)
     private let infoPaneView = NSView(frame: .zero)
     private let infoTextScrollView = NSScrollView(frame: .zero)
-    private var infoPaneHeightConstraint: NSLayoutConstraint?
     private var didSetInitialQueryEditorSplitPosition = false
+    private var didSetInitialQueryInfoSplitPosition = false
     private static let tabularPasteboardType = NSPasteboard.PasteboardType("public.utf8-tab-separated-values-text")
 
     private lazy var actionButton: NSPopUpButton = {
@@ -185,7 +187,7 @@ final class SALightweightQueryViewController: NSViewController {
         tableView.intercellSpacing = NSSize(width: 3, height: 2)
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = 4.0 + "{AvlUzgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
+        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
         tableView.registerForDraggedTypes([Self.tabularPasteboardType, .string])
         return tableView
     }()
@@ -240,6 +242,8 @@ final class SALightweightQueryViewController: NSViewController {
         button.setButtonType(.pushOnPushOff)
         button.target = self
         button.action = #selector(toggleQueryInfoPane(_:))
+        button.keyEquivalent = "a"
+        button.keyEquivalentModifierMask = [.option, .command]
         button.toolTip = NSLocalizedString("Toggle the visibility of the Query Information Pane", comment: "query info pane toggle tooltip")
         return button
     }()
@@ -277,6 +281,11 @@ final class SALightweightQueryViewController: NSViewController {
     override func loadView() {
         let rootView = NSView(frame: .zero)
 
+        queryInfoPaneSplitView.dividerStyle = .thin
+        queryInfoPaneSplitView.isVertical = false
+        queryInfoPaneSplitView.addSubview(queryMainView)
+        queryInfoPaneSplitView.addSubview(infoPaneView)
+
         queryEditorSplitView.dividerStyle = .thin
         queryEditorSplitView.isVertical = false
         queryEditorSplitView.addSubview(queryScrollView)
@@ -303,9 +312,9 @@ final class SALightweightQueryViewController: NSViewController {
         infoTextScrollView.autohidesScrollers = true
         infoTextScrollView.documentView = infoTextView
 
-        rootView.addSubview(queryEditorSplitView)
-        rootView.addSubview(infoPaneView)
+        rootView.addSubview(queryInfoPaneSplitView)
         rootView.addSubview(bottomBarView)
+        queryMainView.addSubview(queryEditorSplitView)
         resultContainerView.addSubview(controlBarView)
         resultContainerView.addSubview(resultScrollView)
         controlBarView.addSubview(actionButton)
@@ -318,11 +327,11 @@ final class SALightweightQueryViewController: NSViewController {
         infoPaneView.addSubview(infoTitleLabel)
         infoPaneView.addSubview(infoTextScrollView)
 
+        queryInfoPaneSplitView.translatesAutoresizingMaskIntoConstraints = false
         queryEditorSplitView.translatesAutoresizingMaskIntoConstraints = false
         resultScrollView.translatesAutoresizingMaskIntoConstraints = false
         controlBarView.translatesAutoresizingMaskIntoConstraints = false
         bottomBarView.translatesAutoresizingMaskIntoConstraints = false
-        infoPaneView.translatesAutoresizingMaskIntoConstraints = false
         infoTextScrollView.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
         favoritesButton.translatesAutoresizingMaskIntoConstraints = false
@@ -333,14 +342,16 @@ final class SALightweightQueryViewController: NSViewController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         infoTitleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let infoPaneHeightConstraint = infoPaneView.heightAnchor.constraint(equalToConstant: 0)
-        self.infoPaneHeightConstraint = infoPaneHeightConstraint
-
         NSLayoutConstraint.activate([
-            queryEditorSplitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            queryEditorSplitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            queryEditorSplitView.topAnchor.constraint(equalTo: rootView.topAnchor),
-            queryEditorSplitView.bottomAnchor.constraint(equalTo: infoPaneView.topAnchor),
+            queryInfoPaneSplitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 7),
+            queryInfoPaneSplitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -4),
+            queryInfoPaneSplitView.topAnchor.constraint(equalTo: rootView.topAnchor),
+            queryInfoPaneSplitView.bottomAnchor.constraint(equalTo: bottomBarView.topAnchor),
+
+            queryEditorSplitView.leadingAnchor.constraint(equalTo: queryMainView.leadingAnchor),
+            queryEditorSplitView.trailingAnchor.constraint(equalTo: queryMainView.trailingAnchor),
+            queryEditorSplitView.topAnchor.constraint(equalTo: queryMainView.topAnchor),
+            queryEditorSplitView.bottomAnchor.constraint(equalTo: queryMainView.bottomAnchor),
 
             controlBarView.leadingAnchor.constraint(equalTo: resultContainerView.leadingAnchor),
             controlBarView.trailingAnchor.constraint(equalTo: resultContainerView.trailingAnchor),
@@ -351,11 +362,6 @@ final class SALightweightQueryViewController: NSViewController {
             resultScrollView.trailingAnchor.constraint(equalTo: resultContainerView.trailingAnchor),
             resultScrollView.topAnchor.constraint(equalTo: controlBarView.bottomAnchor),
             resultScrollView.bottomAnchor.constraint(equalTo: resultContainerView.bottomAnchor),
-
-            infoPaneView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            infoPaneView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            infoPaneView.bottomAnchor.constraint(equalTo: bottomBarView.topAnchor),
-            infoPaneHeightConstraint,
 
             bottomBarView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
             bottomBarView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
@@ -427,6 +433,11 @@ final class SALightweightQueryViewController: NSViewController {
             didSetInitialQueryEditorSplitPosition = true
         }
 
+        if !didSetInitialQueryInfoSplitPosition && queryInfoPaneSplitView.bounds.height > 0 {
+            setQueryInfoPaneVisible(false)
+            didSetInitialQueryInfoSplitPosition = true
+        }
+
         let contentSize = queryScrollView.contentSize
         queryTextView.frame = NSRect(origin: .zero, size: contentSize)
         queryTextView.minSize = contentSize
@@ -473,6 +484,7 @@ private extension SALightweightQueryViewController {
         queryTextView.setValue(queryScrollView, forKey: "scrollView")
         queryTextView.setValue(self, forKey: "customQueryInstance")
         queryTextView.awakeFromNib()
+        queryTextView.textContainerInset = NSSize(width: 4, height: 0)
         queryTextView.setAutoindent(UserDefaults.standard.bool(forKey: SPCustomQueryAutoIndent))
         queryTextView.setAutopair(UserDefaults.standard.bool(forKey: SPCustomQueryAutoPairCharacters))
         queryTextView.setAutoComplete(UserDefaults.standard.bool(forKey: SPCustomQueryAutoComplete))
@@ -517,7 +529,7 @@ private extension SALightweightQueryViewController {
     func updateAppearanceFromPreferences() {
         let tableFont = UserDefaults.getFont()
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = 4.0 + "{AvlUzgyf".size(withAttributes: [.font: tableFont]).height
+        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: tableFont]).height
         for column in tableView.tableColumns {
             if let cell = column.dataCell as? NSTextFieldCell {
                 cell.font = tableFont
@@ -2184,8 +2196,14 @@ private extension SALightweightQueryViewController {
     }
 
     func setQueryInfoPaneVisible(_ isVisible: Bool) {
-        infoPaneHeightConstraint?.constant = isVisible ? 119 : 0
         infoPaneView.isHidden = !isVisible
+        if queryInfoPaneSplitView.bounds.height > 0 {
+            let dividerPosition = isVisible
+                ? max(120, queryInfoPaneSplitView.bounds.height - 120)
+                : max(0, queryInfoPaneSplitView.bounds.height - queryInfoPaneSplitView.dividerThickness)
+            queryInfoPaneSplitView.setPosition(dividerPosition, ofDividerAt: 0)
+            queryInfoPaneSplitView.adjustSubviews()
+        }
         queryInfoButton.state = isVisible ? .on : .off
     }
 
