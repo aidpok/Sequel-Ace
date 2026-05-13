@@ -673,7 +673,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 - (void) doAutoCompletion
 {
-	if(completionIsOpen || !self || ![self delegate]) return;
+	if(completionIsOpen || !self || ![self delegate] || suppressAutocompleteUntilWordBreak || !autocompleteEnabled) return;
 
 	// Cancel autocompletion trigger
     if([prefs boolForKey:SPCustomQueryAutoComplete]){
@@ -685,7 +685,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	NSRange r = [self selectedRange];
 
-	if(![self delegate] || ![[self delegate] isKindOfClass:[SPCustomQuery class]] || r.length || snippetControlCounter > -1) return;
+	if(![self delegate] || (![[self delegate] isKindOfClass:[SPCustomQuery class]] && ![customQueryInstance respondsToSelector:@selector(showAutoHelpForCurrentWord:)]) || r.length || snippetControlCounter > -1) return;
 
 	if(r.location) {
 		NSCharacterSet *ignoreCharacterSet = [NSCharacterSet characterSetWithCharactersInString:@"\"'`;,()[]{}=+/<> \t\n\r"];
@@ -1192,6 +1192,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	}
 
 	return NO;
+}
+
+- (BOOL)isAutocompleteWordCharacter:(unichar)aChar
+{
+	return [[NSCharacterSet alphanumericCharacterSet] characterIsMember:aChar]
+		|| aChar == '_'
+		|| aChar == '.'
+		|| aChar == '`';
 }
 
 #pragma mark -
@@ -2312,6 +2320,17 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSString *charactersIgnMod = [theEvent charactersIgnoringModifiers];
 	unichar insertedCharacter = [characters characterAtIndex:0];
 	NSEventModifierFlags curFlags = ([theEvent modifierFlags] & allFlags);
+	BOOL shouldSuppressAutocompleteForSelectedWordReplacement = ([self selectedRange].length > 0
+		&& [characters length] == 1
+		&& (curFlags == 0 || curFlags == NSEventModifierFlagShift)
+		&& [self isAutocompleteWordCharacter:insertedCharacter]);
+
+	if(shouldSuppressAutocompleteForSelectedWordReplacement) {
+		suppressAutocompleteUntilWordBreak = YES;
+	}
+	else if(suppressAutocompleteUntilWordBreak && ![self isAutocompleteWordCharacter:insertedCharacter]) {
+		suppressAutocompleteUntilWordBreak = NO;
+	}
 
 	if ([theEvent keyCode] == 53 && [self isEditable]){ // ESC key for internal completion
 
@@ -3468,7 +3487,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	}
 
 	// Start autocompletion if enabled
-	if ([[NSApp keyWindow] firstResponder] == self && [prefs boolForKey:SPCustomQueryAutoComplete] && !completionIsOpen && editedMask != 1 && delta == 1) {
+	if ([[NSApp keyWindow] firstResponder] == self && [prefs boolForKey:SPCustomQueryAutoComplete] && autocompleteEnabled && !suppressAutocompleteUntilWordBreak && !completionIsOpen && editedMask != 1 && delta == 1) {
 		[self performSelector:@selector(doAutoCompletion) withObject:nil afterDelay:[[prefs valueForKey:SPCustomQueryAutoCompleteDelay] doubleValue]];
 	}
 

@@ -45,6 +45,14 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
     /// Reference to favorites controller for save operations.
     @objc var favoritesController: SPFavoritesController
 
+    private var favoritesContainer: SPTreeNode? {
+        childNodes(for: favoritesRoot).first
+    }
+
+    private func childNodes(for node: SPTreeNode) -> [SPTreeNode] {
+        (node.children ?? []).compactMap { $0 as? SPTreeNode }
+    }
+
     // MARK: - Initialization
 
     @objc init(favoritesRoot: SPTreeNode, favoritesController: SPFavoritesController) {
@@ -82,7 +90,6 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
     /// Reloads the outline view data and expands the root node.
     @objc func reloadData(in outlineView: NSOutlineView) {
         outlineView.reloadData()
-        outlineView.expandItem(outlineView.item(atRow: 0), expandChildren: false)
     }
 
     /// Recursively restores expand/collapse state from stored node preferences.
@@ -108,28 +115,29 @@ extension SAFavoritesListDataSource: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         let node = (item as? SPTreeNode) ?? favoritesRoot
 
-        // Add 1 at root level for the Quick Connect entry
         if item == nil {
-            return (node.children?.count ?? 0) + 1
+            guard let favoritesContainer else { return 1 }
+            return 2 + childNodes(for: favoritesContainer).count
         }
-        return node.children?.count ?? 0
+        return childNodes(for: node).count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        var adjustedIndex = index
-
-        // At root level, index 0 is Quick Connect; shift others down
         if item == nil {
-            if adjustedIndex == 0 {
+            if index == 0 {
                 return quickConnectItem
             }
-            adjustedIndex -= 1
+
+            if index == 1 {
+                return favoritesContainer ?? NSNull()
+            }
+
+            guard let favoritesContainer else { return NSNull() }
+            return childNodes(for: favoritesContainer)[safe: index - 2] ?? NSNull()
         }
 
         let node = (item as? SPTreeNode) ?? favoritesRoot
-        guard let children = node.children, adjustedIndex < children.count
-        else { return NSNull() }
-        return children[adjustedIndex]
+        return childNodes(for: node)[safe: index] ?? NSNull()
     }
 
     func outlineView(_ outlineView: NSOutlineView, objectValueFor tableColumn: NSTableColumn?, byItem item: Any?) -> Any? {
@@ -344,7 +352,7 @@ extension SAFavoritesListDataSource: NSOutlineViewDelegate {
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         guard let node = item as? SPTreeNode else { return false }
-        return node !== quickConnectItem && !node.isLeaf
+        return node !== quickConnectItem && node.parent?.parent != nil && !childNodes(for: node).isEmpty
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {

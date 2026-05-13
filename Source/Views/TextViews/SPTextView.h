@@ -87,10 +87,11 @@ typedef struct {
 	BOOL snippetWasJustInserted;
 	BOOL isProcessingMirroredSnippets;
 
-	BOOL completionIsOpen;
-	BOOL completionWasReinvokedAutomatically;
-	BOOL completionWasRefreshed;
-	NSUInteger completionParseRangeLocation;
+		BOOL completionIsOpen;
+		BOOL completionWasReinvokedAutomatically;
+		BOOL completionWasRefreshed;
+		BOOL suppressAutocompleteUntilWordBreak;
+		NSUInteger completionParseRangeLocation;
 
 	NSColor *queryHiliteColor;
 	NSColor *queryEditorBackgroundColor;

@@ -42,6 +42,7 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private struct StructureRow {
+        let id = UUID()
         var values: [String: String]
         var originalName: String?
         var isNew = false
@@ -60,6 +61,10 @@ final class SALightweightStructureViewController: NSViewController {
         let rows: [StructureRow]
         let indexes: [[String: String]]
         let filterString: String
+        let structureSortKey: String?
+        let structureSortAscending: Bool
+        let indexSortKey: String?
+        let indexSortAscending: Bool
     }
 
     private let structureColumns: [StructureColumn] = [
@@ -105,6 +110,11 @@ final class SALightweightStructureViewController: NSViewController {
     private var isSaving = false
     private var didSetInitialTablesIndexesSplitPosition = false
     private var didRegisterPreferenceObservers = false
+    private var isApplyingProgrammaticColumnWidths = false
+    private var structureSortKey: String?
+    private var structureSortAscending = true
+    private var indexSortKey: String?
+    private var indexSortAscending = true
     private var structureCache: [String: StructureCacheEntry] = [:]
     private var structureCacheOrder: [String] = []
     private let maximumStructureCacheEntries = 12
@@ -143,11 +153,12 @@ final class SALightweightStructureViewController: NSViewController {
         for column in structureColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
             tableColumn.title = column.title
-            tableColumn.width = column.width
+            tableColumn.width = savedWidth(for: column.key, inIndexesTable: false) ?? column.width
             tableColumn.minWidth = column.minWidth
             tableColumn.maxWidth = column.maxWidth
             tableColumn.isEditable = column.editable
             tableColumn.resizingMask = .userResizingMask
+            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.key, ascending: true)
 
             if column.isBoolean {
                 let cell = NSButtonCell()
@@ -209,10 +220,11 @@ final class SALightweightStructureViewController: NSViewController {
         for column in indexColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
             tableColumn.title = column.title
-            tableColumn.width = column.width
+            tableColumn.width = savedWidth(for: column.key, inIndexesTable: true) ?? column.width
             tableColumn.minWidth = column.minWidth
             tableColumn.maxWidth = 1000
             tableColumn.resizingMask = .userResizingMask
+            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.key, ascending: true)
             let cell = NSTextFieldCell(textCell: "")
             cell.isEditable = false
             cell.isSelectable = true
@@ -371,6 +383,7 @@ final class SALightweightStructureViewController: NSViewController {
         self.table = table
         self.database = database
         self.connection = connection
+        applySavedColumnWidths()
         loadToken = UUID()
         let token = loadToken
 
@@ -397,6 +410,7 @@ final class SALightweightStructureViewController: NSViewController {
                 self.rows = fields
                 self.indexes = indexes
                 self.applyFilter()
+                self.applyIndexSort()
                 self.structureTableView.reloadData()
                 self.indexesTableView.reloadData()
                 self.autosizeStructureColumns()
@@ -517,27 +531,61 @@ final class SALightweightStructureViewController: NSViewController {
     private func sourceIndex(forDisplayedRow displayedRow: Int) -> Int? {
         let displayedRows = displayRows()
         guard displayedRow >= 0, displayedRow < displayedRows.count else { return nil }
-        let originalName = displayedRows[displayedRow].originalName
-        let currentName = displayedRows[displayedRow].name
-        return rows.firstIndex { row in
-            if let originalName = originalName {
-                return row.originalName == originalName
-            }
-            return row.name == currentName
-        }
+        let id = displayedRows[displayedRow].id
+        return rows.firstIndex { $0.id == id }
+    }
+
+    private func displayedIndex(forRowID rowID: UUID) -> Int? {
+        return displayRows().firstIndex { $0.id == rowID }
     }
 
     private func applyFilter() {
         let filter = structureFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !filter.isEmpty else {
+        var displayedRows = rows
+
+        if !filter.isEmpty {
+            displayedRows = displayedRows.filter { row in
+                structureColumns.contains { column in
+                    (row.values[column.key] ?? "").range(of: filter, options: .caseInsensitive) != nil
+                }
+            }
+        }
+
+        if let structureSortKey = structureSortKey {
+            displayedRows.sort { first, second in
+                compare(first.values[structureSortKey] ?? "", second.values[structureSortKey] ?? "", ascending: structureSortAscending)
+            }
+        }
+
+        guard !filter.isEmpty || structureSortKey != nil else {
             filteredRows = nil
             return
         }
 
-        filteredRows = rows.filter { row in
-            structureColumns.contains { column in
-                (row.values[column.key] ?? "").range(of: filter, options: .caseInsensitive) != nil
-            }
+        filteredRows = displayedRows
+    }
+
+    private func compare(_ first: String, _ second: String, ascending: Bool) -> Bool {
+        let result = first.localizedStandardCompare(second)
+        if result == .orderedSame {
+            return false
+        }
+
+        return ascending ? result == .orderedAscending : result == .orderedDescending
+    }
+
+    private func resetStructureFilteringForInsertion() {
+        structureFilterField.stringValue = ""
+        structureSortKey = nil
+        structureTableView.sortDescriptors = []
+        filteredRows = nil
+    }
+
+    private func applyIndexSort() {
+        guard let indexSortKey = indexSortKey else { return }
+
+        indexes.sort { first, second in
+            compare(first[indexSortKey] ?? "", second[indexSortKey] ?? "", ascending: indexSortAscending)
         }
     }
 
@@ -733,9 +781,15 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func autosizeStructureColumns() {
+        isApplyingProgrammaticColumnWidths = true
+        defer { isApplyingProgrammaticColumnWidths = false }
+
         let rowsToMeasure = displayRows()
         for column in structureColumns {
             guard let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.key)) else { continue }
+            if savedWidth(for: column.key, inIndexesTable: false) != nil {
+                continue
+            }
 
             var targetWidth = measuredHeaderWidth(for: tableColumn)
             if column.isBoolean {
@@ -755,8 +809,14 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func autosizeIndexColumns() {
+        isApplyingProgrammaticColumnWidths = true
+        defer { isApplyingProgrammaticColumnWidths = false }
+
         for column in indexColumns {
             guard let tableColumn = indexesTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.key)) else { continue }
+            if savedWidth(for: column.key, inIndexesTable: true) != nil {
+                continue
+            }
 
             var targetWidth = measuredHeaderWidth(for: tableColumn)
             for row in indexes {
@@ -885,6 +945,53 @@ final class SALightweightStructureViewController: NSViewController {
         NSAlert.createWarningAlert(title: title, message: message ?? "", callback: nil)
     }
 
+    private func savedWidthKey(for columnKey: String, inIndexesTable: Bool) -> String {
+        return "\(inIndexesTable ? "indexes" : "structure").\(columnKey)"
+    }
+
+    private func savedWidth(for columnKey: String, inIndexesTable: Bool) -> CGFloat? {
+        guard let host = connection?.host,
+              !host.isEmpty,
+              let savedWidths = UserDefaults.standard.dictionary(forKey: SPTableColumnWidths),
+              let databaseWidths = savedWidths["\(database)@\(host)"] as? [String: Any],
+              let tableWidths = databaseWidths[table] as? [String: Any],
+              let width = tableWidths[savedWidthKey(for: columnKey, inIndexesTable: inIndexesTable)] as? NSNumber else { return nil }
+
+        return CGFloat(truncating: width)
+    }
+
+    private func saveWidth(for tableColumn: NSTableColumn, inIndexesTable: Bool) {
+        guard !isApplyingProgrammaticColumnWidths,
+              let host = connection?.host,
+              !host.isEmpty else { return }
+
+        let databaseKey = "\(database)@\(host)"
+        let columnKey = savedWidthKey(for: tableColumn.identifier.rawValue, inIndexesTable: inIndexesTable)
+        var savedWidths = UserDefaults.standard.dictionary(forKey: SPTableColumnWidths) ?? [:]
+        var databaseWidths = savedWidths[databaseKey] as? [String: Any] ?? [:]
+        var tableWidths = databaseWidths[table] as? [String: Any] ?? [:]
+
+        tableWidths[columnKey] = NSNumber(value: Double(tableColumn.width))
+        databaseWidths[table] = tableWidths
+        savedWidths[databaseKey] = databaseWidths
+        UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
+    }
+
+    private func applySavedColumnWidths() {
+        isApplyingProgrammaticColumnWidths = true
+        defer { isApplyingProgrammaticColumnWidths = false }
+
+        for tableColumn in structureTableView.tableColumns {
+            guard let width = savedWidth(for: tableColumn.identifier.rawValue, inIndexesTable: false) else { continue }
+            tableColumn.width = width
+        }
+
+        for tableColumn in indexesTableView.tableColumns {
+            guard let width = savedWidth(for: tableColumn.identifier.rawValue, inIndexesTable: true) else { continue }
+            tableColumn.width = width
+        }
+    }
+
     private static func displayString(for value: Any?) -> String {
         guard let value = value, !(value is NSNull) else { return "" }
         return String(describing: value)
@@ -906,7 +1013,10 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func addField(_ sender: Any?) {
-        let insertIndex = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow + 1 : rows.count
+        let selectedRow = structureTableView.selectedRow
+        let selectedSourceIndex = sourceIndex(forDisplayedRow: selectedRow)
+        let insertIndex = selectedSourceIndex.map { $0 + 1 } ?? rows.count
+        resetStructureFilteringForInsertion()
         let previousAllowsNull = UserDefaults.standard.bool(forKey: SPNewFieldsAllowNulls)
         let row = StructureRow(values: [
             "name": "",
@@ -926,24 +1036,28 @@ private extension SALightweightStructureViewController {
 
         rows.insert(row, at: insertIndex)
         reloadVisibleRows()
-        structureTableView.selectRowIndexes(IndexSet(integer: insertIndex), byExtendingSelection: false)
-        structureTableView.editColumn(0, row: insertIndex, with: nil, select: true)
+        if let displayedIndex = displayedIndex(forRowID: row.id) {
+            structureTableView.selectRowIndexes(IndexSet(integer: displayedIndex), byExtendingSelection: false)
+            structureTableView.editColumn(0, row: displayedIndex, with: nil, select: true)
+        }
         updateButtonState()
     }
 
     @objc func duplicateField(_ sender: Any?) {
         let selectedRow = structureTableView.selectedRow
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow) else { return }
-        var row = rows[sourceIndex]
-        row.values["name"] = row.name + "Copy"
-        row.values["Key"] = ""
-        row.values["Extra"] = "None"
-        row.originalName = nil
-        row.isNew = true
+        resetStructureFilteringForInsertion()
+        var values = rows[sourceIndex].values
+        values["name"] = rows[sourceIndex].name + "Copy"
+        values["Key"] = ""
+        values["Extra"] = "None"
+        let row = StructureRow(values: values, originalName: nil, isNew: true)
         rows.insert(row, at: sourceIndex + 1)
         reloadVisibleRows()
-        structureTableView.selectRowIndexes(IndexSet(integer: sourceIndex + 1), byExtendingSelection: false)
-        structureTableView.editColumn(0, row: sourceIndex + 1, with: nil, select: true)
+        if let displayedIndex = displayedIndex(forRowID: row.id) {
+            structureTableView.selectRowIndexes(IndexSet(integer: displayedIndex), byExtendingSelection: false)
+            structureTableView.editColumn(0, row: displayedIndex, with: nil, select: true)
+        }
         updateButtonState()
     }
 
@@ -996,7 +1110,14 @@ private extension SALightweightStructureViewController {
         rows = cached.rows
         indexes = cached.indexes
         structureFilterField.stringValue = cached.filterString
+        structureSortKey = cached.structureSortKey
+        structureSortAscending = cached.structureSortAscending
+        indexSortKey = cached.indexSortKey
+        indexSortAscending = cached.indexSortAscending
+        structureTableView.sortDescriptors = cached.structureSortKey.map { [NSSortDescriptor(key: $0, ascending: cached.structureSortAscending)] } ?? []
+        indexesTableView.sortDescriptors = cached.indexSortKey.map { [NSSortDescriptor(key: $0, ascending: cached.indexSortAscending)] } ?? []
         applyFilter()
+        applyIndexSort()
         structureTableView.reloadData()
         indexesTableView.reloadData()
         autosizeStructureColumns()
@@ -1011,7 +1132,13 @@ private extension SALightweightStructureViewController {
         guard !database.isEmpty, !table.isEmpty, !rows.isEmpty else { return }
 
         let key = structureCacheKey()
-        structureCache[key] = StructureCacheEntry(rows: rows, indexes: indexes, filterString: structureFilterField.stringValue)
+        structureCache[key] = StructureCacheEntry(rows: rows,
+                                                 indexes: indexes,
+                                                 filterString: structureFilterField.stringValue,
+                                                 structureSortKey: structureSortKey,
+                                                 structureSortAscending: structureSortAscending,
+                                                 indexSortKey: indexSortKey,
+                                                 indexSortAscending: indexSortAscending)
         noteStructureCacheUse(for: key)
     }
 
@@ -1188,34 +1315,74 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
         updateButtonState()
     }
 
+    func tableViewColumnDidResize(_ notification: Notification) {
+        guard let tableView = notification.object as? NSTableView,
+              let tableColumn = notification.userInfo?["NSTableColumn"] as? NSTableColumn else { return }
+
+        if isStructureTable(tableView) {
+            saveWidth(for: tableColumn, inIndexesTable: false)
+        } else if isIndexesTable(tableView) {
+            saveWidth(for: tableColumn, inIndexesTable: true)
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard let descriptor = tableView.sortDescriptors.first,
+              let key = descriptor.key else { return }
+
+        if isStructureTable(tableView) {
+            structureSortKey = key
+            structureSortAscending = descriptor.ascending
+            reloadVisibleRows()
+            cacheCurrentStructureState()
+        } else if isIndexesTable(tableView) {
+            indexSortKey = key
+            indexSortAscending = descriptor.ascending
+            applyIndexSort()
+            indexesTableView.reloadData()
+            autosizeIndexColumns()
+            cacheCurrentStructureState()
+        }
+    }
+
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
-        guard isStructureTable(tableView), let row = rowIndexes.first, sourceIndex(forDisplayedRow: row) != nil else { return false }
+        guard isStructureTable(tableView),
+              structureFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              structureSortKey == nil,
+              let row = rowIndexes.first,
+              let sourceIndex = sourceIndex(forDisplayedRow: row) else { return false }
         pasteboard.declareTypes([NSPasteboard.PasteboardType("SequelAceLightweightStructureRow")], owner: nil)
-        pasteboard.setString("\(row)", forType: NSPasteboard.PasteboardType("SequelAceLightweightStructureRow"))
+        pasteboard.setString(rows[sourceIndex].id.uuidString, forType: NSPasteboard.PasteboardType("SequelAceLightweightStructureRow"))
         return true
     }
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard isStructureTable(tableView), dropOperation == .above, row >= 0 else { return [] }
+        guard isStructureTable(tableView),
+              dropOperation == .above,
+              row >= 0,
+              !isSaving,
+              structureFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              structureSortKey == nil else { return [] }
         return .move
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row destinationRow: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard isStructureTable(tableView),
               let connection = connection,
-              let sourceRowString = info.draggingPasteboard.string(forType: NSPasteboard.PasteboardType("SequelAceLightweightStructureRow")),
-              let displayedSourceRow = Int(sourceRowString),
-              let sourceIndex = sourceIndex(forDisplayedRow: displayedSourceRow),
+              let sourceIDString = info.draggingPasteboard.string(forType: NSPasteboard.PasteboardType("SequelAceLightweightStructureRow")),
+              let sourceID = UUID(uuidString: sourceIDString),
+              let sourceIndex = rows.firstIndex(where: { $0.id == sourceID }),
               sourceIndex >= 0,
               sourceIndex < rows.count else { return false }
 
         let movingRow = rows[sourceIndex]
         let destinationIndex = max(0, min(destinationRow, rows.count))
+        guard destinationIndex != sourceIndex, destinationIndex != sourceIndex + 1 else { return false }
         var query = "ALTER TABLE \(tableReference()) MODIFY COLUMN \(columnDefinition(for: movingRow))"
         if destinationIndex == 0 {
             query += " FIRST"
         } else {
-            let afterIndex = destinationIndex > sourceIndex ? destinationIndex - 1 : destinationIndex - 1
+            let afterIndex = destinationIndex - 1
             if afterIndex >= 0, afterIndex < rows.count {
                 query += " AFTER \(Self.backtickQuoted(rows[afterIndex].name))"
             }

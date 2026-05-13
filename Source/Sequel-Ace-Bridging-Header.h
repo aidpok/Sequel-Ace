@@ -58,6 +58,7 @@
 #import "SPRuleFilterController.h"
 #import "SPTableFilterParser.h"
 #import "SPTextView.h"
+#import "SPBracketHighlighter.h"
 #import "SPComboPopupButton.h"
 #import "SPSQLParser.h"
 #import "SPQueryController.h"

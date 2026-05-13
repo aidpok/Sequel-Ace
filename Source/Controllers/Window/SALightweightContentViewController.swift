@@ -54,6 +54,8 @@ final class SALightweightContentViewController: NSViewController {
         let rows: [ContentRow]
         let pageIndex: Int
         let pageSize: Int
+        let limitResults: Bool
+        let tableObjectType: TableObjectType
         let totalRowCount: Int?
         let totalRowCountIsEstimate: Bool
         let hasNextPage: Bool
@@ -95,6 +97,12 @@ final class SALightweightContentViewController: NSViewController {
         case object(Any)
     }
 
+    private enum TableObjectType {
+        case table
+        case view
+        case unknown
+    }
+
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
@@ -114,6 +122,7 @@ final class SALightweightContentViewController: NSViewController {
     private var isApplyingProgrammaticColumnWidths = false
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
+    private var tableObjectType: TableObjectType = .unknown
     private var ruleFilterColumnsKey = ""
     private var filterRules: [FilterRule] = []
     private var defaultContentFilters: [String: [ContentFilterDefinition]] = [:]
@@ -125,9 +134,18 @@ final class SALightweightContentViewController: NSViewController {
     private var ruleFilterHeightConstraint: NSLayoutConstraint?
     private var isRestoringCachedContent = false
     var requestLegacyContentFallback: (() -> Void)?
+    var tableContentDidChange: (() -> Void)?
+    private var limitResults: Bool {
+        UserDefaults.standard.bool(forKey: SPLimitResults)
+    }
+
     private var pageSize: Int {
         let preferredPageSize = UserDefaults.standard.integer(forKey: SPLimitResultsValue)
         return max(1, preferredPageSize > 0 ? preferredPageSize : 1_000)
+    }
+
+    private var canModifyRows: Bool {
+        tableObjectType == .table && !isLoading
     }
 
     private lazy var statusLabel: NSTextField = {
@@ -431,6 +449,7 @@ final class SALightweightContentViewController: NSViewController {
         self.connection = connection
         loadToken = UUID()
         isRuleFilterActive = restoredActiveRuleFilters.contains(ruleFilterStorageKey(database: database, table: table))
+        tableObjectType = .unknown
         ruleFilterColumnsKey = ""
         filterRules = []
 
@@ -498,15 +517,16 @@ private extension SALightweightContentViewController {
         loadToken = UUID()
         let token = loadToken
         let pageSize = self.pageSize
-        let offset = pageIndex * pageSize
+        let limitResults = self.limitResults
+        let offset = limitResults ? pageIndex * pageSize : 0
         let filter = ruleFilterStringForCurrentState(showError: true)
         guard !filter.failed else { return }
 
         invalidateCurrentContentCache()
-        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset)
+        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults)
     }
 
-    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int) {
+    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool) {
         guard let connection = connection else { return }
 
         isLoading = true
@@ -514,6 +534,7 @@ private extension SALightweightContentViewController {
         columnInfo = []
         rows = []
         filteredColumns = []
+        tableObjectType = .unknown
         totalRowCount = nil
         totalRowCountIsEstimate = false
         hasNextPage = false
@@ -525,9 +546,10 @@ private extension SALightweightContentViewController {
             guard let self = self, let connection = connection else { return }
 
             _ = connection.selectDatabase(self.database)
+            let tableObjectType = self.loadTableObjectType(connection: connection)
             let columnInfo = self.loadColumnInfo(connection: connection)
-            let rowCount = self.rowCount(whereClause: whereClause, connection: connection)
-            let query = self.contentQuery(offset: offset, limit: pageSize + 1, whereClause: whereClause, columnInfo: columnInfo)
+            let rowCount = limitResults ? self.rowCount(whereClause: whereClause, connection: connection) : nil
+            let query = self.contentQuery(offset: offset, limit: pageSize + 1, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
             let result = connection.queryString(query)
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
 
@@ -545,7 +567,7 @@ private extension SALightweightContentViewController {
                 loadedRows.append(ContentRow(values: values, originalValues: values))
             }
 
-            let hasNextPage = loadedRows.count > pageSize
+            let hasNextPage = limitResults && loadedRows.count > pageSize
             if hasNextPage {
                 loadedRows.removeLast()
             }
@@ -574,8 +596,9 @@ private extension SALightweightContentViewController {
                 self.columns = fieldNames
                 self.columnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
                 self.rows = loadedRows
-                self.totalRowCount = rowCount?.count
-                self.totalRowCountIsEstimate = rowCount?.isEstimate ?? false
+                self.tableObjectType = tableObjectType
+                self.totalRowCount = rowCount?.count ?? (limitResults ? nil : loadedRows.count)
+                self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
                 self.hasNextPage = hasNextPage
                 self.configureRuleFilterColumnsIfNeeded()
                 self.applyColumnFilter()
@@ -587,7 +610,7 @@ private extension SALightweightContentViewController {
         }
     }
 
-    private func contentQuery(offset: Int, limit: Int, whereClause: String?, columnInfo: [ColumnInfo]) -> String {
+    private func contentQuery(offset: Int, limit: Int, whereClause: String?, columnInfo: [ColumnInfo], limitResults: Bool) -> String {
         let fields = columnInfo.isEmpty ? "*" : columnInfo.map { column -> String in
             if column.loadBlobAsNeeded {
                 return "NULL AS \(Self.backtickQuoted(column.name))"
@@ -606,8 +629,29 @@ private extension SALightweightContentViewController {
             query += " ORDER BY \(Self.backtickQuoted(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
         }
 
-        query += " LIMIT \(offset),\(limit)"
+        if limitResults {
+            query += " LIMIT \(offset),\(limit)"
+        }
         return query
+    }
+
+    private func loadTableObjectType(connection: SPMySQLConnection) -> TableObjectType {
+        guard let quotedTable = connection.escapeAndQuoteString(table) else { return .unknown }
+
+        let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database)) LIKE \(quotedTable)")
+        result?.returnDataAsStrings = true
+        result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
+
+        guard let row = result?.getRowAsDictionary() as? [String: Any] else { return .unknown }
+        let tableType = row.first { key, _ in
+            String(describing: key).lowercased().contains("table_type")
+        }.map { Self.displayString(for: $0.value).uppercased() } ?? ""
+
+        if tableType.contains("VIEW") {
+            return .view
+        }
+
+        return tableType.isEmpty ? .unknown : .table
     }
 
     private func rowCount(whereClause: String?, connection: SPMySQLConnection) -> (count: Int, isEstimate: Bool)? {
@@ -713,7 +757,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func addRow(_ sender: Any?) {
-        guard connection != nil, !isLoading else { return }
+        guard connection != nil, canModifyRows else { return }
 
         runMutation(status: NSLocalizedString("Adding row...", comment: "lightweight content adding row")) { [database, table] connection in
             let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) () VALUES ()"
@@ -722,7 +766,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func duplicateRow(_ sender: Any?) {
-        guard connection != nil, !isLoading else { return }
+        guard connection != nil, canModifyRows else { return }
 
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0, selectedRow < rows.count else { return }
@@ -743,7 +787,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func deleteRows(_ sender: Any?) {
-        guard connection != nil, !isLoading else { return }
+        guard connection != nil, canModifyRows else { return }
 
         let selectedIndexes = tableView.selectedRowIndexes
         guard !selectedIndexes.isEmpty else { return }
@@ -801,6 +845,7 @@ private extension SALightweightContentViewController {
                 }
 
                 self.invalidateCurrentContentCache()
+                self.tableContentDidChange?()
                 self.loadCurrentPage()
             }
         }
@@ -856,7 +901,7 @@ private extension SALightweightContentViewController {
             return
         }
 
-        let start = pageIndex * pageSize + 1
+        let start = (limitResults ? pageIndex * pageSize : 0) + 1
         let end = start + rows.count - 1
 
         if let totalRowCount = totalRowCount {
@@ -868,18 +913,20 @@ private extension SALightweightContentViewController {
     }
 
     func updateControls() {
-        addRowButton.isEnabled = !isLoading
-        duplicateRowButton.isEnabled = !isLoading && tableView.numberOfSelectedRows == 1
-        deleteRowButton.isEnabled = !isLoading && tableView.numberOfSelectedRows > 0
+        addRowButton.isEnabled = canModifyRows
+        duplicateRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows == 1
+        deleteRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows > 0
         reloadButton.isEnabled = !isLoading
         editModeButton.isEnabled = !isLoading
         applyFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty && !filterRules.isEmpty
         addFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty
         filterRowsStackView.arrangedSubviews.forEach { $0.subviews.forEach { ($0 as? NSControl)?.isEnabled = !isLoading } }
-        previousPageButton.isEnabled = !isLoading && pageIndex > 0
-        paginationButton.isEnabled = !isLoading
-        nextPageButton.isEnabled = !isLoading && hasNextPage
-        if let totalRowCount = totalRowCount {
+        previousPageButton.isEnabled = limitResults && !isLoading && pageIndex > 0
+        paginationButton.isEnabled = limitResults && !isLoading
+        nextPageButton.isEnabled = limitResults && !isLoading && hasNextPage
+        if !limitResults {
+            pageLabel.stringValue = ""
+        } else if let totalRowCount = totalRowCount {
             let maxPage = max(1, Int(ceil(Double(totalRowCount) / Double(pageSize))))
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maxPage)
         } else {
@@ -1336,7 +1383,9 @@ private extension SALightweightContentViewController {
     }
 
     func restoreCachedContent(for key: String) -> Bool {
-        guard let cached = contentCache[key], cached.pageSize == pageSize else {
+        guard let cached = contentCache[key],
+              cached.pageSize == pageSize,
+              cached.limitResults == limitResults else {
             contentCache.removeValue(forKey: key)
             contentCacheOrder.removeAll { $0 == key }
             return false
@@ -1349,6 +1398,7 @@ private extension SALightweightContentViewController {
         columnInfo = cached.columnInfo
         rows = cached.rows
         pageIndex = cached.pageIndex
+        tableObjectType = cached.tableObjectType
         totalRowCount = cached.totalRowCount
         totalRowCountIsEstimate = cached.totalRowCountIsEstimate
         hasNextPage = cached.hasNextPage
@@ -1396,6 +1446,8 @@ private extension SALightweightContentViewController {
             rows: rows,
             pageIndex: pageIndex,
             pageSize: pageSize,
+            limitResults: limitResults,
+            tableObjectType: tableObjectType,
             totalRowCount: totalRowCount,
             totalRowCountIsEstimate: totalRowCountIsEstimate,
             hasNextPage: hasNextPage,
@@ -1518,7 +1570,7 @@ private extension SALightweightContentViewController {
             cell = SPTextAndLinkCell(textCell: "")
         }
 
-        cell.isEditable = true
+        cell.isEditable = tableObjectType == .table
         cell.isSelectable = true
         cell.lineBreakMode = .byTruncatingTail
         cell.font = font
@@ -1753,6 +1805,54 @@ private extension SALightweightContentViewController {
         UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
     }
 
+    func loadDeferredCellValue(row: Int, columnIndex: Int, whereClause: String) {
+        guard !isLoading,
+              row >= 0,
+              row < rows.count,
+              columnIndex < columnInfo.count,
+              let connection = connection else { return }
+
+        isLoading = true
+        updateControls()
+        statusLabel.stringValue = NSLocalizedString("Loading cell...", comment: "lightweight content deferred cell loading")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+
+            _ = connection.selectDatabase(self.database)
+            let query = "SELECT \(Self.backtickQuoted(self.columnInfo[columnIndex].name)) FROM \(Self.backtickQuoted(self.database)).\(Self.backtickQuoted(self.table)) WHERE \(whereClause) LIMIT 1"
+            let result = connection.queryString(query)
+            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            result?.defaultRowReturnType = SPMySQLResultRowAsArray
+            let value: Any? = result?.getRowAsArray()?.first ?? nil
+
+            DispatchQueue.main.async {
+                self.isLoading = false
+
+                if let error = error, !error.isEmpty {
+                    self.statusLabel.stringValue = error
+                    self.updateControls()
+                    return
+                }
+
+                guard row < self.rows.count else {
+                    self.updateControls()
+                    return
+                }
+
+                let contentValue = Self.contentValue(for: value)
+                self.rows[row].values[columnIndex] = contentValue
+                self.rows[row].originalValues[columnIndex] = contentValue
+                self.tableView.reloadData()
+                self.autosizeContentColumns()
+                self.cacheCurrentContentState()
+                self.updateStatus()
+                self.updateControls()
+                self.tableView.editColumn(columnIndex, row: row, with: nil, select: true)
+            }
+        }
+    }
+
     static func parseColumnType(_ rawType: String) -> (type: String, typeGrouping: String, length: String, values: [String]) {
         let lower = rawType.lowercased()
         let baseType = lower.split { !$0.isLetter && !$0.isNumber }.first.map(String.init) ?? lower
@@ -1825,7 +1925,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].values.count,
               columnIndex < columnInfo.count,
-              !isLoading else { return false }
+              canModifyRows else { return false }
 
         guard case .notLoaded = rows[row].values[columnIndex] else { return true }
 
@@ -1834,17 +1934,8 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             return false
         }
 
-        let query = "SELECT \(Self.backtickQuoted(columnInfo[columnIndex].name)) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) WHERE \(whereClause) LIMIT 1"
-        guard let result = connection.queryString(query),
-              let rowValues = result.getRowAsArray(),
-              let value = rowValues.first else { return false }
-
-        rows[row].values[columnIndex] = Self.contentValue(for: value)
-        rows[row].originalValues[columnIndex] = Self.contentValue(for: value)
-        tableView.reloadData()
-        autosizeContentColumns()
-        cacheCurrentContentState()
-        return true
+        loadDeferredCellValue(row: row, columnIndex: columnIndex, whereClause: whereClause)
+        return false
     }
 
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
@@ -1855,7 +1946,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].values.count,
               columnIndex < columnInfo.count,
-              !isLoading else { return }
+              canModifyRows else { return }
 
         let oldRowValues = rows[row].originalValues
         let newValue = String(describing: object ?? "")
@@ -1898,6 +1989,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
 
                 self.rows[row].values[columnIndex] = updatedValue
                 self.rows[row].originalValues[columnIndex] = updatedValue
+                self.tableContentDidChange?()
                 self.updateStatus()
                 self.updateControls()
                 self.tableView.reloadData()
@@ -1953,13 +2045,13 @@ extension SALightweightContentViewController: NSMenuItemValidation {
             menuItem.title = tableView.numberOfSelectedRows > 1
                 ? NSLocalizedString("Delete Rows", comment: "delete rows menu item plural")
                 : NSLocalizedString("Delete Row", comment: "delete row menu item singular")
-            return !isLoading && tableView.numberOfSelectedRows > 0
+            return canModifyRows && tableView.numberOfSelectedRows > 0
 
         case #selector(duplicateRow(_:)):
-            return !isLoading && tableView.numberOfSelectedRows == 1
+            return canModifyRows && tableView.numberOfSelectedRows == 1
 
         case #selector(addRow(_:)):
-            return !isLoading
+            return canModifyRows
 
         case #selector(reloadContent(_:)):
             return !isLoading

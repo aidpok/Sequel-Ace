@@ -867,6 +867,7 @@ private extension SPWindowController {
         lightweightDetailView.addSubview(structureView)
         lightweightStructureController.tableStructureDidChange = { [weak self] in
             self?.lightweightContentController.clearCachedTables()
+            self?.refreshLightweightTableInfoAfterMutation()
         }
         lightweightStructureController.loadStructure(for: table, database: selectedDatabase, connection: activeConnection)
     }
@@ -886,7 +887,16 @@ private extension SPWindowController {
             guard let self = self else { return }
             self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewContent()
         }
+        lightweightContentController.tableContentDidChange = { [weak self] in
+            self?.refreshLightweightTableInfoAfterMutation()
+        }
         lightweightContentController.loadContent(for: table, database: selectedDatabase, connection: activeConnection)
+    }
+
+    func refreshLightweightTableInfoAfterMutation() {
+        guard let selectedTable = selectedTable else { return }
+
+        loadLightweightTableInfo(for: selectedTable)
     }
 
     func showLightweightQuery() {

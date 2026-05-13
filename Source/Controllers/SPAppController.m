@@ -70,9 +70,29 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 #define SAUIDiagnosticLog(...)
 #endif
 
+static BOOL SAUIDiagnosticsEnabled(void)
+{
+#ifdef DEBUG
+    static BOOL enabled;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *environmentValue = [[[NSProcessInfo processInfo] environment] objectForKey:@"SA_ENABLE_UI_DIAGNOSTICS"];
+        enabled = [environmentValue boolValue] || [[NSUserDefaults standardUserDefaults] boolForKey:@"SAEnableUIDiagnostics"];
+    });
+
+    return enabled;
+#else
+    return NO;
+#endif
+}
+
 static void SAUIDiagnosticLogMessage(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
 static void SAUIDiagnosticLogMessage(NSString *format, ...)
 {
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
@@ -233,7 +253,7 @@ static NSTimeInterval SAUIMonotonicTime(void)
 - (void)_startUIDiagnosticsWatchdog
 {
 #ifdef DEBUG
-    if (self.uiDiagnosticsWatchdogTimer) {
+    if (!SAUIDiagnosticsEnabled() || self.uiDiagnosticsWatchdogTimer) {
         return;
     }
 
@@ -256,6 +276,10 @@ static NSTimeInterval SAUIMonotonicTime(void)
 - (void)_uiDiagnosticsWatchdogTick
 {
 #ifdef DEBUG
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     NSTimeInterval now = SAUIMonotonicTime();
 
     if (self.uiDiagnosticsBeatPending) {
@@ -296,6 +320,10 @@ static NSTimeInterval SAUIMonotonicTime(void)
 - (NSString *)_uiDiagnosticsContext
 {
 #ifdef DEBUG
+    if (!SAUIDiagnosticsEnabled()) {
+        return @"disabled";
+    }
+
     if (![NSThread isMainThread]) {
         return @"non-main-thread";
     }
@@ -320,28 +348,46 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
 - (void)applicationWillBecomeActive:(NSNotification *)notification
 {
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     self.uiDiagnosticsActivationStartTime = SAUIMonotonicTime();
     SAUIDiagnosticLog(@"applicationWillBecomeActive context=%@", [self _uiDiagnosticsContext]);
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     NSTimeInterval now = SAUIMonotonicTime();
     NSTimeInterval activationElapsed = self.uiDiagnosticsActivationStartTime > 0 ? now - self.uiDiagnosticsActivationStartTime : 0;
     SAUIDiagnosticLog(@"applicationDidBecomeActive elapsedSinceWill=%.3fs context=%@", activationElapsed, [self _uiDiagnosticsContext]);
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        SAUIDiagnosticLog(@"applicationDidBecomeActive next-runloop context=%@", [self _uiDiagnosticsContext]);
+        if (SAUIDiagnosticsEnabled()) {
+            SAUIDiagnosticLog(@"applicationDidBecomeActive next-runloop context=%@", [self _uiDiagnosticsContext]);
+        }
     });
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     SAUIDiagnosticLog(@"applicationWillResignActive context=%@", [self _uiDiagnosticsContext]);
 }
 
 - (void)applicationDidResignActive:(NSNotification *)notification
 {
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
     SAUIDiagnosticLog(@"applicationDidResignActive context=%@", [self _uiDiagnosticsContext]);
 }
 
@@ -352,7 +398,9 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
     [FIRApp configure];
     [self _startUIDiagnosticsWatchdog];
-    SAUIDiagnosticLog(@"applicationDidFinishLaunching context=%@", [self _uiDiagnosticsContext]);
+    if (SAUIDiagnosticsEnabled()) {
+        SAUIDiagnosticLog(@"applicationDidFinishLaunching context=%@", [self _uiDiagnosticsContext]);
+    }
 
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
     BOOL analyticsEnabled = [prefs boolForKey:SPSaveApplicationUsageAnalytics];
@@ -672,7 +720,8 @@ static NSTimeInterval SAUIMonotonicTime(void)
  * Menu item validation.
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
-    NSTimeInterval validationStartTime = SAUIMonotonicTime();
+    BOOL uiDiagnosticsEnabled = SAUIDiagnosticsEnabled();
+    NSTimeInterval validationStartTime = uiDiagnosticsEnabled ? SAUIMonotonicTime() : 0;
     BOOL isValid = YES;
     SEL action = [menuItem action];
     SPDatabaseDocument *activeDocument = nil;
@@ -705,7 +754,7 @@ static NSTimeInterval SAUIMonotonicTime(void)
     }
 
 validateMenuItemDone:
-    {
+    if (uiDiagnosticsEnabled) {
         NSTimeInterval validationElapsed = SAUIMonotonicTime() - validationStartTime;
         if (validationElapsed >= 0.1) {
             SAUIDiagnosticLog(@"slow validateMenuItem action=%@ elapsed=%.3fs result=%d context=%@",

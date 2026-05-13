@@ -73,6 +73,8 @@ final class SALightweightQueryViewController: NSViewController {
         let errorText: String?
         let firstErrorQueryNumber: Int?
         let executedQuery: String
+        let resultQuery: String
+        let lastErrorID: UInt
         let queriesRun: Int
         let truncated: Bool
     }
@@ -102,18 +104,39 @@ final class SALightweightQueryViewController: NSViewController {
     private var columnDefinitions: [NSDictionary] = []
     private var rows: [[Any]] = []
     private var lastExecutedQuery = ""
+    private var lastResultQuery = ""
     private var queryToken = UUID()
     private var isRunning = false
+    private var isCancellationRequested = false
     private var editorWasConfigured = false
+    private var didInstallObservers = false
+    private var isApplyingProgrammaticColumnWidths = false
+    private var isApplyingQuerySort = false
+    private var bracketHighlighter: SPBracketHighlighter?
     private let maxDisplayedRows = 10_000
     private var baseStatusText = NSLocalizedString("Ready", comment: "lightweight query ready status")
     private var resultColumnWidths: [String: CGFloat] = [:]
+    private static let observedPreferenceKeys = [
+        SPDisplayTableViewVerticalGridlines,
+        SPGlobalFontSettings,
+        SPDisplayTableViewColumnTypes,
+        SPDisplayBinaryDataAsHex,
+        SPNullValue,
+        SPCustomQueryAutoIndent,
+        SPCustomQueryAutoPairCharacters,
+        SPCustomQueryAutoComplete,
+        SPCustomQueryAutoUppercaseKeywords,
+        SPCustomQueryUpdateAutoHelp,
+        SPCustomQueryEnableBracketHighlighting
+    ]
 
     private var currentHistoryOffsetIndex = -1
     private var historyItemWasJustInserted = false
     var textViewWasChanged = false
     private var currentQueryBeforeCaret = false
     var currentQueryRange = NSRange(location: 0, length: 0)
+    private var currentQueryRanges: [NSRange] = []
+    private var didCacheCurrentQueryRanges = false
     var requestLegacyQueryFallback: ((String?) -> Void)?
 
     private let queryInfoPaneSplitView = SPSplitView(frame: .zero)
@@ -447,8 +470,43 @@ final class SALightweightQueryViewController: NSViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        if didInstallObservers {
+            for key in Self.observedPreferenceKeys {
+                UserDefaults.standard.removeObserver(self, forKeyPath: key)
+            }
+        }
         if let documentURL = documentURL {
             SPQueryController.shared().removeRegisteredDocument(withFileURL: documentURL)
+        }
+    }
+
+    override func observeValue(forKeyPath keyPath: String?,
+                               of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        switch keyPath {
+        case SPDisplayTableViewVerticalGridlines:
+            tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+            tableView.reloadData()
+        case SPGlobalFontSettings:
+            updateAppearanceFromPreferences()
+        case SPDisplayTableViewColumnTypes:
+            rebuildColumns()
+        case SPDisplayBinaryDataAsHex,
+             SPNullValue:
+            tableView.reloadData()
+            autosizeResultColumns()
+        case SPCustomQueryAutoIndent,
+             SPCustomQueryAutoPairCharacters,
+             SPCustomQueryAutoComplete,
+             SPCustomQueryAutoUppercaseKeywords,
+             SPCustomQueryUpdateAutoHelp,
+             SPCustomQueryEnableBracketHighlighting:
+            applyEditorPreferences()
+            rebuildMenus()
+            updateActionMenuState()
+        default:
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
     }
 
@@ -485,16 +543,24 @@ private extension SALightweightQueryViewController {
         queryTextView.setValue(self, forKey: "customQueryInstance")
         queryTextView.awakeFromNib()
         queryTextView.textContainerInset = NSSize(width: 4, height: 0)
+        bracketHighlighter = SPBracketHighlighter(textView: queryTextView)
+        applyEditorPreferences()
+        queryTextView.frame = NSRect(origin: .zero, size: queryScrollView.contentSize)
+        editorWasConfigured = true
+    }
+
+    func applyEditorPreferences() {
         queryTextView.setAutoindent(UserDefaults.standard.bool(forKey: SPCustomQueryAutoIndent))
         queryTextView.setAutopair(UserDefaults.standard.bool(forKey: SPCustomQueryAutoPairCharacters))
         queryTextView.setAutoComplete(UserDefaults.standard.bool(forKey: SPCustomQueryAutoComplete))
         queryTextView.setAutouppercaseKeywords(UserDefaults.standard.bool(forKey: SPCustomQueryAutoUppercaseKeywords))
         queryTextView.setAutohelp(UserDefaults.standard.bool(forKey: SPCustomQueryUpdateAutoHelp))
-        queryTextView.frame = NSRect(origin: .zero, size: queryScrollView.contentSize)
-        editorWasConfigured = true
+        bracketHighlighter?.enabled = UserDefaults.standard.bool(forKey: SPCustomQueryEnableBracketHighlighting)
     }
 
     func installObserversIfNeeded() {
+        guard !didInstallObservers else { return }
+
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(queryFavoritesHaveBeenUpdated(_:)),
                                                name: .SPQueryFavoritesHaveBeenUpdated,
@@ -503,19 +569,10 @@ private extension SALightweightQueryViewController {
                                                selector: #selector(historyItemsHaveBeenUpdated(_:)),
                                                name: .SPHistoryItemsHaveBeenUpdated,
                                                object: nil)
-        NotificationCenter.default.addObserver(self,
-                                               selector: #selector(userDefaultsDidChange(_:)),
-                                               name: UserDefaults.didChangeNotification,
-                                               object: UserDefaults.standard)
-    }
-
-    @objc func userDefaultsDidChange(_ notification: Notification) {
-        updateAppearanceFromPreferences()
-        rebuildMenus()
-        updateActionMenuState()
-        if queryTextView.string.count < SP_TEXT_SIZE_MAX_PASTE_LENGTH {
-            queryTextView.doSyntaxHighlighting(withForce: true)
+        for key in Self.observedPreferenceKeys {
+            UserDefaults.standard.addObserver(self, forKeyPath: key, options: .new, context: nil)
         }
+        didInstallObservers = true
     }
 
     @objc func queryFavoritesHaveBeenUpdated(_ notification: Notification?) {
@@ -852,6 +909,11 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func runPrimaryQuery(_ sender: Any?) {
+        if isRunning {
+            cancelRunningQuery()
+            return
+        }
+
         if UserDefaults.standard.bool(forKey: SPQueryPrimaryControlRunsAll) {
             runQueries(splitQueries(in: queryTextView.string))
         } else {
@@ -860,11 +922,22 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func runSecondaryQuery(_ sender: Any?) {
+        if isRunning {
+            cancelRunningQuery()
+            return
+        }
+
         if UserDefaults.standard.bool(forKey: SPQueryPrimaryControlRunsAll) {
             runQueries(queriesForCurrentAction())
         } else {
             runQueries(splitQueries(in: queryTextView.string))
         }
+    }
+
+    func cancelRunningQuery() {
+        isCancellationRequested = true
+        connection?.cancelCurrentQuery()
+        setStatusText(NSLocalizedString("Cancelling query...", comment: "lightweight query cancelling status"))
     }
 
     @objc func switchDefaultQueryAction(_ sender: Any?) {
@@ -1018,11 +1091,13 @@ private extension SALightweightQueryViewController {
 
         queryToken = UUID()
         let token = queryToken
+        isCancellationRequested = false
 
         isRunning = true
         columnDefinitions = []
         rows = []
         lastExecutedQuery = ""
+        lastResultQuery = ""
         rebuildColumns()
         setStatusText(runnableQueries.count > 1
             ? String(format: NSLocalizedString("Running query 1 of %ld...", comment: "lightweight query running multiple status"), runnableQueries.count)
@@ -1036,18 +1111,25 @@ private extension SALightweightQueryViewController {
                 _ = connection.selectDatabase(self.database)
             }
 
+            let retriesWereEnabled = connection.retryQueriesOnConnectionFailure
+            connection.retryQueriesOnConnectionFailure = false
+            defer {
+                connection.retryQueriesOnConnectionFailure = retriesWereEnabled
+            }
+
             var totalAffectedRows: UInt64 = 0
             var totalExecutionTime: TimeInterval = 0
             var queriesRun = 0
             var executedQueries: [String] = []
+            var resultQuery = ""
             var errors: [String] = []
             var firstErrorQueryNumber: Int?
             var suppressErrorSheet = false
-            var finalResult = QueryResult(columnDefinitions: [], rows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", queriesRun: 0, truncated: false)
+            var finalResult = QueryResult(columnDefinitions: [], rows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", resultQuery: "", lastErrorID: 0, queriesRun: 0, truncated: false)
 
             for (index, query) in runnableQueries.enumerated() {
-                if token != self.queryToken {
-                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), queriesRun: queriesRun, truncated: finalResult.truncated)
+                if token != self.queryToken || self.isCancellationRequested {
+                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
                     break
                 }
 
@@ -1061,8 +1143,9 @@ private extension SALightweightQueryViewController {
                 executedQueries.append(query)
                 guard let result = connection.queryString(query) else {
                     queriesRun += 1
-                    let error = connection.lastErrorMessage() ?? ""
+                    let error = self.displayErrorMessage(for: connection)
                     finalResult = self.queryResultAfterError(error,
+                                                             errorID: connection.lastErrorID(),
                                                              queryNumber: index + 1,
                                                              queryCount: runnableQueries.count,
                                                              finalResult: finalResult,
@@ -1095,8 +1178,9 @@ private extension SALightweightQueryViewController {
                 }
 
                 if connection.queryErrored() {
-                    let error = connection.lastErrorMessage() ?? ""
+                    let error = self.displayErrorMessage(for: connection)
                     finalResult = self.queryResultAfterError(error,
+                                                             errorID: connection.lastErrorID(),
                                                              queryNumber: index + 1,
                                                              queryCount: runnableQueries.count,
                                                              finalResult: finalResult,
@@ -1119,6 +1203,7 @@ private extension SALightweightQueryViewController {
                 let definitions = result.fieldDefinitions() as? [NSDictionary] ?? []
                 var loadedRows: [[Any]] = []
                 var truncated = false
+                resultQuery = definitions.isEmpty ? resultQuery : query
 
                 while let row = result.getRowAsArray() {
                     if loadedRows.count < self.maxDisplayedRows {
@@ -1128,18 +1213,20 @@ private extension SALightweightQueryViewController {
                     }
                 }
 
-                finalResult = QueryResult(columnDefinitions: definitions, rows: loadedRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.isEmpty ? nil : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), queriesRun: queriesRun, truncated: truncated)
+                finalResult = QueryResult(columnDefinitions: definitions, rows: loadedRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.isEmpty ? nil : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: truncated)
             }
 
             if finalResult.executedQuery.isEmpty, !executedQueries.isEmpty {
-                finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: finalResult.fatalError, errorText: errors.isEmpty ? finalResult.errorText : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), queriesRun: queriesRun, truncated: finalResult.truncated)
+                finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: finalResult.fatalError, errorText: errors.isEmpty ? finalResult.errorText : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: finalResult.lastErrorID, queriesRun: queriesRun, truncated: finalResult.truncated)
             }
 
             DispatchQueue.main.async {
                 guard self.queryToken == token else { return }
 
                 self.isRunning = false
+                self.isCancellationRequested = false
                 self.lastExecutedQuery = finalResult.executedQuery
+                self.lastResultQuery = finalResult.resultQuery
 
                 if !self.lastExecutedQuery.isEmpty {
                     self.addHistoryEntry(self.lastExecutedQuery)
@@ -1149,7 +1236,7 @@ private extension SALightweightQueryViewController {
                     self.columnDefinitions = []
                     self.rows = []
                     self.rebuildColumns()
-                    self.selectQueryForError(number: finalResult.firstErrorQueryNumber)
+                    self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: finalResult.errorText ?? error, errorID: finalResult.lastErrorID)
                     self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: finalResult.errorText ?? error, isError: true)
                     self.setStatusText(error)
                     self.rebuildMenus()
@@ -1162,7 +1249,7 @@ private extension SALightweightQueryViewController {
                 self.rebuildColumns()
                 self.updateStatus(for: finalResult, queryCount: max(finalResult.queriesRun, runnableQueries.count))
                 if let errorText = finalResult.errorText, !errorText.isEmpty {
-                    self.selectQueryForError(number: finalResult.firstErrorQueryNumber)
+                    self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: errorText, errorID: finalResult.lastErrorID)
                     self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: errorText, isError: true)
                 } else {
                     self.updateQueryInfo(title: NSLocalizedString("Query Status", comment: "lightweight query info pane status title"),
@@ -1176,6 +1263,7 @@ private extension SALightweightQueryViewController {
     }
 
     func queryResultAfterError(_ error: String,
+                               errorID: UInt,
                                queryNumber: Int,
                                queryCount: Int,
                                finalResult: QueryResult,
@@ -1190,7 +1278,7 @@ private extension SALightweightQueryViewController {
 
         guard queryCount > 1 else {
             firstErrorQueryNumber = queryNumber
-            return QueryResult(columnDefinitions: [], rows: [], affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: errorString, errorText: errorString, firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), queriesRun: queriesRun, truncated: false)
+            return QueryResult(columnDefinitions: [], rows: [], affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: errorString, errorText: errorString, firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: false)
         }
 
         if firstErrorQueryNumber == nil {
@@ -1216,7 +1304,18 @@ private extension SALightweightQueryViewController {
             }
         }
 
-        return QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), queriesRun: queriesRun, truncated: finalResult.truncated)
+        return QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: finalResult.truncated)
+    }
+
+    func displayErrorMessage(for connection: SPMySQLConnection) -> String {
+        if connection.lastQueryWasCancelled {
+            return NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
+        }
+
+        let message = connection.lastErrorMessage() ?? ""
+        guard connection.lastErrorID() == 2006 else { return message }
+
+        return String(format: "%@.\n\n%@", message, NSLocalizedString("(This usually indicates that the connection has been closed by the server after inactivity, but can also occur due to other conditions.  The connection has been restored; please try again if the query is safe to re-run.)", comment: "Explanation for MySQL server has gone away error"))
     }
 
     private func multiQueryErrorChoice(for error: String) -> MultiQueryErrorChoice {
@@ -1275,22 +1374,21 @@ private extension SALightweightQueryViewController {
         if !historyItemWasJustInserted {
             currentHistoryOffsetIndex = -1
         }
+
+        if currentQueryRange.length < 1000 {
+            bracketHighlighter?.bracketHighlight(caretPosition - 1, in: currentQueryRange)
+        } else {
+            bracketHighlighter?.highlightOff()
+        }
     }
 
     func queryRange(at position: Int, lookBehind: inout Bool) -> NSRange {
         let text = queryTextView.string as NSString
         guard position <= text.length else { return NSRange(location: 0, length: 0) }
 
-        let parser = SPSQLParser(string: queryTextView.string)
-        parser.setDelimiterSupport(true)
-        guard let values = parser.splitStringIntoRanges(byCharacter: Character(";").utf16.first!) as? [NSValue] else {
-            return NSRange(location: 0, length: 0)
-        }
-
-        let ranges = values.map(\.rangeValue)
         var previousNonEmptyRange = NSRange(location: 0, length: 0)
 
-        for range in ranges {
+        for range in cachedCurrentQueryRanges() {
             let trimmed = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 continue
@@ -1321,15 +1419,8 @@ private extension SALightweightQueryViewController {
         let text = queryTextView.string as NSString
         guard queryNumber > 0 else { return NSRange(location: 0, length: 0) }
 
-        let parser = SPSQLParser(string: queryTextView.string)
-        parser.setDelimiterSupport(true)
-        guard let values = parser.splitStringIntoRanges(byCharacter: Character(";").utf16.first!) as? [NSValue] else {
-            return NSRange(location: 0, length: 0)
-        }
-
         var currentQueryNumber = 0
-        for value in values {
-            let range = value.rangeValue
+        for range in cachedCurrentQueryRanges() {
             let trimmed = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 continue
@@ -1344,14 +1435,69 @@ private extension SALightweightQueryViewController {
         return NSRange(location: 0, length: 0)
     }
 
-    func selectQueryForError(number queryNumber: Int?) {
+    func cachedCurrentQueryRanges() -> [NSRange] {
+        if textViewWasChanged || !didCacheCurrentQueryRanges {
+            let parser = SPSQLParser(string: queryTextView.string)
+            parser.setDelimiterSupport(true)
+            let values = parser.splitStringIntoRanges(byCharacter: Character(";").utf16.first!) as? [NSValue]
+            currentQueryRanges = values?.map(\.rangeValue) ?? []
+            textViewWasChanged = false
+            didCacheCurrentQueryRanges = true
+        }
+
+        return currentQueryRanges
+    }
+
+    func selectQueryForError(number queryNumber: Int?, errorText: String, errorID: UInt) {
         guard let queryNumber else { return }
 
         let range = queryTextRange(forQueryNumber: queryNumber)
         guard range.length > 0 else { return }
 
+        if errorID == 1064,
+           let lineNumber = syntaxErrorLineNumber(from: errorText) {
+            let queryStartLine = queryTextView.getLineNumber(forCharacterIndex: UInt(range.location))
+            queryTextView.selectLineNumber(queryStartLine + UInt(max(0, lineNumber - 1)), ignoreLeadingNewLines: true)
+            return
+        }
+
+        if let nearRange = syntaxErrorNearRange(from: errorText, queryRange: range) {
+            queryTextView.setSelectedRange(nearRange)
+            queryTextView.scrollRangeToVisible(nearRange)
+            return
+        }
+
         queryTextView.setSelectedRange(range)
         queryTextView.scrollRangeToVisible(range)
+    }
+
+    func syntaxErrorLineNumber(from errorText: String) -> Int? {
+        guard let match = errorText.range(of: #"([0-9]+)[^0-9]*$"#, options: .regularExpression) else { return nil }
+        let digits = errorText[match].filter(\.isNumber)
+        return Int(String(digits))
+    }
+
+    func syntaxErrorNearRange(from errorText: String, queryRange: NSRange) -> NSRange? {
+        guard let nearCapture = errorText.range(of: #"[( ]'(.+)'[ -]"#, options: [.regularExpression]) else { return nil }
+
+        var nearText = String(errorText[nearCapture])
+        if let firstQuote = nearText.firstIndex(of: "'"),
+           let lastQuote = nearText.lastIndex(of: "'"),
+           firstQuote < lastQuote {
+            nearText = String(nearText[nearText.index(after: firstQuote)..<lastQuote])
+        }
+
+        guard !nearText.isEmpty else { return nil }
+
+        let fullText = queryTextView.string as NSString
+        let boundedRange = NSIntersectionRange(NSRange(location: 0, length: fullText.length), queryRange)
+        guard boundedRange.length > 0 else { return nil }
+
+        let queryText = fullText.substring(with: boundedRange) as NSString
+        let localRange = queryText.range(of: nearText, options: .literal)
+        guard localRange.location != NSNotFound, localRange.length > 0 else { return nil }
+
+        return NSRange(location: boundedRange.location + localRange.location, length: localRange.length)
     }
 
     func queriesContainDestructiveSQL(_ queries: [String]) -> Bool {
@@ -1740,6 +1886,8 @@ private extension SALightweightQueryViewController {
     func replaceEditorText(_ query: String) {
         queryTextView.shouldChangeText(in: NSRange(location: 0, length: queryTextView.string.count), replacementString: query)
         queryTextView.string = query
+        textViewWasChanged = true
+        didCacheCurrentQueryRanges = false
         queryTextView.didChangeText()
         queryTextView.scrollRangeToVisible(NSRange(location: query.count, length: 0))
         if query.count < SP_TEXT_SIZE_MAX_PASTE_LENGTH {
@@ -1806,6 +1954,79 @@ private extension SALightweightQueryViewController {
         }
 
         tableView.reloadData()
+        autosizeResultColumns()
+    }
+
+    func autosizeResultColumns() {
+        isApplyingProgrammaticColumnWidths = true
+        defer { isApplyingProgrammaticColumnWidths = false }
+
+        var widthsByIdentifier: [String: CGFloat] = [:]
+
+        for tableColumn in tableView.tableColumns {
+            guard let columnIndex = Int(tableColumn.identifier.rawValue),
+                  columnIndex < columnDefinitions.count else { continue }
+
+            if savedResultColumnWidth(for: columnDefinitions[columnIndex]) != nil {
+                continue
+            }
+
+            widthsByIdentifier[tableColumn.identifier.rawValue] = autodetectedResultWidth(for: tableColumn, columnIndex: columnIndex, maxRows: 160)
+        }
+
+        for tableColumn in tableView.tableColumns {
+            guard let targetWidth = widthsByIdentifier[tableColumn.identifier.rawValue] else { continue }
+            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
+            tableColumn.width = ceil(max(targetWidth, tableColumn.minWidth))
+        }
+    }
+
+    func autodetectedResultWidth(for tableColumn: NSTableColumn, columnIndex: Int, maxRows: Int) -> CGFloat {
+        var maxCellWidth: CGFloat = 0
+        for row in visibleRowsForResultAutosizing(maxRows: maxRows) {
+            guard columnIndex < row.count else { continue }
+            let cellWidth = measuredResultCellWidth(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex)), in: tableColumn)
+            maxCellWidth = max(maxCellWidth, cellWidth)
+        }
+
+        let headerWidth = measuredResultHeaderWidth(for: tableColumn) + 10
+        return ceil(max(maxCellWidth + 24, headerWidth, tableColumn.minWidth))
+    }
+
+    func visibleRowsForResultAutosizing(maxRows: Int) -> [[Any]] {
+        guard maxRows > 0, !rows.isEmpty else { return [] }
+        if maxRows > 160 {
+            return Array(rows.prefix(maxRows))
+        }
+
+        let visibleRange = tableView.rows(in: tableView.visibleRect)
+        let start = visibleRange.length > 0 ? visibleRange.location : 0
+        let end = visibleRange.length > 0 ? min(rows.count, visibleRange.location + visibleRange.length) : min(rows.count, maxRows)
+        guard start < end else { return Array(rows.prefix(maxRows)) }
+
+        return Array(rows[start..<min(end, start + maxRows)])
+    }
+
+    func measuredResultHeaderWidth(for tableColumn: NSTableColumn) -> CGFloat {
+        let headerCell = tableColumn.headerCell
+
+        if headerCell.attributedStringValue.length > 0 {
+            return max(headerCell.cellSize.width, headerCell.attributedStringValue.size().width)
+        }
+
+        let title = headerCell.stringValue as NSString
+        let font = headerCell.font ?? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+        return max(headerCell.cellSize.width, title.size(withAttributes: [.font: font]).width)
+    }
+
+    func measuredResultCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
+        guard let cell = (tableColumn.dataCell as? NSCell)?.copy() as? NSCell else {
+            return (value as NSString).size(withAttributes: [.font: UserDefaults.getFont()]).width
+        }
+
+        cell.stringValue = value
+        let font = cell.font ?? UserDefaults.getFont()
+        return max(cell.cellSize.width, (value as NSString).size(withAttributes: [.font: font]).width)
     }
 
     func updateStatus(for result: QueryResult, queryCount: Int) {
@@ -1826,14 +2047,70 @@ private extension SALightweightQueryViewController {
         }
     }
 
+    func queryByApplyingSort(to query: String, columnIndex: Int, descending: Bool) -> String {
+        let orderClause = " ORDER BY \(columnIndex + 1) \(descending ? "DESC" : "ASC") "
+        let maskedQuery = queryMaskedForClauseSearch(query)
+        var mutableQuery = NSMutableString(string: query)
+
+        if let existingOrderRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]+?(?:\s+(?:DESC|ASC))?(?=\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b)"#) {
+            mutableQuery.replaceCharacters(in: existingOrderRange, with: orderClause)
+            return mutableQuery as String
+        }
+
+        if let trailingOrderRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]*$"#) {
+            mutableQuery.replaceCharacters(in: trailingOrderRange, with: orderClause)
+            return mutableQuery as String
+        }
+
+        if let suffixRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b"#),
+           firstRegexRange(in: maskedQuery, pattern: #"(?is)^\s*\(?\s*SELECT\b"#) != nil {
+            mutableQuery.insert(orderClause, at: suffixRange.location)
+            return mutableQuery as String
+        }
+
+        mutableQuery.append(" \(orderClause)")
+        return mutableQuery as String
+    }
+
+    func queryMaskedForClauseSearch(_ query: String) -> String {
+        let maskedQuery = NSMutableString(string: query)
+        let patterns = [
+            #"(?s)"(?:[^"\\]|\\.)*""#,
+            #"(?s)'(?:[^'\\]|\\.)*'"#,
+            #"(?s)`(?:[^`\\]|\\.)*`"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            while true {
+                let range = regex.rangeOfFirstMatch(in: maskedQuery as String, range: NSRange(location: 0, length: maskedQuery.length))
+                if range.location == NSNotFound { break }
+                maskedQuery.replaceCharacters(in: range, with: String(repeating: "_", count: range.length))
+            }
+        }
+
+        return maskedQuery as String
+    }
+
+    func firstRegexRange(in string: String, pattern: String) -> NSRange? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = regex.rangeOfFirstMatch(in: string, range: NSRange(location: 0, length: (string as NSString).length))
+        return range.location == NSNotFound ? nil : range
+    }
+
     func updateControls() {
         let hasConnection = connection != nil
-        runButton.isEnabled = !isRunning && hasConnection
+        runButton.isEnabled = hasConnection
         actionButton.isEnabled = !isRunning
         exportButton.isEnabled = !isRunning && !rows.isEmpty
         favoritesButton.isEnabled = !isRunning
         historyButton.isEnabled = !isRunning
         queryTextView.isEditable = !isRunning
+        if isRunning {
+            runButton.menu?.items.first?.title = NSLocalizedString("Stop query", comment: "Stop query string")
+        } else {
+            updateContextualRunInterface()
+        }
     }
 
     @objc(currentResult)
@@ -1858,7 +2135,7 @@ private extension SALightweightQueryViewController {
                     return value
                 }
 
-                return displayString(for: value, truncate: truncate)
+                return displayString(for: value, columnDefinition: columnDefinition(at: columnIndex), truncate: truncate)
             })
         }
 
@@ -1922,7 +2199,7 @@ private extension SALightweightQueryViewController {
         lines.append(contentsOf: rows.map { row in
             tableView.tableColumns.map { tableColumn in
                 guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < row.count else { return csvEscaped("") }
-                return csvEscaped(displayString(for: row[columnIndex]))
+                return csvEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex)))
             }.joined(separator: ",")
         })
         return lines.joined(separator: "\n")
@@ -1935,7 +2212,7 @@ private extension SALightweightQueryViewController {
             for (visibleColumn, tableColumn) in tableView.tableColumns.enumerated() {
                 guard let columnIndex = Int(tableColumn.identifier.rawValue) else { continue }
                 let name = xmlEscaped(columnName(forVisibleColumn: visibleColumn, tableColumn: tableColumn))
-                let value = columnIndex < row.count ? xmlEscaped(displayString(for: row[columnIndex])) : ""
+                let value = columnIndex < row.count ? xmlEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex))) : ""
                 lines.append("\t\t<field name=\"\(name)\">\(value)</field>")
             }
             lines.append("\t</row>")
@@ -1982,7 +2259,7 @@ private extension SALightweightQueryViewController {
             let row = rows[rowIndex]
             lines.append(tableView.tableColumns.map { tableColumn in
                 guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < row.count else { return "" }
-                return copyEscaped(displayString(for: row[columnIndex]))
+                return copyEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex)))
             }.joined(separator: "\t"))
         }
 
@@ -2264,7 +2541,8 @@ private extension SALightweightQueryViewController {
     }
 
     func saveResultColumnWidth(_ tableColumn: NSTableColumn) {
-        guard let columnIndex = Int(tableColumn.identifier.rawValue),
+        guard !isApplyingProgrammaticColumnWidths,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
               columnIndex < columnDefinitions.count else { return }
 
         let columnDefinition = columnDefinitions[columnIndex]
@@ -2282,6 +2560,35 @@ private extension SALightweightQueryViewController {
         tableWidths[origin.column] = NSNumber(value: Double(tableColumn.width))
         databaseWidths[origin.table] = tableWidths
         savedWidths[databaseKey] = databaseWidths
+        UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
+    }
+
+    func clearSavedResultColumnWidth(for columnDefinition: NSDictionary, fallbackIndex: Int) {
+        resultColumnWidths.removeValue(forKey: resultColumnWidthKey(for: columnDefinition, fallbackIndex: fallbackIndex))
+
+        guard let origin = resultColumnOrigin(for: columnDefinition),
+              let host = connection?.host,
+              !host.isEmpty else { return }
+
+        let databaseKey = "\(origin.database)@\(host)"
+        var savedWidths = UserDefaults.standard.dictionary(forKey: SPTableColumnWidths) ?? [:]
+        var databaseWidths = savedWidths[databaseKey] as? [String: Any] ?? [:]
+        var tableWidths = databaseWidths[origin.table] as? [String: Any] ?? [:]
+
+        tableWidths.removeValue(forKey: origin.column)
+
+        if tableWidths.isEmpty {
+            databaseWidths.removeValue(forKey: origin.table)
+        } else {
+            databaseWidths[origin.table] = tableWidths
+        }
+
+        if databaseWidths.isEmpty {
+            savedWidths.removeValue(forKey: databaseKey)
+        } else {
+            savedWidths[databaseKey] = databaseWidths
+        }
+
         UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
     }
 
@@ -2419,7 +2726,7 @@ private extension SALightweightQueryViewController {
 
     func sqlValue(forStoredObject object: Any, columnDefinition: NSDictionary, connection: SPMySQLConnection) -> String {
         if let data = object as? Data {
-            return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, truncate: false))
+            return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false))
         }
 
         let value = String(describing: object)
@@ -2522,6 +2829,7 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
                   shouldChangeTextIn affectedCharRange: NSRange,
                   replacementString: String?) -> Bool {
         textViewWasChanged = true
+        didCacheCurrentQueryRanges = false
         return true
     }
 
@@ -2591,19 +2899,20 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard !isRunning,
+              !isApplyingQuerySort,
               let descriptor = tableView.sortDescriptors.first,
               let key = descriptor.key,
               let columnIndex = Int(key),
               columnIndex < columnDefinitions.count else { return }
 
-        let ascending = descriptor.ascending
-        rows.sort { lhs, rhs in
-            let comparison = compareResultValue(columnIndex < lhs.count ? lhs[columnIndex] : NSNull(),
-                                                columnIndex < rhs.count ? rhs[columnIndex] : NSNull(),
-                                                columnDefinition: columnDefinitions[columnIndex])
-            return ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+        let queryToSort = lastResultQuery.isEmpty ? lastExecutedQuery : lastResultQuery
+        guard !queryToSort.isEmpty else { return }
+
+        isApplyingQuerySort = true
+        runQueries([queryByApplyingSort(to: queryToSort, columnIndex: columnIndex, descending: !descriptor.ascending)])
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplyingQuerySort = false
         }
-        tableView.reloadData()
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
@@ -2627,7 +2936,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].count else { return "" }
 
-        let value = displayString(for: rows[row][columnIndex], truncate: false)
+        let value = displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: false)
         return value.count > 1 ? value : ""
     }
 
@@ -2654,7 +2963,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               canEditResultCell(row: row, column: columnIndex) else { return }
 
         let newValue = String(describing: object ?? "")
-        guard newValue != displayString(for: rows[row][columnIndex], truncate: false) else { return }
+        guard newValue != displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: false) else { return }
 
         guard let update = cellUpdate(for: object, row: row, column: columnIndex, connection: connection) else {
             showCellEditError(NSLocalizedString("Couldn't identify field origin unambiguously.", comment: "lightweight query edit missing origin"))
@@ -2725,6 +3034,29 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         saveResultColumnWidth(tableColumn)
     }
 
+    func tableView(_ tableView: NSTableView, sizeToFitWidthOfColumn column: Int) -> CGFloat {
+        guard tableView === self.tableView,
+              column >= 0,
+              column < tableView.tableColumns.count,
+              let columnIndex = Int(tableView.tableColumns[column].identifier.rawValue),
+              columnIndex < columnDefinitions.count else { return 0 }
+
+        clearSavedResultColumnWidth(for: columnDefinitions[columnIndex], fallbackIndex: columnIndex)
+        return autodetectedResultWidth(for: tableView.tableColumns[column], columnIndex: columnIndex, maxRows: 500)
+    }
+
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard tableView === self.tableView,
+              row >= 0,
+              row < rows.count,
+              let columnIdentifier = tableColumn?.identifier.rawValue,
+              let columnIndex = Int(columnIdentifier),
+              columnIndex < rows[row].count,
+              let textCell = cell as? NSTextFieldCell else { return }
+
+        textCell.textColor = rows[row][columnIndex] is NSNull ? .secondaryLabelColor : .labelColor
+    }
+
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
         guard tableView === self.tableView,
               let columnIdentifier = tableColumn?.identifier.rawValue,
@@ -2739,7 +3071,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               columnIndex >= 0,
               columnIndex < rows[row].count else { return "" }
 
-        return displayString(for: rows[row][columnIndex])
+        return displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex))
     }
 
     func compareResultValue(_ lhs: Any, _ rhs: Any, columnDefinition: NSDictionary) -> ComparisonResult {
@@ -2757,8 +3089,8 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
         if let typeGrouping = columnDefinition["typegrouping"] as? String,
            typeGrouping == "integer" || typeGrouping == "float",
-           let leftNumber = Double(displayString(for: lhs)),
-           let rightNumber = Double(displayString(for: rhs)) {
+           let leftNumber = Double(displayString(for: lhs, columnDefinition: columnDefinition)),
+           let rightNumber = Double(displayString(for: rhs, columnDefinition: columnDefinition)) {
             if leftNumber < rightNumber {
                 return .orderedAscending
             }
@@ -2770,16 +3102,30 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
             return .orderedSame
         }
 
-        return displayString(for: lhs).localizedStandardCompare(displayString(for: rhs))
+        return displayString(for: lhs, columnDefinition: columnDefinition)
+            .localizedStandardCompare(displayString(for: rhs, columnDefinition: columnDefinition))
     }
 
-    func displayString(for value: Any, truncate: Bool = false) -> String {
+    func columnDefinition(at index: Int) -> NSDictionary? {
+        guard index >= 0, index < columnDefinitions.count else { return nil }
+        return columnDefinitions[index]
+    }
+
+    func displayString(for value: Any, columnDefinition: NSDictionary? = nil, truncate: Bool = false) -> String {
         if value is NSNull {
             return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
         }
 
         if let data = value as? Data {
-            return String(data: data, encoding: .utf8) ?? data.map { String(format: "%02x", $0) }.joined()
+            if UserDefaults.standard.bool(forKey: SPDisplayBinaryDataAsHex),
+               shouldDisplayDataAsHex(columnDefinition: columnDefinition) {
+                if truncate && data.count > 255 {
+                    return "0x" + data.prefix(255).map { String(format: "%02X", $0) }.joined() + "..."
+                }
+                return "0x" + data.map { String(format: "%02X", $0) }.joined()
+            }
+
+            return String(data: data, encoding: .utf8) ?? ""
         }
 
         let string = String(describing: value)
@@ -2788,5 +3134,15 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         }
 
         return string
+    }
+
+    func shouldDisplayDataAsHex(columnDefinition: NSDictionary?) -> Bool {
+        let typeGrouping = ((columnDefinition?["typegrouping"] as? String) ?? "").lowercased()
+        let type = ((columnDefinition?["type"] as? String) ?? "").lowercased()
+
+        return typeGrouping == "binary"
+            || typeGrouping == "blobdata"
+            || type.contains("binary")
+            || type.hasSuffix("blob")
     }
 }
