@@ -31,6 +31,269 @@
 import Cocoa
 import SnapKit
 
+private enum SALightweightWindowSessionSnapshotKey {
+    static let state = "state"
+    static let selectedDatabase = "selectedDatabase"
+    static let selectedTable = "selectedTable"
+    static let viewMode = "viewMode"
+    static let tableFilter = "tableFilter"
+    static let historyBackStack = "historyBackStack"
+    static let historyForwardStack = "historyForwardStack"
+}
+
+private enum SALightweightConnectionStateKey {
+    static let connection = "connection"
+    static let lightweightSession = "lightweightSession"
+}
+
+private enum SALightweightConnectionDictionaryKey {
+    static let rdbmsType = "rdbms_type"
+    static let type = "type"
+    static let name = "name"
+    static let host = "host"
+    static let user = "user"
+    static let password = "password"
+    static let database = "database"
+    static let socket = "socket"
+    static let port = "port"
+    static let colorIndex = SPFavoriteColorIndexKey
+    static let kcid = "kcid"
+    static let useSSL = "useSSL"
+    static let allowDataLocalInfile = "allowDataLocalInfile"
+    static let enableClearTextPlugin = "enableClearTextPlugin"
+    static let useCompression = "useCompression"
+    static let timeZoneMode = "timeZoneMode"
+    static let timeZoneIdentifier = "timeZoneIdentifier"
+    static let useAWSIAMAuth = "useAWSIAMAuth"
+    static let awsProfile = "aws_profile"
+    static let awsRegion = "aws_region"
+    static let sslKeyFileLocationEnabled = "sslKeyFileLocationEnabled"
+    static let sslKeyFileLocation = "sslKeyFileLocation"
+    static let sslCertificateFileLocationEnabled = "sslCertificateFileLocationEnabled"
+    static let sslCertificateFileLocation = "sslCertificateFileLocation"
+    static let sslCACertFileLocationEnabled = "sslCACertFileLocationEnabled"
+    static let sslCACertFileLocation = "sslCACertFileLocation"
+    static let sshHost = "ssh_host"
+    static let sshUser = "ssh_user"
+    static let sshPassword = "ssh_password"
+    static let sshKeyLocationEnabled = "ssh_keyLocationEnabled"
+    static let sshKeyLocation = "ssh_keyLocation"
+    static let sshPort = "ssh_port"
+    static let connectionKeychainItemName = "connectionKeychainItemName"
+    static let connectionKeychainItemAccount = "connectionKeychainItemAccount"
+    static let connectionSSHKeychainItemName = "connectionSSHKeychainItemName"
+    static let connectionSSHKeychainItemAccount = "connectionSSHKeychainItemAccount"
+}
+
+private extension Notification.Name {
+    static let lightweightResumeStateDidChange = Notification.Name("SALightweightResumeStateDidChangeNotification")
+}
+
+final class SALightweightSessionState {
+
+    private enum SnapshotKey {
+        static let version = "version"
+        static let queries = "queries"
+        static let content = "content"
+        static let transport = "transport"
+        static let host = "host"
+        static let port = "port"
+        static let username = "username"
+        static let database = "database"
+        static let table = "table"
+        static let text = "text"
+        static let serializedRuleFilter = "serializedRuleFilter"
+        static let isRuleFilterActive = "isRuleFilterActive"
+        static let sortColumn = "sortColumn"
+        static let sortAscending = "sortAscending"
+        static let pageIndex = "pageIndex"
+    }
+
+    struct ConnectionKey: Hashable {
+        let transport: String
+        let host: String
+        let port: String
+        let username: String
+    }
+
+    struct TableKey: Hashable {
+        let connection: ConnectionKey
+        let database: String
+        let table: String
+    }
+
+    struct QueryState {
+        let text: String
+    }
+
+    struct ContentState {
+        var serializedRuleFilter: NSDictionary?
+        var isRuleFilterActive: Bool
+        var sortColumn: String?
+        var sortAscending: Bool
+        var pageIndex: Int
+    }
+
+    private var queryStates: [TableKey: QueryState] = [:]
+    private var contentStates: [TableKey: ContentState] = [:]
+
+    static func tableKey(database: String?, table: String?, connection: SPMySQLConnection) -> TableKey? {
+        guard let database = database, !database.isEmpty, let table = table, !table.isEmpty else { return nil }
+
+        return TableKey(connection: connectionKey(for: connection), database: database, table: table)
+    }
+
+    static func connectionKey(for connection: SPMySQLConnection) -> ConnectionKey {
+        let host = connection.useSocket ? connection.socketPath ?? "" : connection.host ?? ""
+        return ConnectionKey(
+            transport: connection.useSocket ? "socket" : "tcp",
+            host: host,
+            port: String(connection.port),
+            username: connection.username ?? ""
+        )
+    }
+
+    func queryState(for key: TableKey) -> QueryState? {
+        return queryStates[key]
+    }
+
+    func setQueryText(_ text: String, for key: TableKey) {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryStates.removeValue(forKey: key)
+            return
+        }
+
+        queryStates[key] = QueryState(text: text)
+    }
+
+    func contentState(for key: TableKey) -> ContentState? {
+        return contentStates[key]
+    }
+
+    func setContentState(_ state: ContentState, for key: TableKey) {
+        contentStates[key] = state
+    }
+
+    func clearContentStates() {
+        contentStates.removeAll()
+    }
+
+    func clearAll() {
+        queryStates.removeAll()
+        contentStates.removeAll()
+    }
+
+    func exportDictionary(includeQueryStates: Bool = true, includeContentStates: Bool = true) -> NSDictionary {
+        let snapshot = NSMutableDictionary()
+        snapshot[SnapshotKey.version] = 1
+
+        if includeQueryStates {
+            snapshot[SnapshotKey.queries] = queryStates
+                .sorted { lhs, rhs in Self.sortKey(for: lhs.key) < Self.sortKey(for: rhs.key) }
+                .map { key, state -> NSDictionary in
+                    let dictionary = NSMutableDictionary(dictionary: Self.dictionary(for: key))
+                    dictionary[SnapshotKey.text] = state.text
+                    return dictionary
+                }
+        }
+
+        if includeContentStates {
+            snapshot[SnapshotKey.content] = contentStates
+                .sorted { lhs, rhs in Self.sortKey(for: lhs.key) < Self.sortKey(for: rhs.key) }
+                .map { key, state -> NSDictionary in
+                    let dictionary = NSMutableDictionary(dictionary: Self.dictionary(for: key))
+                    if let serializedRuleFilter = state.serializedRuleFilter {
+                        dictionary[SnapshotKey.serializedRuleFilter] = serializedRuleFilter
+                    }
+                    dictionary[SnapshotKey.isRuleFilterActive] = state.isRuleFilterActive
+                    if let sortColumn = state.sortColumn {
+                        dictionary[SnapshotKey.sortColumn] = sortColumn
+                    }
+                    dictionary[SnapshotKey.sortAscending] = state.sortAscending
+                    dictionary[SnapshotKey.pageIndex] = state.pageIndex
+                    return dictionary
+                }
+        }
+
+        return snapshot
+    }
+
+    func load(from dictionary: NSDictionary?) {
+        clearAll()
+        guard let dictionary = dictionary else { return }
+
+        if let queries = dictionary[SnapshotKey.queries] as? [NSDictionary] {
+            for query in queries {
+                guard let key = Self.tableKey(from: query),
+                      let text = query[SnapshotKey.text] as? String,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                queryStates[key] = QueryState(text: text)
+            }
+        }
+
+        if let content = dictionary[SnapshotKey.content] as? [NSDictionary] {
+            for item in content {
+                guard let key = Self.tableKey(from: item) else { continue }
+
+                contentStates[key] = ContentState(
+                    serializedRuleFilter: item[SnapshotKey.serializedRuleFilter] as? NSDictionary,
+                    isRuleFilterActive: Self.boolValue(item[SnapshotKey.isRuleFilterActive]),
+                    sortColumn: item[SnapshotKey.sortColumn] as? String,
+                    sortAscending: Self.boolValue(item[SnapshotKey.sortAscending], defaultValue: true),
+                    pageIndex: max(0, Self.intValue(item[SnapshotKey.pageIndex]))
+                )
+            }
+        }
+    }
+
+    private static func dictionary(for key: TableKey) -> NSDictionary {
+        return [
+            SnapshotKey.transport: key.connection.transport,
+            SnapshotKey.host: key.connection.host,
+            SnapshotKey.port: key.connection.port,
+            SnapshotKey.username: key.connection.username,
+            SnapshotKey.database: key.database,
+            SnapshotKey.table: key.table
+        ]
+    }
+
+    private static func tableKey(from dictionary: NSDictionary) -> TableKey? {
+        guard let transport = dictionary[SnapshotKey.transport] as? String,
+              let host = dictionary[SnapshotKey.host] as? String,
+              let port = dictionary[SnapshotKey.port] as? String,
+              let username = dictionary[SnapshotKey.username] as? String,
+              let database = dictionary[SnapshotKey.database] as? String,
+              let table = dictionary[SnapshotKey.table] as? String,
+              !database.isEmpty,
+              !table.isEmpty else { return nil }
+
+        return TableKey(
+            connection: ConnectionKey(transport: transport, host: host, port: port, username: username),
+            database: database,
+            table: table
+        )
+    }
+
+    private static func sortKey(for key: TableKey) -> String {
+        return [
+            key.connection.transport,
+            key.connection.host,
+            key.connection.port,
+            key.connection.username,
+            key.database,
+            key.table
+        ].joined(separator: "\u{1F}")
+    }
+
+    private static func boolValue(_ value: Any?, defaultValue: Bool = false) -> Bool {
+        return (value as? NSNumber)?.boolValue ?? (value as? Bool ?? defaultValue)
+    }
+
+    private static func intValue(_ value: Any?) -> Int {
+        return (value as? NSNumber)?.intValue ?? (value as? Int ?? 0)
+    }
+}
+
 @objc final class SPWindowController: NSWindowController {
 
     private var loadedDatabaseDocument: SPDatabaseDocument?
@@ -58,6 +321,7 @@ import SnapKit
     private var activeConnectionName: String?
     private var activeServerVersion: String?
     private let databaseToolbarController = SADatabaseToolbarController()
+    private let lightweightSessionState = SALightweightSessionState()
     private let lightweightStructureController = SALightweightStructureViewController()
     private let lightweightContentController = SALightweightContentViewController()
     private let lightweightQueryController = SALightweightQueryViewController()
@@ -68,6 +332,7 @@ import SnapKit
     private var lightweightHistoryBackStack: [String] = []
     private var lightweightHistoryForwardStack: [String] = []
     private var isRestoringLightweightHistory = false
+    private var pendingLightweightSessionSnapshot: NSDictionary?
     private let lightweightShellView = NSView(frame: .zero)
     private let lightweightContentSplitView = SPSplitView(frame: .zero)
     private let lightweightSidebarView = NSVisualEffectView(frame: .zero)
@@ -197,6 +462,267 @@ import SnapKit
 	}
 }
 
+extension SPWindowController {
+    @objc func lightweightSessionSnapshotDictionary() -> NSDictionary {
+        return lightweightSessionSnapshotDictionary(includeQueryText: true, includeContentState: true)
+    }
+
+    func lightweightSessionSnapshotDictionary(includeQueryText: Bool, includeContentState: Bool) -> NSDictionary {
+        lightweightContentController.saveCurrentSessionState()
+        lightweightQueryController.saveCurrentSessionState()
+
+        let snapshot = NSMutableDictionary()
+        snapshot[SALightweightWindowSessionSnapshotKey.state] = lightweightSessionState.exportDictionary(includeQueryStates: includeQueryText, includeContentStates: includeContentState)
+        if let selectedDatabase = selectedDatabase {
+            snapshot[SALightweightWindowSessionSnapshotKey.selectedDatabase] = selectedDatabase
+        }
+        if let selectedTable = selectedTable {
+            snapshot[SALightweightWindowSessionSnapshotKey.selectedTable] = selectedTable
+        }
+        snapshot[SALightweightWindowSessionSnapshotKey.viewMode] = activeLightweightViewMode.rawValue
+        if !tableFilterField.stringValue.isEmpty {
+            snapshot[SALightweightWindowSessionSnapshotKey.tableFilter] = tableFilterField.stringValue
+        }
+        if !lightweightHistoryBackStack.isEmpty {
+            snapshot[SALightweightWindowSessionSnapshotKey.historyBackStack] = lightweightHistoryBackStack
+        }
+        if !lightweightHistoryForwardStack.isEmpty {
+            snapshot[SALightweightWindowSessionSnapshotKey.historyForwardStack] = lightweightHistoryForwardStack
+        }
+
+        return snapshot
+    }
+
+    @objc func restoreLightweightSessionSnapshotDictionary(_ snapshot: NSDictionary?) {
+        guard let snapshot = snapshot else { return }
+
+        pendingLightweightSessionSnapshot = snapshot
+        if activeConnection != nil {
+            applyPendingLightweightSessionSnapshot()
+        }
+    }
+
+    @objc var hasActiveLightweightConnection: Bool {
+        return activeConnection != nil && activeConnectionInfo != nil && loadedDatabaseDocument == nil
+    }
+
+    @objc(lightweightConnectionStateDictionaryWithIncludePasswords:includeSession:includeQuery:)
+    func lightweightConnectionStateDictionary(includePasswords: Bool, includeSession: Bool, includeQuery: Bool) -> NSDictionary? {
+        guard hasActiveLightweightConnection, let activeConnectionInfo = activeConnectionInfo else { return nil }
+
+        let state = NSMutableDictionary()
+        state[SALightweightConnectionStateKey.connection] = lightweightConnectionDictionary(for: activeConnectionInfo, includePasswords: includePasswords)
+        if includeSession || includeQuery {
+            state[SALightweightConnectionStateKey.lightweightSession] = lightweightSessionSnapshotDictionary(includeQueryText: includeQuery, includeContentState: includeSession)
+        }
+        return state
+    }
+
+    @objc func restoreLightweightConnectionStateDictionary(_ state: NSDictionary?) -> Bool {
+        guard loadedDatabaseDocument == nil,
+              let state = state,
+              let connectionDictionary = state[SALightweightConnectionStateKey.connection] as? NSDictionary,
+              let info = lightweightConnectionInfo(from: connectionDictionary),
+              let connectionController = connectionController else { return false }
+
+        if let lightweightSession = state[SALightweightConnectionStateKey.lightweightSession] as? NSDictionary {
+            restoreLightweightSessionSnapshotDictionary(lightweightSession)
+        }
+
+        activeConnectionInfo = info
+        selectedDatabase = info.database.isEmpty ? nil : info.database
+        connectionController.applyConnectionInfo(info)
+        connectionController.initiateConnection(nil)
+        return true
+    }
+
+    func lightweightConnectionDictionary(for info: SAConnectionInfoObjC, includePasswords: Bool) -> NSDictionary {
+        let connection = NSMutableDictionary()
+        connection[SALightweightConnectionDictionaryKey.rdbmsType] = "mysql"
+        connection[SALightweightConnectionDictionaryKey.type] = Self.connectionTypeString(for: info.type)
+        connection[SALightweightConnectionDictionaryKey.name] = info.name
+        connection[SALightweightConnectionDictionaryKey.host] = info.host
+        connection[SALightweightConnectionDictionaryKey.user] = info.user
+        if let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.database] = selectedDatabase
+        } else if !info.database.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.database] = info.database
+        }
+        if !info.socket.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.socket] = info.socket
+        }
+        if let port = Int(info.port), port > 0 {
+            connection[SALightweightConnectionDictionaryKey.port] = port
+        }
+        if info.colorIndex >= 0 {
+            connection[SALightweightConnectionDictionaryKey.colorIndex] = info.colorIndex
+        }
+        if !info.connectionKeychainID.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.kcid] = info.connectionKeychainID
+        }
+        if includePasswords, !info.password.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.password] = info.password
+        }
+
+        connection[SALightweightConnectionDictionaryKey.useSSL] = info.useSSL
+        connection[SALightweightConnectionDictionaryKey.allowDataLocalInfile] = info.allowDataLocalInfile
+        connection[SALightweightConnectionDictionaryKey.enableClearTextPlugin] = info.enableClearTextPlugin
+        connection[SALightweightConnectionDictionaryKey.useCompression] = info.useCompression
+        connection[SALightweightConnectionDictionaryKey.timeZoneMode] = info.timeZoneMode.rawValue
+        if !info.timeZoneIdentifier.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.timeZoneIdentifier] = info.timeZoneIdentifier
+        }
+
+        connection[SALightweightConnectionDictionaryKey.useAWSIAMAuth] = info.useAWSIAMAuth
+        if !info.awsProfile.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.awsProfile] = info.awsProfile
+        }
+        if !info.awsRegion.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.awsRegion] = info.awsRegion
+        }
+
+        connection[SALightweightConnectionDictionaryKey.sslKeyFileLocationEnabled] = info.sslKeyFileLocationEnabled
+        if !info.sslKeyFileLocation.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.sslKeyFileLocation] = info.sslKeyFileLocation
+        }
+        connection[SALightweightConnectionDictionaryKey.sslCertificateFileLocationEnabled] = info.sslCertificateFileLocationEnabled
+        if !info.sslCertificateFileLocation.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.sslCertificateFileLocation] = info.sslCertificateFileLocation
+        }
+        connection[SALightweightConnectionDictionaryKey.sslCACertFileLocationEnabled] = info.sslCACertFileLocationEnabled
+        if !info.sslCACertFileLocation.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.sslCACertFileLocation] = info.sslCACertFileLocation
+        }
+
+        if info.type == .sshTunnel {
+            connection[SALightweightConnectionDictionaryKey.sshHost] = info.sshHost
+            connection[SALightweightConnectionDictionaryKey.sshUser] = info.sshUser
+            connection[SALightweightConnectionDictionaryKey.sshKeyLocationEnabled] = info.sshKeyLocationEnabled
+            if !info.sshKeyLocation.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.sshKeyLocation] = info.sshKeyLocation
+            }
+            if let sshPort = Int(info.sshPort), sshPort > 0 {
+                connection[SALightweightConnectionDictionaryKey.sshPort] = sshPort
+            }
+            if includePasswords {
+                connection[SALightweightConnectionDictionaryKey.sshPassword] = info.sshPassword
+            }
+        }
+
+        if !info.connectionKeychainItemName.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.connectionKeychainItemName] = info.connectionKeychainItemName
+        }
+        if !info.connectionKeychainItemAccount.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.connectionKeychainItemAccount] = info.connectionKeychainItemAccount
+        }
+        if !info.connectionSSHKeychainItemName.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.connectionSSHKeychainItemName] = info.connectionSSHKeychainItemName
+        }
+        if !info.connectionSSHKeychainItemAccount.isEmpty {
+            connection[SALightweightConnectionDictionaryKey.connectionSSHKeychainItemAccount] = info.connectionSSHKeychainItemAccount
+        }
+
+        return connection
+    }
+
+    func lightweightConnectionInfo(from connection: NSDictionary) -> SAConnectionInfoObjC? {
+        guard let typeString = connection[SALightweightConnectionDictionaryKey.type] as? String else { return nil }
+
+        let info = SAConnectionInfoObjC()
+        info.type = Self.connectionType(for: typeString)
+        info.name = Self.stringValue(connection[SALightweightConnectionDictionaryKey.name])
+        info.host = Self.stringValue(connection[SALightweightConnectionDictionaryKey.host])
+        info.user = Self.stringValue(connection[SALightweightConnectionDictionaryKey.user])
+        info.password = Self.stringValue(connection[SALightweightConnectionDictionaryKey.password])
+        info.database = Self.stringValue(connection[SALightweightConnectionDictionaryKey.database])
+        info.socket = Self.stringValue(connection[SALightweightConnectionDictionaryKey.socket])
+        info.port = Self.stringValue(connection[SALightweightConnectionDictionaryKey.port])
+        info.colorIndex = Self.intValue(connection[SALightweightConnectionDictionaryKey.colorIndex], defaultValue: 0)
+        info.connectionKeychainID = Self.stringValue(connection[SALightweightConnectionDictionaryKey.kcid])
+        info.useSSL = Self.intValue(connection[SALightweightConnectionDictionaryKey.useSSL])
+        info.allowDataLocalInfile = Self.intValue(connection[SALightweightConnectionDictionaryKey.allowDataLocalInfile])
+        info.enableClearTextPlugin = Self.intValue(connection[SALightweightConnectionDictionaryKey.enableClearTextPlugin])
+        info.useCompression = Self.boolValue(connection[SALightweightConnectionDictionaryKey.useCompression])
+        info.timeZoneMode = SAConnectionTimeZoneMode(rawValue: Self.intValue(connection[SALightweightConnectionDictionaryKey.timeZoneMode])) ?? .useServerTZ
+        info.timeZoneIdentifier = Self.stringValue(connection[SALightweightConnectionDictionaryKey.timeZoneIdentifier])
+        info.useAWSIAMAuth = Self.intValue(connection[SALightweightConnectionDictionaryKey.useAWSIAMAuth])
+        info.awsProfile = Self.stringValue(connection[SALightweightConnectionDictionaryKey.awsProfile])
+        info.awsRegion = Self.stringValue(connection[SALightweightConnectionDictionaryKey.awsRegion])
+        info.sslKeyFileLocationEnabled = Self.intValue(connection[SALightweightConnectionDictionaryKey.sslKeyFileLocationEnabled])
+        info.sslKeyFileLocation = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sslKeyFileLocation])
+        info.sslCertificateFileLocationEnabled = Self.intValue(connection[SALightweightConnectionDictionaryKey.sslCertificateFileLocationEnabled])
+        info.sslCertificateFileLocation = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sslCertificateFileLocation])
+        info.sslCACertFileLocationEnabled = Self.intValue(connection[SALightweightConnectionDictionaryKey.sslCACertFileLocationEnabled])
+        info.sslCACertFileLocation = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sslCACertFileLocation])
+        info.sshHost = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshHost])
+        info.sshUser = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshUser])
+        info.sshPassword = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshPassword])
+        info.sshKeyLocationEnabled = Self.intValue(connection[SALightweightConnectionDictionaryKey.sshKeyLocationEnabled])
+        info.sshKeyLocation = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshKeyLocation])
+        info.sshPort = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshPort])
+        info.connectionKeychainItemName = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionKeychainItemName])
+        info.connectionKeychainItemAccount = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionKeychainItemAccount])
+        info.connectionSSHKeychainItemName = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionSSHKeychainItemName])
+        info.connectionSSHKeychainItemAccount = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionSSHKeychainItemAccount])
+        return info
+    }
+
+    static func connectionTypeString(for type: SAConnectionType) -> String {
+        switch type {
+        case .socket:
+            return "SPSocketConnection"
+        case .sshTunnel:
+            return "SPSSHTunnelConnection"
+        case .awsIAM:
+            return "SPAWSIAMConnection"
+        case .tcpIP:
+            return "SPTCPIPConnection"
+        @unknown default:
+            return "SPTCPIPConnection"
+        }
+    }
+
+    static func connectionType(for typeString: String) -> SAConnectionType {
+        switch typeString {
+        case "SPSocketConnection":
+            return .socket
+        case "SPSSHTunnelConnection":
+            return .sshTunnel
+        case "SPAWSIAMConnection":
+            return .awsIAM
+        default:
+            return .tcpIP
+        }
+    }
+
+    static func stringValue(_ value: Any?) -> String {
+        if let string = value as? String {
+            return string
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return ""
+    }
+
+    static func intValue(_ value: Any?, defaultValue: Int = 0) -> Int {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let int = value as? Int {
+            return int
+        }
+        if let string = value as? String {
+            return Int(string) ?? defaultValue
+        }
+        return defaultValue
+    }
+
+    static func boolValue(_ value: Any?, defaultValue: Bool = false) -> Bool {
+        return (value as? NSNumber)?.boolValue ?? (value as? Bool ?? defaultValue)
+    }
+}
+
 // MARK: - Private API
 
 private extension SPWindowController {
@@ -207,6 +733,14 @@ private extension SPWindowController {
             window?.tab.accessoryView = tabAccessoryView
         }
 
+        lightweightContentController.sessionState = lightweightSessionState
+        lightweightContentController.sessionStateDidChange = { [weak self] in
+            self?.markLightweightResumeStateChanged()
+        }
+        lightweightQueryController.sessionState = lightweightSessionState
+        lightweightQueryController.sessionStateDidChange = { [weak self] in
+            self?.markLightweightResumeStateChanged()
+        }
         databaseToolbarController.delegate = self
     }
 
@@ -634,8 +1168,16 @@ private extension SPWindowController {
     }
 
     func setLightweightFallbackToolbarItemsEnabled(_ enabled: Bool) {
-        databaseToolbarController.setFallbackItemsEnabled(enabled)
+        databaseToolbarController.setFallbackItemsEnabled(enabled,
+                                                          databaseSelected: selectedDatabase?.isEmpty == false,
+                                                          tableSelected: selectedTable != nil)
         updateLightweightHistoryToolbarState()
+    }
+
+    func markLightweightResumeStateChanged() {
+        guard hasActiveLightweightConnection else { return }
+
+        NotificationCenter.default.post(name: .lightweightResumeStateDidChange, object: self)
     }
 
     func updateLightweightWindowTitle(table: String? = nil) {
@@ -669,14 +1211,46 @@ private extension SPWindowController {
         }
     }
 
-    func loadTables(for database: String, preservingSelection: Bool = false) {
+    func applyPendingLightweightSessionSnapshot() {
+        guard let snapshot = pendingLightweightSessionSnapshot else { return }
+
+        pendingLightweightSessionSnapshot = nil
+        lightweightSessionState.load(from: snapshot[SALightweightWindowSessionSnapshotKey.state] as? NSDictionary)
+
+        tableFilterField.stringValue = snapshot[SALightweightWindowSessionSnapshotKey.tableFilter] as? String ?? ""
+        lightweightHistoryBackStack = snapshot[SALightweightWindowSessionSnapshotKey.historyBackStack] as? [String] ?? []
+        lightweightHistoryForwardStack = snapshot[SALightweightWindowSessionSnapshotKey.historyForwardStack] as? [String] ?? []
+        updateLightweightHistoryToolbarState()
+
+        let restoredDatabase = snapshot[SALightweightWindowSessionSnapshotKey.selectedDatabase] as? String
+        let restoredTable = snapshot[SALightweightWindowSessionSnapshotKey.selectedTable] as? String
+        let restoredViewMode = (snapshot[SALightweightWindowSessionSnapshotKey.viewMode] as? NSNumber)
+            .flatMap { SAViewMode(rawValue: $0.intValue) }
+            ?? (snapshot[SALightweightWindowSessionSnapshotKey.viewMode] as? Int).flatMap { SAViewMode(rawValue: $0) }
+            ?? .structure
+
+        activeLightweightViewMode = restoredViewMode
+
+        guard let database = restoredDatabase ?? selectedDatabase else {
+            showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
+            return
+        }
+
+        selectedDatabase = database
+        databaseToolbarController.selectOnlyDatabase(database)
+        loadTables(for: database, restoringTable: restoredTable, restoringViewMode: restoredViewMode)
+    }
+
+    func loadTables(for database: String, preservingSelection: Bool = false, restoringTable: String? = nil, restoringViewMode: SAViewMode? = nil) {
         guard let activeConnection = activeConnection else { return }
 
-        let tableToRestore = preservingSelection ? selectedTable : nil
+        let tableToRestore = restoringTable ?? (preservingSelection ? selectedTable : nil)
         if selectedDatabase != database {
             resetLightweightTableHistory()
         }
+        selectedDatabase = database
         selectedTable = nil
+        setLightweightFallbackToolbarItemsEnabled(true)
         resetLightweightTableInfo()
         showLightweightPlaceholder(NSLocalizedString("Loading tables...", comment: "lightweight database shell loading tables"))
         lightweightTables = []
@@ -695,8 +1269,16 @@ private extension SPWindowController {
                 self.applyLightweightTableFilter()
                 self.tablesListView.reloadData()
                 if let tableToRestore = tableToRestore, tables.contains(tableToRestore) {
+                    if let restoringViewMode = restoringViewMode {
+                        self.activeLightweightViewMode = restoringViewMode
+                    }
                     self.selectLightweightTableInSidebar(tableToRestore)
                     self.selectLightweightTable(tableToRestore, recordsHistory: false)
+                    return
+                }
+                if let restoringViewMode = restoringViewMode, restoringViewMode == .query {
+                    self.activeLightweightViewMode = restoringViewMode
+                    self.showLightweightQuery()
                     return
                 }
                 self.showLightweightPlaceholder(tables.isEmpty
@@ -708,6 +1290,8 @@ private extension SPWindowController {
 
     func selectLightweightTable(_ table: String, recordsHistory: Bool = true) {
         selectedTable = table
+        setLightweightFallbackToolbarItemsEnabled(true)
+        markLightweightResumeStateChanged()
         if recordsHistory {
             recordLightweightHistorySelection(table)
         }
@@ -889,6 +1473,7 @@ private extension SPWindowController {
         }
         lightweightContentController.tableContentDidChange = { [weak self] in
             self?.refreshLightweightTableInfoAfterMutation()
+            self?.markLightweightResumeStateChanged()
         }
         lightweightContentController.loadContent(for: table, database: selectedDatabase, connection: activeConnection)
     }
@@ -910,15 +1495,6 @@ private extension SPWindowController {
         queryView.frame = lightweightDetailView.bounds
         queryView.autoresizingMask = [.width, .height]
         lightweightDetailView.addSubview(queryView)
-        lightweightQueryController.requestLegacyQueryFallback = { [weak self] query in
-            guard let self = self else { return }
-            let document = self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable)
-            if let query = query, !query.isEmpty {
-                document.doPerformLoadQueryService(query)
-            } else {
-                document.viewQuery()
-            }
-        }
         lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
     }
 
@@ -1035,10 +1611,13 @@ private extension SPWindowController {
     @objc func lightweightTableFilterChanged(_ sender: NSSearchField) {
         applyLightweightTableFilter()
         tablesListView.reloadData()
+        markLightweightResumeStateChanged()
     }
 
     @objc func viewStructure() {
-        if let selectedTable = selectedTable, loadedDatabaseDocument == nil {
+        if activeConnection != nil, loadedDatabaseDocument == nil {
+            guard let selectedTable = selectedTable else { return }
+
             showLightweightStructure(for: selectedTable)
             return
         }
@@ -1047,7 +1626,9 @@ private extension SPWindowController {
     }
 
     @objc func viewContent() {
-        if let selectedTable = selectedTable, loadedDatabaseDocument == nil {
+        if activeConnection != nil, loadedDatabaseDocument == nil {
+            guard let selectedTable = selectedTable else { return }
+
             showLightweightContent(for: selectedTable)
             return
         }
@@ -1066,6 +1647,8 @@ private extension SPWindowController {
 
     @objc func viewStatus() {
         if activeConnection != nil, loadedDatabaseDocument == nil {
+            guard let selectedTable = selectedTable else { return }
+
             showLightweightStatus(for: selectedTable)
             return
         }
@@ -1075,6 +1658,8 @@ private extension SPWindowController {
 
     @objc func viewRelations() {
         if activeConnection != nil, loadedDatabaseDocument == nil {
+            guard let selectedTable = selectedTable else { return }
+
             showLightweightRelations(for: selectedTable)
             return
         }
@@ -1084,6 +1669,8 @@ private extension SPWindowController {
 
     @objc func viewTriggers() {
         if activeConnection != nil, loadedDatabaseDocument == nil {
+            guard let selectedTable = selectedTable else { return }
+
             showLightweightTriggers(for: selectedTable)
             return
         }
@@ -1514,12 +2101,19 @@ extension SPWindowController: SAConnectionDelegate {
         activeConnectionName = info.name
         activeServerVersion = connection.serverVersionString()
         selectedDatabase = info.database.isEmpty ? nil : info.database
+        selectedTable = nil
         databaseListNeedsLoad = true
 
         updateLightweightWindowTitle()
         installLightweightDatabaseShell()
         setLightweightFallbackToolbarItemsEnabled(true)
         requestLightweightDatabasesIfNeeded()
+        markLightweightResumeStateChanged()
+
+        if pendingLightweightSessionSnapshot != nil {
+            applyPendingLightweightSessionSnapshot()
+            return
+        }
 
         if let selectedDatabase = selectedDatabase {
             databaseToolbarController.selectOnlyDatabase(selectedDatabase)
@@ -1538,10 +2132,23 @@ extension SPWindowController: SADatabaseToolbarControllerDelegate {
     }
 
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectDatabase database: String) {
+        markLightweightResumeStateChanged()
         loadTables(for: database)
     }
 
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectViewMode mode: SAViewMode) {
+        if activeConnection != nil,
+           loadedDatabaseDocument == nil,
+           selectedDatabase?.isEmpty != false {
+            return
+        }
+
+        if activeConnection != nil, loadedDatabaseDocument == nil, mode != .query, selectedTable == nil {
+            return
+        }
+
+        markLightweightResumeStateChanged()
+
         switch mode {
         case .structure:
             viewStructure()
@@ -1704,7 +2311,7 @@ private extension SPConnectionController {
         name = info.name
         host = info.host
         user = info.user
-        password = info.password
+        password = info.password.isEmpty && !info.connectionKeychainItemName.isEmpty ? "SequelAceSecretPassword" : info.password
         database = info.database
         socket = info.socket
         port = info.port
@@ -1726,9 +2333,14 @@ private extension SPConnectionController {
         sslCACertFileLocation = info.sslCACertFileLocation
         sshHost = info.sshHost
         sshUser = info.sshUser
-        sshPassword = info.sshPassword
+        sshPassword = info.sshPassword.isEmpty && !info.connectionSSHKeychainItemName.isEmpty ? "SequelAceSecretPassword" : info.sshPassword
         sshKeyLocationEnabled = info.sshKeyLocationEnabled
         sshKeyLocation = info.sshKeyLocation
         sshPort = info.sshPort
+        connectionKeychainID = info.connectionKeychainID
+        connectionKeychainItemName = info.connectionKeychainItemName
+        connectionKeychainItemAccount = info.connectionKeychainItemAccount
+        connectionSSHKeychainItemName = info.connectionSSHKeychainItemName
+        connectionSSHKeychainItemAccount = info.connectionSSHKeychainItemAccount
     }
 }

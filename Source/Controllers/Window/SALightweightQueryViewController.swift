@@ -62,6 +62,27 @@ private final class SALightweightQueryTableView: NSTableView {
 }
 
 @objcMembers
+private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
+    weak var queryController: SALightweightQueryViewController?
+
+    init(queryController: SALightweightQueryViewController) {
+        self.queryController = queryController
+    }
+
+    var fileURL: URL? {
+        return queryController?.documentURLForLegacyQueryConsumers
+    }
+
+    var isUntitled: Bool {
+        return queryController?.isUntitledQueryDocument ?? true
+    }
+
+    var customQueryInstance: Any? {
+        return queryController
+    }
+}
+
+@objcMembers
 final class SALightweightQueryViewController: NSViewController {
 
     struct QueryResult {
@@ -108,11 +129,17 @@ final class SALightweightQueryViewController: NSViewController {
     private var queryToken = UUID()
     private var isRunning = false
     private var isCancellationRequested = false
+    private var isApplyingProgrammaticQueryText = false
     private var editorWasConfigured = false
     private var didInstallObservers = false
     private var isApplyingProgrammaticColumnWidths = false
     private var isApplyingQuerySort = false
     private var bracketHighlighter: SPBracketHighlighter?
+    private let helpViewerClient = SPHelpViewerClient()
+    private var fieldEditor: SPFieldEditorController?
+    private var favoritesManager: SPQueryFavoriteManager?
+    private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
+    private lazy var favoriteDocumentProxy = SALightweightQueryFavoriteDocumentProxy(queryController: self)
     private let maxDisplayedRows = 10_000
     private var baseStatusText = NSLocalizedString("Ready", comment: "lightweight query ready status")
     private var resultColumnWidths: [String: CGFloat] = [:]
@@ -133,11 +160,21 @@ final class SALightweightQueryViewController: NSViewController {
     private var currentHistoryOffsetIndex = -1
     private var historyItemWasJustInserted = false
     var textViewWasChanged = false
+    var sessionState = SALightweightSessionState()
+    var sessionStateDidChange: (() -> Void)?
+    private var shouldPersistCurrentQueryText = false
+    private var currentQueryTableKey: SALightweightSessionState.TableKey?
     private var currentQueryBeforeCaret = false
     var currentQueryRange = NSRange(location: 0, length: 0)
     private var currentQueryRanges: [NSRange] = []
     private var didCacheCurrentQueryRanges = false
-    var requestLegacyQueryFallback: ((String?) -> Void)?
+    var documentURLForLegacyQueryConsumers: URL? { documentURL }
+    var isUntitledQueryDocument: Bool {
+        guard let documentURL else { return true }
+        return documentURL.absoluteString.hasPrefix(NSLocalizedString("Untitled", comment: "Title of a new Sequel Ace Document"))
+    }
+    var tableDocumentInstance: Any { favoriteDocumentProxy }
+    var textView: SPTextView { queryTextView }
 
     private let queryInfoPaneSplitView = SPSplitView(frame: .zero)
     private let queryMainView = NSView(frame: .zero)
@@ -151,6 +188,9 @@ final class SALightweightQueryViewController: NSViewController {
     private let infoTextScrollView = NSScrollView(frame: .zero)
     private var didSetInitialQueryEditorSplitPosition = false
     private var didSetInitialQueryInfoSplitPosition = false
+    private static let queryEditorInitialHeightRatio: CGFloat = 142.0 / 387.0
+    private static let queryEditorMinimumInitialHeight: CGFloat = 143.0
+    private static let queryEditorMaximumInitialHeight: CGFloat = 360.0
     private static let tabularPasteboardType = NSPasteboard.PasteboardType("public.utf8-tab-separated-values-text")
 
     private lazy var actionButton: NSPopUpButton = {
@@ -451,7 +491,10 @@ final class SALightweightQueryViewController: NSViewController {
         guard editorWasConfigured else { return }
 
         if !didSetInitialQueryEditorSplitPosition && queryEditorSplitView.bounds.height > 0 {
-            let initialDividerPosition = min(143, max(0, queryEditorSplitView.bounds.height - queryEditorSplitView.dividerThickness))
+            let availableHeight = max(0, queryEditorSplitView.bounds.height - queryEditorSplitView.dividerThickness)
+            let proportionalHeight = availableHeight * Self.queryEditorInitialHeightRatio
+            let clampedHeight = min(Self.queryEditorMaximumInitialHeight, max(Self.queryEditorMinimumInitialHeight, proportionalHeight))
+            let initialDividerPosition = min(availableHeight, clampedHeight)
             queryEditorSplitView.setPosition(initialDividerPosition, ofDividerAt: 0)
             didSetInitialQueryEditorSplitPosition = true
         }
@@ -511,6 +554,9 @@ final class SALightweightQueryViewController: NSViewController {
     }
 
     func loadQuery(database: String?, table: String?, connection: SPMySQLConnection) {
+        let tableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
+        saveCurrentQueryTextIfNeeded()
+
         self.connection = connection
         self.database = database ?? ""
         self.table = table
@@ -521,20 +567,40 @@ final class SALightweightQueryViewController: NSViewController {
 
         configureEditorIfNeeded()
         queryTextView.setConnection(connection, withVersion: Int(connection.serverMajorVersion()))
+        helpViewerClient.setConnection(connection)
 
-        if queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           let table,
-           let database {
-            replaceEditorText("SELECT * FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) LIMIT 100;")
+        if currentQueryTableKey != tableKey {
+            currentQueryTableKey = tableKey
+            restoreUserQueryText(for: tableKey)
         }
 
         updateCurrentQueryRange()
         rebuildMenus()
         updateControls()
     }
+
+    func saveCurrentSessionState() {
+        saveCurrentQueryTextIfNeeded()
+    }
 }
 
 private extension SALightweightQueryViewController {
+    func restoreUserQueryText(for tableKey: SALightweightSessionState.TableKey?) {
+        guard let restoredQueryText = tableKey.flatMap({ sessionState.queryState(for: $0)?.text }) else {
+            replaceEditorText("", marksUserEdited: false)
+            return
+        }
+
+        replaceEditorText(restoredQueryText, marksUserEdited: true)
+    }
+
+    func saveCurrentQueryTextIfNeeded() {
+        guard let currentQueryTableKey,
+              shouldPersistCurrentQueryText else { return }
+
+        sessionState.setQueryText(queryTextView.string, for: currentQueryTableKey)
+    }
+
     func configureEditorIfNeeded() {
         guard !editorWasConfigured else { return }
 
@@ -569,6 +635,10 @@ private extension SALightweightQueryViewController {
                                                selector: #selector(historyItemsHaveBeenUpdated(_:)),
                                                name: .SPHistoryItemsHaveBeenUpdated,
                                                object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(helpWindowClosedByUser(_:)),
+                                               name: NSNotification.Name("SPUserClosedHelpViewer"),
+                                               object: helpViewerClient)
         for key in Self.observedPreferenceKeys {
             UserDefaults.standard.addObserver(self, forKeyPath: key, options: .new, context: nil)
         }
@@ -581,6 +651,12 @@ private extension SALightweightQueryViewController {
 
     @objc func historyItemsHaveBeenUpdated(_ notification: Notification?) {
         rebuildHistoryMenu()
+    }
+
+    @objc func helpWindowClosedByUser(_ notification: Notification?) {
+        UserDefaults.standard.set(false, forKey: SPCustomQueryUpdateAutoHelp)
+        queryTextView.setAutohelp(false)
+        updateActionMenuState()
     }
 
     func updateAppearanceFromPreferences() {
@@ -1745,8 +1821,28 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func editQueryFavorites(_ sender: Any?) {
-        requestLegacyQueryFallback?(queryTextView.string)
+        guard let window = view.window,
+              let manager = SPQueryFavoriteManager(delegate: self),
+              let managerWindow = manager.window else {
+            NSSound.beep()
+            favoritesButton.selectItem(at: 0)
+            return
+        }
+
+        favoritesManager = manager
+        window.beginSheet(managerWindow) { [weak self] _ in
+            self?.favoritesManager = nil
+        }
         favoritesButton.selectItem(at: 0)
+    }
+
+    func doPerformQueryService(_ query: String) {
+        doPerformLoadQueryService(query)
+        runQueries(splitQueries(in: queryTextView.string))
+    }
+
+    func doPerformLoadQueryService(_ query: String) {
+        replaceEditorText(query)
     }
 
     @objc func exportQueryResultAsCSV(_ sender: Any?) {
@@ -1824,6 +1920,7 @@ private extension SALightweightQueryViewController {
                                       action: nil)
         globalCheckbox.frame = NSRect(x: 0, y: 0, width: 260, height: 18)
         globalCheckbox.state = .on
+        globalCheckbox.isEnabled = !isUntitledQueryDocument
 
         let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 50))
         accessoryView.addSubview(nameField)
@@ -1845,7 +1942,7 @@ private extension SALightweightQueryViewController {
         }
 
         let favorite: [String: Any] = ["name": name, "query": query]
-        if globalCheckbox.state == .on || documentURL == nil {
+        if globalCheckbox.state == .on || documentURL == nil || isUntitledQueryDocument {
             var favorites = UserDefaults.standard.array(forKey: SPQueryFavorites) as? [[String: Any]] ?? []
             favorites.append(favorite)
             UserDefaults.standard.set(favorites, forKey: SPQueryFavorites)
@@ -1883,16 +1980,20 @@ private extension SALightweightQueryViewController {
         }
     }
 
-    func replaceEditorText(_ query: String) {
-        queryTextView.shouldChangeText(in: NSRange(location: 0, length: queryTextView.string.count), replacementString: query)
-        queryTextView.string = query
-        textViewWasChanged = true
-        didCacheCurrentQueryRanges = false
-        queryTextView.didChangeText()
-        queryTextView.scrollRangeToVisible(NSRange(location: query.count, length: 0))
-        if query.count < SP_TEXT_SIZE_MAX_PASTE_LENGTH {
-            queryTextView.doSyntaxHighlighting(withForce: true)
+    func replaceEditorText(_ query: String, marksUserEdited: Bool = true) {
+        isApplyingProgrammaticQueryText = true
+        if queryTextView.shouldChangeText(in: NSRange(location: 0, length: queryTextView.string.count), replacementString: query) {
+            queryTextView.string = query
+            textViewWasChanged = true
+            didCacheCurrentQueryRanges = false
+            queryTextView.didChangeText()
+            queryTextView.scrollRangeToVisible(NSRange(location: query.count, length: 0))
+            if query.count < SP_TEXT_SIZE_MAX_PASTE_LENGTH {
+                queryTextView.doSyntaxHighlighting(withForce: true)
+            }
         }
+        isApplyingProgrammaticQueryText = false
+        shouldPersistCurrentQueryText = marksUserEdited && !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         updateCurrentQueryRange()
     }
 
@@ -2596,20 +2697,133 @@ private extension SALightweightQueryViewController {
         guard resultColumnOrigin(for: columnDefinition) != nil else { return false }
 
         let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
-        return typeGrouping != "blobdata" && typeGrouping != "textdata"
+        return typeGrouping != "blobdata"
     }
 
     func canEditResultCell(row: Int, column columnIndex: Int) -> Bool {
+        guard canSaveResultCell(row: row, column: columnIndex),
+              canEditResultColumn(columnDefinitions[columnIndex]),
+              !shouldUseFieldEditor(row: row, column: columnIndex) else { return false }
+
+        return true
+    }
+
+    func canSaveResultCell(row: Int, column columnIndex: Int) -> Bool {
         guard !isRunning,
               let connection,
               row >= 0,
               row < rows.count,
               columnIndex >= 0,
               columnIndex < columnDefinitions.count,
-              canEditResultColumn(columnDefinitions[columnIndex]),
+              columnIndex < rows[row].count,
               let origin = resultColumnOrigin(for: columnDefinitions[columnIndex]) else { return false }
 
         return whereClause(for: row, origin: origin, connection: connection) != nil
+    }
+
+    func shouldUseFieldEditor(row: Int, column columnIndex: Int) -> Bool {
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < columnDefinitions.count,
+              columnIndex < rows[row].count else { return false }
+
+        if UserDefaults.standard.bool(forKey: SPEditInSheetEnabled) {
+            return true
+        }
+
+        let columnDefinition = columnDefinitions[columnIndex]
+        let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
+        let value = rows[row][columnIndex]
+
+        if value is NSNull {
+            return false
+        }
+
+        if typeGrouping == "blobdata" || value is Data {
+            return true
+        }
+
+        let displayValue = displayString(for: value, columnDefinition: columnDefinition, truncate: false)
+
+        if UserDefaults.standard.bool(forKey: SPEditInSheetForLongText),
+           let threshold = UserDefaults.standard.object(forKey: SPEditInSheetForLongTextLengthThreshold) as? NSNumber,
+           displayValue.count > threshold.intValue {
+            return true
+        }
+
+        if UserDefaults.standard.bool(forKey: SPEditInSheetForMultiLineText),
+           displayValue.rangeOfCharacter(from: .newlines) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    func openFieldEditor(row: Int, column columnIndex: Int) {
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < columnDefinitions.count,
+              columnIndex < rows[row].count,
+              let connection else { return }
+
+        let columnDefinition = columnDefinitions[columnIndex]
+        let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
+        let isBlob = typeGrouping == "textdata" || typeGrouping == "blobdata"
+        let isEditable = canSaveResultCell(row: row, column: columnIndex)
+        let editor = SPFieldEditorController()
+
+        var editedFieldInfo: [String: Any] = [
+            "usedQuery": usedQuery(),
+            "tableSource": "query"
+        ]
+        if let columnName = columnDefinition["org_name"] as? String {
+            editedFieldInfo["colName"] = columnName
+        }
+        if let tableName = columnDefinition["org_table"] as? String {
+            editedFieldInfo["tableName"] = tableName
+        }
+        editor.editedFieldInfo = editedFieldInfo
+
+        if let length = columnDefinition["char_length"] as? NSNumber {
+            editor.textMaxLength = length.uint64Value
+        }
+
+        editor.fieldType = (columnDefinition["type"] as? String) ?? ""
+
+        if let encoding = columnDefinition["charset_name"] as? String, encoding != "binary" {
+            editor.fieldEncoding = encoding
+        } else {
+            editor.fieldEncoding = ""
+        }
+
+        if let allowsNull = columnDefinition["null"] as? NSNumber {
+            editor.allowNULL = !allowsNull.boolValue
+        } else if let allowsNull = columnDefinition["null"] as? String {
+            editor.allowNULL = allowsNull == "0" || allowsNull.caseInsensitiveCompare("NO") == .orderedSame
+        } else {
+            editor.allowNULL = true
+        }
+
+        var originalData = rows[row][columnIndex]
+        if originalData is NSNull {
+            originalData = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        }
+
+        fieldEditor = editor
+        editor.edit(with: originalData,
+                    fieldName: (columnDefinition["name"] as? String) ?? "",
+                    usingEncoding: connection.stringEncoding(),
+                    isObjectBlob: isBlob,
+                    isEditable: isEditable,
+                    with: view.window,
+                    sender: self,
+                    contextInfo: [
+                        "rowIndex": NSNumber(value: row),
+                        "columnIndex": NSNumber(value: columnIndex),
+                        "isFieldEditable": NSNumber(value: isEditable)
+                    ])
     }
 
     func prepareResultContextMenu(for event: NSEvent) {
@@ -2742,6 +2956,10 @@ private extension SALightweightQueryViewController {
             return (number.stringValue, number.stringValue)
         }
 
+        if let data = object as? Data {
+            return (connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false)), data)
+        }
+
         let value = String(describing: object ?? "")
         let typeGrouping = (columnDefinition["typegrouping"] as? String) ?? ""
         let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
@@ -2755,11 +2973,30 @@ private extension SALightweightQueryViewController {
             return ("b'\(bitValue)'", bitValue)
         }
 
+        if typeGrouping == "geometry" {
+            let geometryValue = geometrySQLValue(from: value)
+            return (geometryValue, value)
+        }
+
         if typeGrouping == "date" && value == "NOW()" {
             return ("NOW()", value)
         }
 
         return (connection.escapeAndQuoteString(value) ?? Self.singleQuoted(value), value)
+    }
+
+    func geometrySQLValue(from value: String) -> String {
+        let geometry = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard geometry.count >= 5, geometry.contains(")") else { return "NULL" }
+
+        if geometry.hasSuffix(")") {
+            return "ST_GeomFromText(\(Self.singleQuoted(geometry)))"
+        }
+
+        guard let closingParenthesis = geometry.lastIndex(of: ")") else { return "NULL" }
+        let textPart = String(geometry[...closingParenthesis])
+        let sridPart = String(geometry[geometry.index(after: closingParenthesis)...])
+        return "ST_GeomFromText(\(Self.singleQuoted(textPart))\(sridPart))"
     }
 
     func matchingRowCount(for query: String, connection: SPMySQLConnection) -> Int? {
@@ -2799,6 +3036,42 @@ private extension SALightweightQueryViewController {
     }
 }
 
+extension SALightweightQueryViewController {
+    @objc(processFieldEditorResult:contextInfo:)
+    func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
+        defer {
+            fieldEditor = nil
+            view.window?.makeFirstResponder(tableView)
+        }
+
+        guard let data,
+              let contextInfo,
+              (contextInfo["isFieldEditable"] as? NSNumber)?.boolValue == true,
+              let rowNumber = contextInfo["rowIndex"] as? NSNumber,
+              let columnNumber = contextInfo["columnIndex"] as? NSNumber else { return }
+
+        let row = rowNumber.intValue
+        let columnIndex = columnNumber.intValue
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < columnDefinitions.count else { return }
+
+        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(columnIndex)))
+        tableView(tableView, setObjectValue: data, for: tableColumn, row: row)
+    }
+
+    @objc(setFieldEditorSelectedRange:)
+    func setFieldEditorSelectedRange(_ range: NSRange) {
+        fieldEditorTextSelectedRange = range
+    }
+
+    @objc
+    func fieldEditorSelectedRange() -> NSRange {
+        return fieldEditorTextSelectedRange
+    }
+}
+
 extension SALightweightQueryViewController: NSTextViewDelegate {
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSTextView.insertNewline(_:)),
@@ -2830,6 +3103,10 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
                   replacementString: String?) -> Bool {
         textViewWasChanged = true
         didCacheCurrentQueryRanges = false
+        if !isApplyingProgrammaticQueryText {
+            shouldPersistCurrentQueryText = true
+            sessionStateDidChange?()
+        }
         return true
     }
 
@@ -2840,6 +3117,52 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
     }
 
     @objc func showAutoHelpForCurrentWord(_ sender: Any?) {
+        let textView = (sender as? SPTextView) ?? queryTextView
+        let wordRange = rangeForCurrentWord(in: textView)
+        let text = textView.string as NSString
+
+        guard wordRange.location != NSNotFound,
+              NSMaxRange(wordRange) <= text.length,
+              wordRange.length > 0 else { return }
+
+        let searchString = text.substring(with: wordRange)
+        helpViewerClient.showHelp(for: searchString, addToHistory: true, calledByAutoHelp: true)
+    }
+
+    private func rangeForCurrentWord(in textView: NSTextView) -> NSRange {
+        let selectedRange = textView.selectedRange()
+        if selectedRange.length > 0 {
+            return selectedRange
+        }
+
+        let text = textView.string as NSString
+        let length = text.length
+        var start = min(selectedRange.location, length)
+        var end = start
+        let wordCharacters = NSMutableCharacterSet.alphanumeric()
+        wordCharacters.addCharacters(in: "_.")
+        wordCharacters.removeCharacters(in: "`")
+
+        if start > 0 {
+            start -= 1
+            while start > 0, wordCharacters.characterIsMember(text.character(at: start)) {
+                start -= 1
+            }
+            if !wordCharacters.characterIsMember(text.character(at: start)) {
+                start += 1
+            }
+        }
+
+        while end < length, wordCharacters.characterIsMember(text.character(at: end)) {
+            end += 1
+        }
+
+        var range = NSRange(location: start, length: max(0, end - start))
+        if range.length > 0,
+           text.character(at: NSMaxRange(range) - 1) == Character(".").utf16.first! {
+            range.length -= 1
+        }
+        return range
     }
 }
 
@@ -2960,7 +3283,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].count,
               columnIndex < columnDefinitions.count,
-              canEditResultCell(row: row, column: columnIndex) else { return }
+              canSaveResultCell(row: row, column: columnIndex) else { return }
 
         let newValue = String(describing: object ?? "")
         guard newValue != displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: false) else { return }
@@ -3061,6 +3384,11 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         guard tableView === self.tableView,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier) else { return false }
+
+        if shouldUseFieldEditor(row: row, column: columnIndex) {
+            openFieldEditor(row: row, column: columnIndex)
+            return false
+        }
 
         return canEditResultCell(row: row, column: columnIndex)
     }

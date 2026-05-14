@@ -60,6 +60,9 @@
 #import "SPTextView.h"
 #import "SPBracketHighlighter.h"
 #import "SPComboPopupButton.h"
+#import "SPFieldEditorController.h"
+#import "SPHelpViewerClient.h"
+#import "SPQueryFavoriteManager.h"
 #import "SPSQLParser.h"
 #import "SPQueryController.h"
 #import <SPMySQL/SPMySQL.h>

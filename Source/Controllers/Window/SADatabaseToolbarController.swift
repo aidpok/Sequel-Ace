@@ -41,6 +41,9 @@ protocol SADatabaseToolbarControllerDelegate: AnyObject {
 final class SADatabaseToolbarController: NSObject {
 
     weak var delegate: SADatabaseToolbarControllerDelegate?
+    private var fallbackItemsEnabled = false
+    private var databaseSelected = false
+    private var tableSelected = false
 
     lazy var toolbar: NSToolbar = {
         let toolbar = NSToolbar(identifier: "LightweightDatabaseShellToolbar")
@@ -77,10 +80,26 @@ final class SADatabaseToolbarController: NSObject {
         databasePopUpButton.isEnabled = enabled
     }
 
-    func setFallbackItemsEnabled(_ enabled: Bool) {
-        for item in toolbar.items where item.itemIdentifier != .databasePicker {
-            item.isEnabled = enabled
+    func setFallbackItemsEnabled(_ enabled: Bool, databaseSelected: Bool, tableSelected: Bool) {
+        fallbackItemsEnabled = enabled
+        self.databaseSelected = databaseSelected
+        self.tableSelected = tableSelected
+
+        if (!databaseSelected || !tableSelected),
+           let selectedIdentifier = toolbar.selectedItemIdentifier,
+           isTableViewModeIdentifier(selectedIdentifier) {
+            toolbar.selectedItemIdentifier = nil
         }
+        if !databaseSelected,
+           let selectedIdentifier = toolbar.selectedItemIdentifier,
+           selectedIdentifier == SAViewMode.query.toolbarIdentifier {
+            toolbar.selectedItemIdentifier = nil
+        }
+
+        for item in toolbar.items where item.itemIdentifier != .databasePicker && item.itemIdentifier != .historyNavigation {
+            item.isEnabled = isFallbackItemEnabled(item.itemIdentifier)
+        }
+        toolbar.validateVisibleItems()
     }
 
     func setHistoryNavigationEnabled(canGoBack: Bool, canGoForward: Bool) {
@@ -129,6 +148,13 @@ final class SADatabaseToolbarController: NSObject {
 
     @objc private func viewModeSelected(_ sender: NSToolbarItem) {
         guard let mode = SAViewMode.allCases.first(where: { $0.toolbarIdentifier == sender.itemIdentifier }) else { return }
+        guard isFallbackItemEnabled(sender.itemIdentifier) else {
+            if let selectedIdentifier = toolbar.selectedItemIdentifier,
+               selectedIdentifier == sender.itemIdentifier {
+                toolbar.selectedItemIdentifier = nil
+            }
+            return
+        }
 
         delegate?.databaseToolbar(self, didSelectViewMode: mode)
     }
@@ -144,9 +170,40 @@ final class SADatabaseToolbarController: NSObject {
     @objc private func historyNavigationSelected(_ sender: NSSegmentedControl) {
         delegate?.databaseToolbar(self, didSelectHistorySegment: sender.selectedSegment)
     }
+
+    private func isFallbackItemEnabled(_ identifier: NSToolbarItem.Identifier) -> Bool {
+        guard fallbackItemsEnabled else { return false }
+
+        if isTableViewModeIdentifier(identifier) {
+            return databaseSelected && tableSelected
+        }
+
+        switch identifier {
+        case SAViewMode.query.toolbarIdentifier:
+            return databaseSelected
+        case .userManager,
+             .console:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isTableViewModeIdentifier(_ identifier: NSToolbarItem.Identifier) -> Bool {
+        switch identifier {
+        case SAViewMode.structure.toolbarIdentifier,
+             SAViewMode.content.toolbarIdentifier,
+             SAViewMode.status.toolbarIdentifier,
+             SAViewMode.relations.toolbarIdentifier,
+             SAViewMode.triggers.toolbarIdentifier:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
-extension SADatabaseToolbarController: NSToolbarDelegate, NSMenuDelegate {
+extension SADatabaseToolbarController: NSToolbarDelegate, NSToolbarItemValidation, NSMenuDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         return [
             .databasePicker,
@@ -260,6 +317,18 @@ extension SADatabaseToolbarController: NSToolbarDelegate, NSMenuDelegate {
         if menu == databasePopUpButton.menu {
             delegate?.databaseToolbarDidRequestDatabaseLoad(self)
         }
+    }
+
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        if item.itemIdentifier == .historyNavigation {
+            return item.isEnabled
+        }
+
+        if item.itemIdentifier == .databasePicker {
+            return databasePopUpButton.isEnabled
+        }
+
+        return isFallbackItemEnabled(item.itemIdentifier)
     }
 }
 

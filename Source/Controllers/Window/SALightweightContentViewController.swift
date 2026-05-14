@@ -120,20 +120,22 @@ final class SALightweightContentViewController: NSViewController {
     private var sortAscending = true
     private var didRegisterPreferenceObservers = false
     private var isApplyingProgrammaticColumnWidths = false
+    private var isApplyingProgrammaticSortDescriptors = false
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
     private var tableObjectType: TableObjectType = .unknown
     private var ruleFilterColumnsKey = ""
     private var filterRules: [FilterRule] = []
     private var defaultContentFilters: [String: [ContentFilterDefinition]] = [:]
-    private var restoredRuleFilters: [String: NSDictionary] = [:]
-    private var restoredActiveRuleFilters = Set<String>()
-    private var contentCache: [String: ContentCacheEntry] = [:]
-    private var contentCacheOrder: [String] = []
+    var sessionState = SALightweightSessionState()
+    private var currentTableKey: SALightweightSessionState.TableKey?
+    private var contentCache: [SALightweightSessionState.TableKey: ContentCacheEntry] = [:]
+    private var contentCacheOrder: [SALightweightSessionState.TableKey] = []
     private let maximumContentCacheEntries = 6
     private var ruleFilterHeightConstraint: NSLayoutConstraint?
     private var isRestoringCachedContent = false
     var requestLegacyContentFallback: (() -> Void)?
+    var sessionStateDidChange: (() -> Void)?
     var tableContentDidChange: (() -> Void)?
     private var limitResults: Bool {
         UserDefaults.standard.bool(forKey: SPLimitResults)
@@ -252,6 +254,11 @@ final class SALightweightContentViewController: NSViewController {
     func clearCachedTables() {
         contentCache.removeAll()
         contentCacheOrder.removeAll()
+    }
+
+    func saveCurrentSessionState() {
+        cacheCurrentContentState()
+        storeCurrentRuleFilterState()
     }
 
     override func loadView() {
@@ -441,26 +448,29 @@ final class SALightweightContentViewController: NSViewController {
     }
 
     func loadContent(for table: String, database: String, connection: SPMySQLConnection) {
+        let tableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
         cacheCurrentContentState()
         storeCurrentRuleFilterState()
 
         self.table = table
         self.database = database
         self.connection = connection
+        currentTableKey = tableKey
         loadToken = UUID()
-        isRuleFilterActive = restoredActiveRuleFilters.contains(ruleFilterStorageKey(database: database, table: table))
+        let restoredContentState = tableKey.flatMap { sessionState.contentState(for: $0) }
+        isRuleFilterActive = restoredContentState?.isRuleFilterActive ?? false
         tableObjectType = .unknown
         ruleFilterColumnsKey = ""
         filterRules = []
 
-        if restoreCachedContent(for: contentCacheKey(database: database, table: table)) {
+        if let tableKey = tableKey, restoreCachedContent(for: tableKey) {
             return
         }
 
-        pageIndex = 0
-        sortColumn = nil
-        sortAscending = true
-        tableView.sortDescriptors = []
+        pageIndex = restoredContentState?.pageIndex ?? 0
+        sortColumn = restoredContentState?.sortColumn
+        sortAscending = restoredContentState?.sortAscending ?? true
+        applySortDescriptorsFromCurrentState()
 
         loadCurrentPage()
     }
@@ -603,6 +613,7 @@ private extension SALightweightContentViewController {
                 self.configureRuleFilterColumnsIfNeeded()
                 self.applyColumnFilter()
                 self.rebuildColumns()
+                self.applySortDescriptorsFromCurrentState()
                 self.updateStatus()
                 self.updateControls()
                 self.cacheCurrentContentState()
@@ -718,6 +729,7 @@ private extension SALightweightContentViewController {
     @objc func applyRuleFilter(_ sender: Any?) {
         isRuleFilterActive = sender != nil
         storeCurrentRuleFilterState()
+        sessionStateDidChange?()
 
         pageIndex = 0
         loadCurrentPage()
@@ -746,6 +758,8 @@ private extension SALightweightContentViewController {
         guard pageIndex > 0, !isLoading else { return }
 
         pageIndex -= 1
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         loadCurrentPage()
     }
 
@@ -753,6 +767,8 @@ private extension SALightweightContentViewController {
         guard hasNextPage, !isLoading else { return }
 
         pageIndex += 1
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         loadCurrentPage()
     }
 
@@ -943,7 +959,8 @@ private extension SALightweightContentViewController {
 
         ruleFilterColumnsKey = key
 
-        if let restoredFilter = restoredRuleFilters[ruleFilterStorageKey()] as? [AnyHashable: Any] {
+        if let currentTableKey = currentTableKey,
+           let restoredFilter = sessionState.contentState(for: currentTableKey)?.serializedRuleFilter as? [AnyHashable: Any] {
             filterRules = filterRules(from: restoredFilter)
         } else {
             filterRules = []
@@ -1128,6 +1145,7 @@ private extension SALightweightContentViewController {
 
         rebuildFilterRows()
         storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         updateRuleFilterVisibility(animated: false)
         focusValueField(for: newRule.id)
     }
@@ -1136,6 +1154,7 @@ private extension SALightweightContentViewController {
         filterRules.removeAll { $0.id == id }
         rebuildFilterRows()
         storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         updateRuleFilterVisibility(animated: false)
 
         if filterRules.isEmpty {
@@ -1150,6 +1169,7 @@ private extension SALightweightContentViewController {
         normalizeFilterRule(at: index)
         rebuildFilterRows()
         storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         updateRuleFilterVisibility(animated: false)
     }
 
@@ -1210,6 +1230,7 @@ private extension SALightweightContentViewController {
                 self.filterRules[index].values = values
                 self.normalizeFilterRule(at: index)
                 self.storeCurrentRuleFilterState()
+                self.sessionStateDidChange?()
             }
             rowView.onAdd = { [weak self] id in
                 self?.addFilterRule(after: id)
@@ -1358,31 +1379,21 @@ private extension SALightweightContentViewController {
     }
 
     func storeCurrentRuleFilterState() {
-        guard !database.isEmpty, !table.isEmpty else { return }
+        guard let currentTableKey = currentTableKey else { return }
 
-        let key = ruleFilterStorageKey()
-        if filterRules.isEmpty {
-            restoredRuleFilters.removeValue(forKey: key)
-        } else {
-            restoredRuleFilters[key] = serializedFilter() as NSDictionary
-        }
-
-        if isRuleFilterActive {
-            restoredActiveRuleFilters.insert(key)
-        } else {
-            restoredActiveRuleFilters.remove(key)
-        }
+        sessionState.setContentState(
+            SALightweightSessionState.ContentState(
+                serializedRuleFilter: filterRules.isEmpty ? nil : serializedFilter() as NSDictionary,
+                isRuleFilterActive: isRuleFilterActive,
+                sortColumn: sortColumn,
+                sortAscending: sortAscending,
+                pageIndex: pageIndex
+            ),
+            for: currentTableKey
+        )
     }
 
-    func ruleFilterStorageKey(database: String? = nil, table: String? = nil) -> String {
-        return "\(database ?? self.database)\u{0}\(table ?? self.table)"
-    }
-
-    func contentCacheKey(database: String? = nil, table: String? = nil) -> String {
-        return "\(database ?? self.database)\u{0}\(table ?? self.table)"
-    }
-
-    func restoreCachedContent(for key: String) -> Bool {
+    func restoreCachedContent(for key: SALightweightSessionState.TableKey) -> Bool {
         guard let cached = contentCache[key],
               cached.pageSize == pageSize,
               cached.limitResults == limitResults else {
@@ -1406,23 +1417,17 @@ private extension SALightweightContentViewController {
         sortAscending = cached.sortAscending
         isRuleFilterActive = cached.isRuleFilterActive
 
-        if let serializedRuleFilter = cached.serializedRuleFilter {
-            restoredRuleFilters[ruleFilterStorageKey()] = serializedRuleFilter
-        } else {
-            restoredRuleFilters.removeValue(forKey: ruleFilterStorageKey())
-        }
-
-        if isRuleFilterActive {
-            restoredActiveRuleFilters.insert(ruleFilterStorageKey())
-        } else {
-            restoredActiveRuleFilters.remove(ruleFilterStorageKey())
-        }
-
-        if let sortColumn = sortColumn, let columnIndex = columns.firstIndex(of: sortColumn) {
-            tableView.sortDescriptors = [NSSortDescriptor(key: "\(columnIndex)", ascending: sortAscending)]
-        } else {
-            tableView.sortDescriptors = []
-        }
+        sessionState.setContentState(
+            SALightweightSessionState.ContentState(
+                serializedRuleFilter: cached.serializedRuleFilter,
+                isRuleFilterActive: cached.isRuleFilterActive,
+                sortColumn: cached.sortColumn,
+                sortAscending: cached.sortAscending,
+                pageIndex: cached.pageIndex
+            ),
+            for: key
+        )
+        applySortDescriptorsFromCurrentState()
 
         isLoading = false
         filteredColumns = []
@@ -1436,11 +1441,10 @@ private extension SALightweightContentViewController {
     }
 
     func cacheCurrentContentState() {
-        guard !database.isEmpty, !table.isEmpty, !columns.isEmpty else { return }
+        guard let currentTableKey = currentTableKey, !columns.isEmpty else { return }
 
         storeCurrentRuleFilterState()
-        let key = contentCacheKey()
-        contentCache[key] = ContentCacheEntry(
+        contentCache[currentTableKey] = ContentCacheEntry(
             columns: columns,
             columnInfo: columnInfo,
             rows: rows,
@@ -1454,12 +1458,22 @@ private extension SALightweightContentViewController {
             sortColumn: sortColumn,
             sortAscending: sortAscending,
             isRuleFilterActive: isRuleFilterActive,
-            serializedRuleFilter: restoredRuleFilters[ruleFilterStorageKey()]
+            serializedRuleFilter: sessionState.contentState(for: currentTableKey)?.serializedRuleFilter
         )
-        noteContentCacheUse(for: key)
+        noteContentCacheUse(for: currentTableKey)
     }
 
-    func noteContentCacheUse(for key: String) {
+    func applySortDescriptorsFromCurrentState() {
+        isApplyingProgrammaticSortDescriptors = true
+        if let sortColumn = sortColumn, let columnIndex = columns.firstIndex(of: sortColumn) {
+            tableView.sortDescriptors = [NSSortDescriptor(key: "\(columnIndex)", ascending: sortAscending)]
+        } else {
+            tableView.sortDescriptors = []
+        }
+        isApplyingProgrammaticSortDescriptors = false
+    }
+
+    func noteContentCacheUse(for key: SALightweightSessionState.TableKey) {
         contentCacheOrder.removeAll { $0 == key }
         contentCacheOrder.append(key)
 
@@ -1470,9 +1484,10 @@ private extension SALightweightContentViewController {
     }
 
     func invalidateCurrentContentCache() {
-        let key = contentCacheKey()
-        contentCache.removeValue(forKey: key)
-        contentCacheOrder.removeAll { $0 == key }
+        guard let currentTableKey = currentTableKey else { return }
+
+        contentCache.removeValue(forKey: currentTableKey)
+        contentCacheOrder.removeAll { $0 == currentTableKey }
     }
 
     func showInvalidRuleFilterAlert(error: Error?) {
@@ -2026,11 +2041,13 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard !isLoading, !isRestoringCachedContent, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key, let columnIndex = Int(key), columnIndex < columns.count else { return }
+        guard !isLoading, !isRestoringCachedContent, !isApplyingProgrammaticSortDescriptors, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key, let columnIndex = Int(key), columnIndex < columns.count else { return }
 
         sortColumn = columns[columnIndex]
         sortAscending = descriptor.ascending
         pageIndex = 0
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         invalidateCurrentContentCache()
         loadCurrentPage()
     }

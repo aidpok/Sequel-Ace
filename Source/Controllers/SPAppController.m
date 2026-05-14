@@ -63,6 +63,9 @@
 @import FirebaseCrashlytics;
 
 static const double SPDelayBeforeCheckingForNewReleases = 10;
+static NSString *SALightweightResumeFileName = @"LightweightResume.plist";
+static NSString *SALightweightResumeStateDidChangeNotification = @"SALightweightResumeStateDidChangeNotification";
+static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
 #ifdef DEBUG
 #define SAUIDiagnosticLog(fmt, ...) SAUIDiagnosticLogMessage((@"[SA UI Diagnostics] " fmt), ##__VA_ARGS__)
@@ -119,10 +122,22 @@ static NSTimeInterval SAUIMonotonicTime(void)
 - (void)removeCheckForUpdatesMenuItem;
 - (void)addCheckForUpdatesMenuItem;
 - (void)checkForNewVersionFromMenu;
+- (NSString *)lightweightResumeFilePath;
+- (NSDictionary *)lightweightResumeStateDictionary;
+- (BOOL)restoreLightweightResumeState;
+- (void)saveLightweightResumeState;
+- (void)lightweightResumeStateDidChange:(NSNotification *)notification;
+- (void)windowWillClose:(NSNotification *)notification;
+- (void)scheduleLightweightResumeStateSave;
+- (void)savePendingLightweightResumeStateIfNeeded;
+- (void)cancelScheduledLightweightResumeStateSave;
 
 @property (readwrite, strong) NSFileManager *fileManager;
 
 @property (nonatomic, strong, readwrite) TabManager *tabManager;
+@property (nonatomic, assign) BOOL lightweightResumeStateDirty;
+@property (nonatomic, assign) BOOL lightweightResumeSaveScheduled;
+@property (nonatomic, strong) NSData *lastLightweightResumeStateData;
 @property (nonatomic, strong) dispatch_source_t uiDiagnosticsWatchdogTimer;
 @property (atomic, assign) BOOL uiDiagnosticsBeatPending;
 @property (atomic, assign) NSUInteger uiDiagnosticsLastReportedStallSecond;
@@ -384,6 +399,8 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
 - (void)applicationDidResignActive:(NSNotification *)notification
 {
+    [self savePendingLightweightResumeStateIfNeeded];
+
     if (!SAUIDiagnosticsEnabled()) {
         return;
     }
@@ -472,12 +489,19 @@ static NSTimeInterval SAUIMonotonicTime(void)
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(switchToPreviousTab:) name:SPWindowSelectPreviousTabNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(switchToNextTab:) name:SPWindowSelectNextTabNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(saveConnectionsToSPF:) name:SPDocumentSaveToSPFNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lightweightResumeStateDidChange:) name:SALightweightResumeStateDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowWillClose:) name:NSWindowWillCloseNotification object:nil];
 
     [SPBundleManager.shared reloadBundles:self];
     [self _copyDefaultThemes];
 
+    BOOL restoredLightweightWindows = NO;
+    if (!spfDict) {
+        restoredLightweightWindows = [self restoreLightweightResumeState];
+    }
+
     // If no documents are open, open one
-    if (![self frontDocument]) {
+    if (![self frontDocument] && !restoredLightweightWindows) {
 
         SPWindowController *newWindowController = [self.tabManager replaceTabServiceWithInitialWindow];
 
@@ -564,6 +588,206 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
 - (void)switchToNextTab:(NSNotification *)notification {
     [self.tabManager switchToNextTab];
+}
+
+- (NSString *)lightweightResumeFilePath
+{
+    NSError *error = nil;
+    NSString *dataPath = [fileManager applicationSupportDirectoryForSubDirectory:SPDataSupportFolder createIfNotExists:YES error:&error];
+    if (!dataPath || error) {
+        SPLog(@"Could not resolve lightweight resume path: %@", error);
+        return nil;
+    }
+
+    return [dataPath stringByAppendingPathComponent:SALightweightResumeFileName];
+}
+
+- (NSDictionary *)lightweightResumeStateDictionary
+{
+    NSMutableArray *windows = [NSMutableArray array];
+    NSMutableArray *processedWindows = [NSMutableArray array];
+
+    for (NSWindow *window in [self.tabManager windows]) {
+        NSMutableArray *tabs = [NSMutableArray array];
+        NSMutableDictionary *win = [NSMutableDictionary dictionary];
+
+        NSArray *windowsToProcess = [[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window];
+        for (NSWindow *processedWindow in windowsToProcess) {
+            SPWindowController *windowController = processedWindow.windowController;
+            if (!windowController || [processedWindows containsObject:windowController.uniqueID] || ![windowController hasActiveLightweightConnection]) {
+                continue;
+            }
+
+            NSDictionary *lightweightState = [windowController lightweightConnectionStateDictionaryWithIncludePasswords:NO includeSession:YES includeQuery:YES];
+            if (![lightweightState count]) {
+                continue;
+            }
+
+            NSMutableDictionary *tabData = [NSMutableDictionary dictionary];
+            [tabData setObject:@YES forKey:@"isLightweight"];
+            [tabData setObject:lightweightState forKey:@"lightweightState"];
+            [tabs addObject:tabData];
+            [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
+
+            [processedWindows addObject:windowController.uniqueID];
+        }
+
+        if ([tabs count] > 0) {
+            [win setObject:tabs forKey:@"tabs"];
+        }
+        if ([[win allValues] count] > 0) {
+            [windows addObject:win];
+        }
+    }
+
+    if (![windows count]) {
+        return nil;
+    }
+
+    return @{
+        @"version": @1,
+        @"windows": windows
+    };
+}
+
+- (BOOL)restoreLightweightResumeState
+{
+    NSString *filePath = [self lightweightResumeFilePath];
+    if (![filePath length] || ![fileManager fileExistsAtPath:filePath]) {
+        return NO;
+    }
+
+    NSError *error = nil;
+    NSData *data = [NSData dataWithContentsOfFile:filePath options:NSUncachedRead error:&error];
+    NSDictionary *resumeState = nil;
+    if (data && !error) {
+        resumeState = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error];
+    }
+
+    if (![resumeState isKindOfClass:[NSDictionary class]] || error) {
+        SPLog(@"Could not read lightweight resume state: %@", error);
+        return NO;
+    }
+
+    NSArray *windowDictionaries = [resumeState objectForKey:@"windows"];
+    if (![windowDictionaries isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+
+    BOOL restoredAnyWindow = NO;
+    for (NSDictionary *windowDictionary in [windowDictionaries reverseObjectEnumerator]) {
+        if (![windowDictionary isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+
+        NSWindow *window = nil;
+        NSArray *tabs = [windowDictionary objectForKey:@"tabs"];
+        if (![tabs isKindOfClass:[NSArray class]]) {
+            continue;
+        }
+
+        for (NSDictionary *tab in tabs) {
+            if (![tab isKindOfClass:[NSDictionary class]] || ![[tab objectForKey:@"isLightweight"] boolValue]) {
+                continue;
+            }
+
+            SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTab];
+            window = newWindowController.window;
+
+            NSString *frame = [windowDictionary objectForKey:@"frame"];
+            if ([frame isKindOfClass:[NSString class]]) {
+                [window setFrameFromString:frame];
+            }
+
+            if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
+                restoredAnyWindow = YES;
+            }
+        }
+    }
+
+    return restoredAnyWindow;
+}
+
+- (void)saveLightweightResumeState
+{
+    NSTimeInterval startTime = SAUIMonotonicTime();
+    NSString *filePath = [self lightweightResumeFilePath];
+    if (![filePath length]) {
+        return;
+    }
+
+    NSDictionary *resumeState = [self lightweightResumeStateDictionary];
+    if (![resumeState count]) {
+        [fileManager removeItemAtPath:filePath error:nil];
+        self.lastLightweightResumeStateData = nil;
+        SAUIDiagnosticLog(@"lightweight resume state removed elapsed=%.3fs", SAUIMonotonicTime() - startTime);
+        return;
+    }
+
+    NSError *error = nil;
+    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:resumeState format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+    BOOL didWrite = plist && !error && ![plist isEqualToData:self.lastLightweightResumeStateData];
+    if (didWrite) {
+        [plist writeToFile:filePath options:NSAtomicWrite error:&error];
+        if (!error) {
+            self.lastLightweightResumeStateData = plist;
+        }
+    }
+
+    if (error) {
+        SPLog(@"Could not save lightweight resume state: %@", error);
+    }
+
+    SAUIDiagnosticLog(@"lightweight resume state saved elapsed=%.3fs bytes=%lu changed=%d", SAUIMonotonicTime() - startTime, (unsigned long)[plist length], didWrite && !error);
+}
+
+- (void)lightweightResumeStateDidChange:(NSNotification *)notification
+{
+    self.lightweightResumeStateDirty = YES;
+    [self scheduleLightweightResumeStateSave];
+}
+
+- (void)windowWillClose:(NSNotification *)notification
+{
+    if (![[notification object] isKindOfClass:[NSWindow class]]) {
+        return;
+    }
+
+    NSWindow *window = [notification object];
+    if (![window.windowController isKindOfClass:[SPWindowController class]]) {
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self lightweightResumeStateDidChange:nil];
+    });
+}
+
+- (void)scheduleLightweightResumeStateSave
+{
+    if (self.lightweightResumeSaveScheduled) {
+        return;
+    }
+
+    self.lightweightResumeSaveScheduled = YES;
+    [self performSelector:@selector(savePendingLightweightResumeStateIfNeeded) withObject:nil afterDelay:SALightweightResumeSaveDebounce];
+}
+
+- (void)savePendingLightweightResumeStateIfNeeded
+{
+    if (!self.lightweightResumeStateDirty) {
+        return;
+    }
+
+    [self cancelScheduledLightweightResumeStateSave];
+    self.lightweightResumeStateDirty = NO;
+    [self saveLightweightResumeState];
+}
+
+- (void)cancelScheduledLightweightResumeStateSave
+{
+    self.lightweightResumeSaveScheduled = NO;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(savePendingLightweightResumeStateIfNeeded) object:nil];
 }
 
 - (void)duplicateConnectionToTab:(NSNotification *)notification {
@@ -658,27 +882,36 @@ static NSTimeInterval SAUIMonotonicTime(void)
                 continue;
             }
 
-            // Skip not connected docs eg if connection controller is displayed (TODO maybe to be improved)
-            if (![windowController.databaseDocument mySQLVersion]) {
-                continue;
-            }
-
             NSMutableDictionary *tabData = [NSMutableDictionary dictionary];
-            if([windowController.databaseDocument isUntitled]) {
+            SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
+
+            if ([windowController hasActiveLightweightConnection]) {
+                NSDictionary *lightweightState = [windowController lightweightConnectionStateDictionaryWithIncludePasswords:[[spfDocData_temp objectForKey:@"save_password"] boolValue]
+                                                                                                              includeSession:[[spfDocData_temp objectForKey:@"include_session"] boolValue]
+                                                                                                                includeQuery:[[spfDocData_temp objectForKey:@"save_editor_content"] boolValue]];
+                if (![lightweightState count]) {
+                    continue;
+                }
+
+                [tabData setObject:@YES forKey:@"isLightweight"];
+                [tabData setObject:lightweightState forKey:@"lightweightState"];
+            } else if (!databaseDocument || ![databaseDocument mySQLVersion]) {
+                continue;
+            } else if([databaseDocument isUntitled]) {
                 // new bundle file name for untitled docs
                 NSString *newName = [NSString stringWithFormat:@"%@.%@", [NSString stringWithNewUUID], SPFileExtensionDefault];
                 // internal bundle path to store the doc
                 NSString *filePath = [NSString stringWithFormat:@"%@/Contents/%@", fileName, newName];
                 // save it as temporary spf file inside the bundle with save panel options spfDocData_temp
-                [windowController.databaseDocument saveDocumentWithFilePath:filePath inBackground:NO onlyPreferences:NO contextInfo:[NSDictionary dictionaryWithDictionary:spfDocData_temp]];
-                [windowController.databaseDocument setIsSavedInBundle:YES];
+                [databaseDocument saveDocumentWithFilePath:filePath inBackground:NO onlyPreferences:NO contextInfo:[NSDictionary dictionaryWithDictionary:spfDocData_temp]];
+                [databaseDocument setIsSavedInBundle:YES];
                 [tabData setObject:@NO forKey:@"isAbsolutePath"];
                 [tabData setObject:newName forKey:@"path"];
             } else {
                 // save it to the original location and take the file's spfDocData
-                [windowController.databaseDocument saveDocumentWithFilePath:[[windowController.databaseDocument fileURL] path] inBackground:YES onlyPreferences:NO contextInfo:nil];
+                [databaseDocument saveDocumentWithFilePath:[[databaseDocument fileURL] path] inBackground:YES onlyPreferences:NO contextInfo:nil];
                 [tabData setObject:@YES forKey:@"isAbsolutePath"];
-                [tabData setObject:[[windowController.databaseDocument fileURL] path] forKey:@"path"];
+                [tabData setObject:[[databaseDocument fileURL] path] forKey:@"path"];
             }
             [tabs addObject:tabData];
             [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
@@ -1037,27 +1270,33 @@ validateMenuItemDone:
 
                 [window setFrameFromString:[windowDictionary objectForKey:@"frame"]];
 
-                NSString *fileName = nil;
-                BOOL isBundleFile = NO;
-
-                // If isAbsolutePath then take this path directly
-                // otherwise construct the releative path for the passed spfs file
-                if ([[tab objectForKey:@"isAbsolutePath"] boolValue]) {
-                    fileName = [tab objectForKey:@"path"];
-                } else {
-                    fileName = [NSString stringWithFormat:@"%@/Contents/%@", filePath, [tab objectForKey:@"path"]];
-                    isBundleFile = YES;
-                }
-
-                // Security check if file really exists
-                if ([fileManager fileExistsAtPath:fileName]) {
-                    [newWindowController.databaseDocument setIsSavedInBundle:isBundleFile];
-                    if (![newWindowController.databaseDocument setStateFromConnectionFile:fileName]) {
+                if ([[tab objectForKey:@"isLightweight"] boolValue]) {
+                    if (![newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
                         break;
                     }
                 } else {
-                    SPLog(@"Bundle file “%@” does not exists", fileName);
-                    NSBeep();
+                    NSString *fileName = nil;
+                    BOOL isBundleFile = NO;
+
+                    // If isAbsolutePath then take this path directly
+                    // otherwise construct the releative path for the passed spfs file
+                    if ([[tab objectForKey:@"isAbsolutePath"] boolValue]) {
+                        fileName = [tab objectForKey:@"path"];
+                    } else {
+                        fileName = [NSString stringWithFormat:@"%@/Contents/%@", filePath, [tab objectForKey:@"path"]];
+                        isBundleFile = YES;
+                    }
+
+                    // Security check if file really exists
+                    if ([fileManager fileExistsAtPath:fileName]) {
+                        [newWindowController.databaseDocument setIsSavedInBundle:isBundleFile];
+                        if (![newWindowController.databaseDocument setStateFromConnectionFile:fileName]) {
+                            break;
+                        }
+                    } else {
+                        SPLog(@"Bundle file “%@” does not exists", fileName);
+                        NSBeep();
+                    }
                 }
                 if ([window isMiniaturized]) {
                     [window deminiaturize:self];
@@ -1724,10 +1963,17 @@ validateMenuItemDone:
         [fileManager removeItemAtPath:lastBundleBlobFilesDirectory error:nil];
     }
 
+    [self savePendingLightweightResumeStateIfNeeded];
+
     // Iterate through each open window
     for (SPWindowController *windowController in [self.tabManager windowControllers]) {
+        SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
+        if (!databaseDocument) {
+            continue;
+        }
+
         // Kill any BASH commands which are currently active
-        for (NSDictionary *cmd in [windowController.databaseDocument runningActivities]) {
+        for (NSDictionary *cmd in [databaseDocument runningActivities]) {
             NSInteger pid = [[cmd objectForKey:@"pid"] integerValue];
             NSTask *killTask = [[NSTask alloc] init];
 
@@ -1738,7 +1984,7 @@ validateMenuItemDone:
         }
 
         // If the connection view is active, mark the favourites for saving
-        if (![windowController.databaseDocument getConnection]) {
+        if (![databaseDocument getConnection]) {
             shouldSaveFavorites = YES;
         }
     }

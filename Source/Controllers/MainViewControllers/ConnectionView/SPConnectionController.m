@@ -2583,7 +2583,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 
     // Keychain marker: if password matches the marker, fetch from keychain
-    if (connectionKeychainItemName && [[self password] isEqualToString:@"SequelAceSecretPassword"]) {
+    if (connectionKeychainItemName && (![[self password] length] || [[self password] isEqualToString:@"SequelAceSecretPassword"])) {
         NSString *keychainPassword = [keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount];
         return keychainPassword ?: @"";
     }

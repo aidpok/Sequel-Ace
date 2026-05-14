@@ -1792,7 +1792,7 @@ BOOL SerIsGroup(NSDictionary *dict)
 
 - (BOOL)isEqual:(id)other {
 	if (other == self) return YES;
-	if (other && [[other class] isEqual:[self class]] && [name isEqualToString:[other name]] && [typegrouping isEqualToString:[other typegrouping]]) return YES;
+	if (other && [[other class] isEqual:[self class]] && [name isEqualToString:[(ColumnNode *)other name]] && [typegrouping isEqualToString:[(ColumnNode *)other typegrouping]]) return YES;
 
 	return NO;
 }
