@@ -46,6 +46,7 @@ final class SALightweightContentViewController: NSViewController {
     fileprivate struct ContentRow {
         var values: [ContentValue]
         var originalValues: [ContentValue]
+        var displayValues: [String]
     }
 
     private struct ContentCacheEntry {
@@ -121,8 +122,10 @@ final class SALightweightContentViewController: NSViewController {
     private var didRegisterPreferenceObservers = false
     private var isApplyingProgrammaticColumnWidths = false
     private var isApplyingProgrammaticSortDescriptors = false
+    private var displayedColumnSignature: [String] = []
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
+    private var columnFilterTerms: [String]?
     private var tableObjectType: TableObjectType = .unknown
     private var ruleFilterColumnsKey = ""
     private var filterRules: [FilterRule] = []
@@ -131,19 +134,64 @@ final class SALightweightContentViewController: NSViewController {
     private var currentTableKey: SALightweightSessionState.TableKey?
     private var contentCache: [SALightweightSessionState.TableKey: ContentCacheEntry] = [:]
     private var contentCacheOrder: [SALightweightSessionState.TableKey] = []
+    private var columnInfoCache: [SALightweightSessionState.TableKey: [ColumnInfo]] = [:]
     private let maximumContentCacheEntries = 6
+    private let initialRowLoadPublishSize = 200
+    private let remainingRowLoadPublishSize = 1_000
     private var ruleFilterHeightConstraint: NSLayoutConstraint?
     private var isRestoringCachedContent = false
-    var requestLegacyContentFallback: (() -> Void)?
+    private lazy var fieldEditor = SPFieldEditorController()
+    private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
+    private lazy var paginationViewController = SALightweightContentPaginationViewController()
+    private lazy var paginationPopover: NSPopover = {
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = paginationViewController
+        return popover
+    }()
     var sessionStateDidChange: (() -> Void)?
     var tableContentDidChange: (() -> Void)?
     private var limitResults: Bool {
         UserDefaults.standard.bool(forKey: SPLimitResults)
     }
 
+    private static var diagnosticsEnabled: Bool {
+        if let environmentValue = ProcessInfo.processInfo.environment["SA_ENABLE_UI_DIAGNOSTICS"],
+           NSString(string: environmentValue).boolValue {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "SAEnableUIDiagnostics")
+    }
+
+    private static func diagnosticsTime() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+
+    private static func diagnosticsLog(_ message: String) {
+        guard diagnosticsEnabled else { return }
+
+        NSLog("[SA Content Diagnostics] %@", message)
+    }
+
     private var pageSize: Int {
         let preferredPageSize = UserDefaults.standard.integer(forKey: SPLimitResultsValue)
         return max(1, preferredPageSize > 0 ? preferredPageSize : 1_000)
+    }
+
+    private var maximumPage: Int {
+        if let totalRowCount = totalRowCount {
+            return max(1, Int(ceil(Double(totalRowCount) / Double(pageSize))))
+        }
+
+        return max(1, pageIndex + (hasNextPage ? 2 : 1))
+    }
+
+    private func prewarmFieldEditor() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self, self.isViewLoaded else { return }
+            _ = self.fieldEditor
+        }
     }
 
     private var canModifyRows: Bool {
@@ -161,9 +209,20 @@ final class SALightweightContentViewController: NSViewController {
     private lazy var duplicateRowButton = toolbarButton(imageName: "button_duplicateTemplate", toolTip: NSLocalizedString("Duplicate selected row (⌘D)", comment: "duplicate row tooltip"), keyEquivalent: "d", modifierMask: .command, action: #selector(duplicateRow(_:)))
     private lazy var deleteRowButton = toolbarButton(imageName: "NSRemoveTemplate", toolTip: NSLocalizedString("Delete selected row(s) (⌫)", comment: "delete row tooltip"), keyEquivalent: "\u{7F}", action: #selector(deleteRows(_:)))
     private lazy var reloadButton = toolbarButton(imageName: "NSRefreshTemplate", toolTip: NSLocalizedString("Refresh table contents (⌘R)", comment: "refresh content tooltip"), keyEquivalent: "r", modifierMask: .command, action: #selector(reloadContent(_:)))
-    private lazy var editModeButton = toolbarButton(imageName: "button_edit_modeTemplate", toolTip: NSLocalizedString("Edit table content", comment: "edit content mode tooltip"), action: #selector(showLegacyContentFeature(_:)))
+    private lazy var editModeButton: NSButton = {
+        let button = toolbarButton(imageName: "button_edit_modeTemplate", toolTip: NSLocalizedString("Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", comment: "edit content mode tooltip"), action: #selector(toggleEditMode(_:)))
+        button.alternateImage = NSImage(named: NSImage.Name("button_edit_mode_selectedTemplate"))
+        button.setButtonType(.pushOnPushOff)
+        return button
+    }()
+    private lazy var toggleRuleFilterButton: NSButton = {
+        let button = toolbarButton(imageName: "button_filterTemplate", toolTip: NSLocalizedString("Show/Hide table content filters", comment: "table content filter toggle tooltip"), action: #selector(toggleRuleFilterVisible(_:)))
+        button.alternateImage = NSImage(named: NSImage.Name("button_filter_activeTemplate"))
+        button.setButtonType(.pushOnPushOff)
+        return button
+    }()
     private lazy var previousPageButton = toolbarButton(imageName: "NSLeftFacingTriangleTemplate", toolTip: NSLocalizedString("View previous page of results", comment: "previous page tooltip"), action: #selector(loadPreviousPage(_:)))
-    private lazy var paginationButton = toolbarButton(imageName: "NSActionTemplate", toolTip: NSLocalizedString("Show pagination options", comment: "pagination options tooltip"), keyEquivalent: "j", modifierMask: .command, action: #selector(showLegacyContentFeature(_:)))
+    private lazy var paginationButton = toolbarButton(imageName: "NSActionTemplate", toolTip: NSLocalizedString("Jump to page (⌘J) or view pagination options", comment: "pagination options tooltip"), keyEquivalent: "j", modifierMask: .command, action: #selector(togglePagination(_:)))
     private lazy var nextPageButton = toolbarButton(imageName: "NSRightFacingTriangleTemplate", toolTip: NSLocalizedString("View next page of results", comment: "next page tooltip"), action: #selector(loadNextPage(_:)))
 
     private lazy var pageLabel: NSTextField = {
@@ -172,6 +231,17 @@ final class SALightweightContentViewController: NSViewController {
         label.textColor = .secondaryLabelColor
         label.alignment = .center
         return label
+    }()
+
+    private lazy var columnFilterSearchField: NSSearchField = {
+        let field = NSSearchField(frame: .zero)
+        field.placeholderString = NSLocalizedString("Filter Columns", comment: "table content column filter placeholder")
+        field.target = self
+        field.action = #selector(columnFilterChanged(_:))
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        return field
     }()
 
     private lazy var tableView: NSTableView = {
@@ -254,6 +324,32 @@ final class SALightweightContentViewController: NSViewController {
     func clearCachedTables() {
         contentCache.removeAll()
         contentCacheOrder.removeAll()
+        columnInfoCache.removeAll()
+    }
+
+    func cacheColumnInfo(fromStructureRows structureRows: [[String: String]], for table: String, database: String, connection: SPMySQLConnection) {
+        guard let tableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection),
+              !structureRows.isEmpty else { return }
+
+        columnInfoCache[tableKey] = structureRows.compactMap { structureRow in
+            guard let name = structureRow["name"], !name.isEmpty else { return nil }
+
+            let rawType = Self.rawColumnType(fromStructureRow: structureRow)
+            let parsedType = Self.parseColumnType(rawType)
+            let key = (structureRow["Key"] ?? "").uppercased()
+            let extra = (structureRow["Extra"] ?? "").lowercased()
+            return ColumnInfo(
+                name: name,
+                type: parsedType.type,
+                typeGrouping: parsedType.typeGrouping,
+                length: parsedType.length,
+                values: parsedType.values,
+                comment: structureRow["comment"] ?? "",
+                isNullable: structureRow["null"] == "1",
+                isPrimary: key == "PRI",
+                isAutoIncrement: extra.contains("auto_increment")
+            )
+        }
     }
 
     func saveCurrentSessionState() {
@@ -288,6 +384,8 @@ final class SALightweightContentViewController: NSViewController {
         toolbarView.addSubview(deleteRowButton)
         toolbarView.addSubview(reloadButton)
         toolbarView.addSubview(editModeButton)
+        toolbarView.addSubview(toggleRuleFilterButton)
+        toolbarView.addSubview(columnFilterSearchField)
         toolbarView.addSubview(previousPageButton)
         toolbarView.addSubview(paginationButton)
         toolbarView.addSubview(pageLabel)
@@ -306,6 +404,8 @@ final class SALightweightContentViewController: NSViewController {
         deleteRowButton.translatesAutoresizingMaskIntoConstraints = false
         reloadButton.translatesAutoresizingMaskIntoConstraints = false
         editModeButton.translatesAutoresizingMaskIntoConstraints = false
+        toggleRuleFilterButton.translatesAutoresizingMaskIntoConstraints = false
+        columnFilterSearchField.translatesAutoresizingMaskIntoConstraints = false
         previousPageButton.translatesAutoresizingMaskIntoConstraints = false
         paginationButton.translatesAutoresizingMaskIntoConstraints = false
         pageLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -369,6 +469,16 @@ final class SALightweightContentViewController: NSViewController {
             editModeButton.bottomAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             editModeButton.widthAnchor.constraint(equalToConstant: 25),
 
+            toggleRuleFilterButton.leadingAnchor.constraint(equalTo: editModeButton.trailingAnchor, constant: 5),
+            toggleRuleFilterButton.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            toggleRuleFilterButton.widthAnchor.constraint(equalToConstant: 25),
+            toggleRuleFilterButton.heightAnchor.constraint(equalToConstant: 23),
+
+            columnFilterSearchField.leadingAnchor.constraint(equalTo: toggleRuleFilterButton.trailingAnchor, constant: 5),
+            columnFilterSearchField.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            columnFilterSearchField.widthAnchor.constraint(equalToConstant: 150),
+            columnFilterSearchField.heightAnchor.constraint(equalToConstant: 22),
+
             nextPageButton.trailingAnchor.constraint(equalTo: toolbarView.trailingAnchor, constant: -10),
             nextPageButton.topAnchor.constraint(equalTo: toolbarView.topAnchor),
             nextPageButton.bottomAnchor.constraint(equalTo: toolbarView.bottomAnchor),
@@ -388,7 +498,7 @@ final class SALightweightContentViewController: NSViewController {
             previousPageButton.bottomAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             previousPageButton.widthAnchor.constraint(equalToConstant: 25),
 
-            statusLabel.leadingAnchor.constraint(equalTo: editModeButton.trailingAnchor, constant: 8),
+            statusLabel.leadingAnchor.constraint(equalTo: columnFilterSearchField.trailingAnchor, constant: 8),
             statusLabel.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: previousPageButton.leadingAnchor, constant: -8)
         ])
@@ -403,7 +513,11 @@ final class SALightweightContentViewController: NSViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(contentFiltersHaveBeenUpdated(_:)), name: .SPContentFiltersHaveBeenUpdated, object: nil)
         registerPreferenceObserversIfNeeded()
         applyTablePreferences(rebuildColumns: false)
+        paginationViewController.onGo = { [weak self] page in
+            self?.navigateToPage(page)
+        }
         updateRuleFilterVisibility(animated: false)
+        prewarmFieldEditor()
     }
 
     override func viewDidLayout() {
@@ -435,6 +549,7 @@ final class SALightweightContentViewController: NSViewController {
         case SPDisplayTableViewColumnTypes:
             rebuildColumns()
         case SPDisplayBinaryDataAsHex, SPNullValue:
+            rebuildDisplayValues()
             tableView.reloadData()
             autosizeContentColumns()
             cacheCurrentContentState()
@@ -449,6 +564,7 @@ final class SALightweightContentViewController: NSViewController {
 
     func loadContent(for table: String, database: String, connection: SPMySQLConnection) {
         let tableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
+        let tableChanged = currentTableKey != tableKey
         cacheCurrentContentState()
         storeCurrentRuleFilterState()
 
@@ -462,6 +578,10 @@ final class SALightweightContentViewController: NSViewController {
         tableObjectType = .unknown
         ruleFilterColumnsKey = ""
         filterRules = []
+        if tableChanged {
+            columnFilterTerms = nil
+            columnFilterSearchField.stringValue = ""
+        }
 
         if let tableKey = tableKey, restoreCachedContent(for: tableKey) {
             return
@@ -473,6 +593,71 @@ final class SALightweightContentViewController: NSViewController {
         applySortDescriptorsFromCurrentState()
 
         loadCurrentPage()
+    }
+}
+
+private final class SALightweightContentPaginationViewController: NSViewController {
+    var onGo: ((Int) -> Void)?
+
+    var page: Int {
+        get { pageField.integerValue }
+        set {
+            pageField.integerValue = max(1, newValue)
+            pageStepper.integerValue = pageField.integerValue
+        }
+    }
+
+    var maxPage: Int = 1 {
+        didSet {
+            let boundedMaxPage = max(1, maxPage)
+            pageStepper.maxValue = Double(boundedMaxPage)
+            pageField.placeholderString = String(format: NSLocalizedString("1 - %ld", comment: "pagination page range placeholder"), boundedMaxPage)
+        }
+    }
+
+    private let pageField = NSTextField(frame: NSRect(x: 12, y: 12, width: 72, height: 22))
+    private let pageStepper = NSStepper(frame: NSRect(x: 86, y: 9, width: 19, height: 27))
+    private let goButton = NSButton(frame: NSRect(x: 112, y: 9, width: 52, height: 28))
+
+    override func loadView() {
+        let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 176, height: 46))
+        view = rootView
+
+        pageField.controlSize = .small
+        pageField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        pageField.alignment = .right
+        pageField.target = self
+        pageField.action = #selector(go(_:))
+        rootView.addSubview(pageField)
+
+        pageStepper.minValue = 1
+        pageStepper.increment = 1
+        pageStepper.target = self
+        pageStepper.action = #selector(stepperChanged(_:))
+        rootView.addSubview(pageStepper)
+
+        goButton.title = NSLocalizedString("Go", comment: "pagination go button")
+        goButton.bezelStyle = .rounded
+        goButton.controlSize = .small
+        goButton.target = self
+        goButton.action = #selector(go(_:))
+        rootView.addSubview(goButton)
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(pageField)
+    }
+
+    @objc private func stepperChanged(_ sender: NSStepper) {
+        pageField.integerValue = sender.integerValue
+        go(sender)
+    }
+
+    @objc private func go(_ sender: Any) {
+        let boundedPage = min(max(1, pageField.integerValue), max(1, maxPage))
+        page = boundedPage
+        onGo?(boundedPage)
     }
 }
 
@@ -531,14 +716,18 @@ private extension SALightweightContentViewController {
         let offset = limitResults ? pageIndex * pageSize : 0
         let filter = ruleFilterStringForCurrentState(showError: true)
         guard !filter.failed else { return }
+        let tableKey = currentTableKey
+        let cachedColumnInfo = tableKey.flatMap { columnInfoCache[$0] }
 
         invalidateCurrentContentCache()
-        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults)
+        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults, tableKey: tableKey, cachedColumnInfo: cachedColumnInfo)
     }
 
-    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool) {
+    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool, tableKey: SALightweightSessionState.TableKey?, cachedColumnInfo: [ColumnInfo]?) {
         guard let connection = connection else { return }
 
+        let diagnosticsStart = Self.diagnosticsTime()
+        Self.diagnosticsLog("load start database=\(database) table=\(table) pageSize=\(pageSize) offset=\(offset) limitResults=\(limitResults) hasCachedColumnInfo=\(cachedColumnInfo != nil)")
         isLoading = true
         columns = []
         columnInfo = []
@@ -555,18 +744,56 @@ private extension SALightweightContentViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
+            let logStage: (String) -> Void = { stage in
+                Self.diagnosticsLog("load stage=\(stage) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - diagnosticsStart))s")
+            }
+
             _ = connection.selectDatabase(self.database)
+            logStage("selectDatabase")
             let tableObjectType = self.loadTableObjectType(connection: connection)
-            let columnInfo = self.loadColumnInfo(connection: connection)
-            let rowCount = limitResults ? self.rowCount(whereClause: whereClause, connection: connection) : nil
-            let query = self.contentQuery(offset: offset, limit: pageSize + 1, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
-            let result = connection.queryString(query)
+            logStage("loadTableObjectType")
+            let columnInfo = cachedColumnInfo ?? self.loadColumnInfo(connection: connection)
+            logStage("loadColumnInfo count=\(columnInfo.count) cached=\(cachedColumnInfo != nil)")
+            if cachedColumnInfo == nil, let tableKey = tableKey, !columnInfo.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.loadToken == token else { return }
+                    self.columnInfoCache[tableKey] = columnInfo
+                }
+            }
+            let shouldLoadFirstBatch = limitResults && pageSize > self.initialRowLoadPublishSize
+            let firstLimit = shouldLoadFirstBatch ? self.initialRowLoadPublishSize : pageSize + 1
+            let firstQuery = self.contentQuery(offset: offset, limit: firstLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
+            let result = connection.streamingQueryString(firstQuery)
+            logStage("firstQuery returned")
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
 
             let fieldNames = result?.fieldNames() as? [String] ?? []
-            var loadedRows: [ContentRow] = []
+            logStage("fieldNames count=\(fieldNames.count)")
+            let orderedColumnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
+            var pendingRows: [ContentRow] = []
+            var loadedRowCount = 0
+            var hasNextPage = false
+
+            self.publishInitialContentLoad(
+                token: token,
+                fieldNames: fieldNames,
+                columnInfo: orderedColumnInfo,
+                tableObjectType: tableObjectType,
+                rowCount: nil,
+                limitResults: limitResults
+            )
+            logStage("publishInitialContentLoad")
 
             while let row = result?.getRowAsArray() {
+                loadedRowCount += 1
+                if loadedRowCount == 1 {
+                    logStage("firstRow")
+                }
+                if limitResults, loadedRowCount > pageSize {
+                    hasNextPage = true
+                    continue
+                }
+
                 let values = row.enumerated().map { index, value -> ContentValue in
                     if index < columnInfo.count, columnInfo[index].loadBlobAsNeeded {
                         return .notLoaded
@@ -574,20 +801,68 @@ private extension SALightweightContentViewController {
 
                     return Self.contentValue(for: value)
                 }
-                loadedRows.append(ContentRow(values: values, originalValues: values))
+                pendingRows.append(ContentRow(values: values, originalValues: values, displayValues: Self.displayValues(for: values, columnInfo: orderedColumnInfo)))
+
+                if pendingRows.count >= self.initialRowLoadPublishSize {
+                    self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
+                    logStage("publishRows loaded=\(loadedRowCount)")
+                    pendingRows.removeAll(keepingCapacity: true)
+                }
             }
 
-            let hasNextPage = limitResults && loadedRows.count > pageSize
-            if hasNextPage {
-                loadedRows.removeLast()
+            if !pendingRows.isEmpty {
+                self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
+                logStage("publishRows loaded=\(loadedRowCount)")
+                pendingRows.removeAll(keepingCapacity: true)
             }
 
-            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            var error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+
+            if error == nil, shouldLoadFirstBatch, loadedRowCount >= firstLimit {
+                let remainingLimit = pageSize - loadedRowCount + 1
+                let remainingOffset = offset + loadedRowCount
+                let remainingQuery = self.contentQuery(offset: remainingOffset, limit: remainingLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
+                let remainingResult = connection.streamingQueryString(remainingQuery)
+                logStage("remainingQuery returned")
+                remainingResult?.defaultRowReturnType = SPMySQLResultRowAsArray
+
+                while let row = remainingResult?.getRowAsArray() {
+                    loadedRowCount += 1
+                    if loadedRowCount > pageSize {
+                        hasNextPage = true
+                        continue
+                    }
+
+                    let values = row.enumerated().map { index, value -> ContentValue in
+                        if index < columnInfo.count, columnInfo[index].loadBlobAsNeeded {
+                            return .notLoaded
+                        }
+
+                        return Self.contentValue(for: value)
+                    }
+                    pendingRows.append(ContentRow(values: values, originalValues: values, displayValues: Self.displayValues(for: values, columnInfo: orderedColumnInfo)))
+
+                    if pendingRows.count >= self.remainingRowLoadPublishSize {
+                        self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
+                        logStage("publishRemainingRows loaded=\(loadedRowCount)")
+                        pendingRows.removeAll(keepingCapacity: true)
+                    }
+                }
+
+                error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            }
+
+            let rowCount = limitResults ? self.rowCount(whereClause: whereClause, connection: connection) : nil
+            logStage("rowCount result=\(rowCount?.count ?? -1) estimate=\(rowCount?.isEstimate ?? false)")
 
             DispatchQueue.main.async {
-                guard self.loadToken == token else { return }
+                guard self.loadToken == token else {
+                    Self.diagnosticsLog("main finalize dropped tokenMismatch")
+                    return
+                }
 
                 self.isLoading = false
+                let start = Self.diagnosticsTime()
 
                 if let error = error, !error.isEmpty {
                     self.columns = []
@@ -603,22 +878,89 @@ private extension SALightweightContentViewController {
                     return
                 }
 
-                self.columns = fieldNames
-                self.columnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
-                self.rows = loadedRows
-                self.tableObjectType = tableObjectType
-                self.totalRowCount = rowCount?.count ?? (limitResults ? nil : loadedRows.count)
-                self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
+                self.appendContentRows(pendingRows, autosizeColumns: self.rows.count < self.initialRowLoadPublishSize)
+                self.totalRowCount = rowCount?.count ?? (limitResults ? nil : self.rows.count)
                 self.hasNextPage = hasNextPage
-                self.configureRuleFilterColumnsIfNeeded()
-                self.applyColumnFilter()
-                self.rebuildColumns()
-                self.applySortDescriptorsFromCurrentState()
-                self.updateStatus()
-                self.updateControls()
-                self.cacheCurrentContentState()
+                self.finalizeContentLoad()
+                Self.diagnosticsLog("main finalize done total=\(self.rows.count) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
             }
         }
+    }
+
+    private func publishInitialContentLoad(token: UUID,
+                                           fieldNames: [String],
+                                           columnInfo: [ColumnInfo],
+                                           tableObjectType: TableObjectType,
+                                           rowCount: (count: Int, isEstimate: Bool)?,
+                                           limitResults: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.loadToken == token else {
+                Self.diagnosticsLog("main publishInitialContentLoad dropped tokenMismatch")
+                return
+            }
+
+            let start = Self.diagnosticsTime()
+
+            self.columns = fieldNames
+            self.columnInfo = columnInfo
+            self.rows = []
+            self.tableObjectType = tableObjectType
+            self.totalRowCount = rowCount?.count
+            self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
+            self.hasNextPage = false
+            self.configureRuleFilterColumnsIfNeeded()
+            self.applyColumnFilter()
+            self.rebuildColumns()
+            self.applySortDescriptorsFromCurrentState()
+            self.updateStatus()
+            self.updateControls()
+            Self.diagnosticsLog("main publishInitialContentLoad done columns=\(fieldNames.count) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
+        }
+    }
+
+    private func publishContentRows(_ rows: [ContentRow], token: UUID, final: Bool, hasNextPage: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.loadToken == token else {
+                Self.diagnosticsLog("main publishContentRows dropped rows=\(rows.count) final=\(final) tokenMismatch")
+                return
+            }
+
+            let start = Self.diagnosticsTime()
+
+            self.appendContentRows(rows, autosizeColumns: self.rows.count < self.initialRowLoadPublishSize)
+
+            if final {
+                self.hasNextPage = hasNextPage
+                self.finalizeContentLoad()
+            }
+            Self.diagnosticsLog("main publishContentRows done rows=\(rows.count) total=\(self.rows.count) final=\(final) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
+        }
+    }
+
+    private func appendContentRows(_ newRows: [ContentRow], autosizeColumns shouldAutosizeColumns: Bool) {
+        guard !newRows.isEmpty else { return }
+
+        rows.append(contentsOf: newRows)
+        tableView.noteNumberOfRowsChanged()
+        updateStatus()
+
+        if shouldAutosizeColumns {
+            autosizeContentColumns()
+        }
+    }
+
+    private func finalizeContentLoad() {
+        if totalRowCount == nil, !limitResults {
+            totalRowCount = rows.count
+        }
+
+        isLoading = false
+        updateStatus()
+        updateControls()
+        cacheCurrentContentState()
+        prewarmFieldEditor()
     }
 
     private func contentQuery(offset: Int, limit: Int, whereClause: String?, columnInfo: [ColumnInfo], limitResults: Bool) -> String {
@@ -745,13 +1087,46 @@ private extension SALightweightContentViewController {
         configureRuleFilterColumnsIfNeeded()
     }
 
-    @objc func showLegacyContentFeature(_ sender: Any?) {
-        requestLegacyContentFallback?()
+    @objc func toggleEditMode(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: SPEditInSheetEnabled)
     }
 
     @objc func reloadContent(_ sender: Any?) {
         invalidateCurrentContentCache()
         loadCurrentPage()
+    }
+
+    @objc func togglePagination(_ sender: NSButton) {
+        guard limitResults, !isLoading else { return }
+
+        if paginationPopover.isShown {
+            paginationPopover.close()
+            paginationButton.state = .off
+            return
+        }
+
+        paginationViewController.page = pageIndex + 1
+        paginationViewController.maxPage = maximumPage
+        paginationPopover.show(relativeTo: paginationButton.bounds, of: paginationButton, preferredEdge: .minY)
+        paginationButton.state = .on
+    }
+
+    @objc func toggleRuleFilterVisible(_ sender: NSButton) {
+        setRuleFilterVisible(sender.state == .on, animate: true)
+    }
+
+    @objc func columnFilterChanged(_ sender: NSSearchField) {
+        let terms = sender.stringValue
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        let nextTerms = terms.isEmpty ? nil : terms
+
+        guard columnFilterTerms != nextTerms else { return }
+
+        columnFilterTerms = nextTerms
+        applyColumnFilter()
+        rebuildColumns()
     }
 
     @objc func loadPreviousPage(_ sender: Any?) {
@@ -767,6 +1142,18 @@ private extension SALightweightContentViewController {
         guard hasNextPage, !isLoading else { return }
 
         pageIndex += 1
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
+        loadCurrentPage()
+    }
+
+    func navigateToPage(_ page: Int) {
+        guard limitResults, !isLoading else { return }
+
+        let boundedPage = min(max(1, page), maximumPage)
+        guard boundedPage != pageIndex + 1 else { return }
+
+        pageIndex = boundedPage - 1
         storeCurrentRuleFilterState()
         sessionStateDidChange?()
         loadCurrentPage()
@@ -868,12 +1255,29 @@ private extension SALightweightContentViewController {
     }
 
     func applyColumnFilter() {
-        filteredColumns = Array(columns.indices)
+        guard let columnFilterTerms = columnFilterTerms, !columnFilterTerms.isEmpty else {
+            filteredColumns = Array(columns.indices)
+            return
+        }
+
+        filteredColumns = columns.indices.filter { columnIndex in
+            let columnName = columns[columnIndex].lowercased()
+            return columnFilterTerms.contains { columnName.contains($0) }
+        }
     }
 
     func rebuildColumns() {
         let tableFont = UserDefaults.getFont()
         let showColumnTypes = UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes)
+        let columnSignature = currentColumnSignature()
+
+        if columnSignature == displayedColumnSignature,
+           tableView.tableColumns.count == filteredColumns.count {
+            updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
+            tableView.reloadData()
+            autosizeContentColumns()
+            return
+        }
 
         tableView.tableColumns.forEach { tableView.removeTableColumn($0) }
 
@@ -896,8 +1300,55 @@ private extension SALightweightContentViewController {
             tableView.addTableColumn(tableColumn)
         }
 
+        displayedColumnSignature = columnSignature
         tableView.reloadData()
         autosizeContentColumns()
+    }
+
+    func currentColumnSignature() -> [String] {
+        return filteredColumns.map { columnIndex in
+            guard columnIndex < columns.count else { return "\(columnIndex)" }
+            let column = columnIndex < columnInfo.count ? columnInfo[columnIndex] : nil
+            return [
+                "\(columnIndex)",
+                columns[columnIndex],
+                column?.type ?? "",
+                column?.typeGrouping ?? "",
+                column?.length ?? "",
+                column?.values.joined(separator: "\u{1f}") ?? "",
+                column?.isNullable == true ? "1" : "0",
+                String(describing: tableObjectType)
+            ].joined(separator: "\u{1e}")
+        }
+    }
+
+    func updateExistingColumns(font tableFont: NSFont, showColumnTypes: Bool) {
+        for (displayIndex, columnIndex) in filteredColumns.enumerated() {
+            guard displayIndex < tableView.tableColumns.count,
+                  columnIndex < columns.count else { continue }
+
+            let columnName = columns[columnIndex]
+            let column = columnIndex < columnInfo.count
+                ? columnInfo[columnIndex]
+                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
+            let tableColumn = tableView.tableColumns[displayIndex]
+            tableColumn.identifier = NSUserInterfaceItemIdentifier("\(columnIndex)")
+            tableColumn.title = columnName
+            tableColumn.headerToolTip = legacyHeaderToolTip(for: column)
+            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(columnIndex)", ascending: true)
+            tableColumn.headerCell.font = Self.headerFont(for: tableFont)
+            tableColumn.headerCell.attributedStringValue = contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes)
+            (tableColumn.dataCell as? NSCell)?.font = tableFont
+            (tableColumn.dataCell as? NSCell)?.isEditable = tableObjectType == .table
+        }
+        tableView.headerView?.needsDisplay = true
+    }
+
+    func reloadCell(row: Int, columnIndex: Int) {
+        guard row >= 0, row < tableView.numberOfRows,
+              let displayColumnIndex = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == "\(columnIndex)" }) else { return }
+
+        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: displayColumnIndex))
     }
 
     func updateStatus() {
@@ -934,6 +1385,10 @@ private extension SALightweightContentViewController {
         deleteRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows > 0
         reloadButton.isEnabled = !isLoading
         editModeButton.isEnabled = !isLoading
+        editModeButton.state = UserDefaults.standard.bool(forKey: SPEditInSheetEnabled) ? .on : .off
+        toggleRuleFilterButton.isEnabled = !isLoading && !columnInfo.isEmpty
+        toggleRuleFilterButton.state = isRuleFilterVisible ? .on : .off
+        columnFilterSearchField.isEnabled = !isLoading && !columns.isEmpty
         applyFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty && !filterRules.isEmpty
         addFilterButton.isEnabled = isRuleFilterVisible && !isLoading && !columnInfo.isEmpty
         filterRowsStackView.arrangedSubviews.forEach { $0.subviews.forEach { ($0 as? NSControl)?.isEnabled = !isLoading } }
@@ -943,8 +1398,7 @@ private extension SALightweightContentViewController {
         if !limitResults {
             pageLabel.stringValue = ""
         } else if let totalRowCount = totalRowCount {
-            let maxPage = max(1, Int(ceil(Double(totalRowCount) / Double(pageSize))))
-            pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maxPage)
+            pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maximumPage)
         } else {
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld", comment: "lightweight content page label"), pageIndex + 1)
         }
@@ -976,6 +1430,7 @@ private extension SALightweightContentViewController {
 
     func setRuleFilterVisible(_ visible: Bool, animate: Bool) {
         isRuleFilterVisible = visible
+        toggleRuleFilterButton.state = visible ? .on : .off
         UserDefaults.standard.set(visible, forKey: SPRuleFilterEditorLastVisibilityChoice)
 
         if visible {
@@ -1539,6 +1994,7 @@ private extension SALightweightContentViewController {
         if shouldRebuildColumns {
             rebuildColumns()
         } else {
+            rebuildDisplayValues()
             tableView.headerView?.needsDisplay = true
             tableView.reloadData()
             autosizeContentColumns()
@@ -1623,16 +2079,15 @@ private extension SALightweightContentViewController {
 
         for tableColumn in tableView.tableColumns {
             guard let targetWidth = widthsByIdentifier[tableColumn.identifier.rawValue] else { continue }
-            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
-            tableColumn.width = ceil(max(targetWidth, tableColumn.minWidth))
+            tableColumn.width = min(ceil(max(targetWidth, tableColumn.minWidth)), Self.automaticColumnMaximumWidth)
         }
     }
 
     func autodetectedWidth(for tableColumn: NSTableColumn, columnIndex: Int) -> CGFloat {
         var maxCellWidth: CGFloat = 0
-        for row in visibleRowsForAutosizing(maxRows: 160) {
-            guard columnIndex < row.values.count else { continue }
-            let cellWidth = measuredCellWidth(displayString(for: row.values[columnIndex], columnIndex: columnIndex), in: tableColumn)
+        for row in visibleRowsForAutosizing(maxRows: 64) {
+            guard columnIndex < row.displayValues.count else { continue }
+            let cellWidth = measuredCellWidth(row.displayValues[columnIndex], in: tableColumn)
             maxCellWidth = max(maxCellWidth, cellWidth)
         }
 
@@ -1668,18 +2123,17 @@ private extension SALightweightContentViewController {
     }
 
     func measuredCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
-        guard let cell = (tableColumn.dataCell as? NSCell)?.copy() as? NSCell else {
-            return (value as NSString).size(withAttributes: [.font: UserDefaults.getFont()]).width
-        }
-
-        cell.stringValue = value
-        let font = cell.font ?? UserDefaults.getFont()
-        return max(cell.cellSize.width, (value as NSString).size(withAttributes: [.font: font]).width)
+        let font = (tableColumn.dataCell as? NSCell)?.font ?? UserDefaults.getFont()
+        return (value as NSString).size(withAttributes: [.font: font]).width
     }
 
     static func tableRowHeight(for font: NSFont) -> CGFloat {
         return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
     }
+
+    private static let automaticColumnMaximumWidth: CGFloat = 420
+    private static let tableCellDisplayMaximumCharacters = 256
+    private static let tableCellDisplayMaximumBytes = 128
 
     static func headerFont(for font: NSFont) -> NSFont {
         return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
@@ -1689,7 +2143,91 @@ private extension SALightweightContentViewController {
         return NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
     }
 
+    func shouldUseFieldEditor(row: Int, column columnIndex: Int) -> Bool {
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < columnInfo.count,
+              columnIndex < rows[row].values.count else { return false }
+
+        if UserDefaults.standard.bool(forKey: SPEditInSheetEnabled) {
+            return true
+        }
+
+        let column = columnInfo[columnIndex]
+        if column.typeGrouping == "textdata" || column.typeGrouping == "blobdata" {
+            return true
+        }
+
+        let displayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
+        if UserDefaults.standard.bool(forKey: SPEditInSheetForLongText),
+           let threshold = UserDefaults.standard.object(forKey: SPEditInSheetForLongTextLengthThreshold) as? NSNumber,
+           displayValue.count > threshold.intValue {
+            return true
+        }
+
+        if UserDefaults.standard.bool(forKey: SPEditInSheetForMultiLineText),
+           displayValue.rangeOfCharacter(from: .newlines) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    func openFieldEditor(row: Int, column columnIndex: Int) {
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < columnInfo.count,
+              columnIndex < rows[row].values.count,
+              let connection = connection else { return }
+
+        let column = columnInfo[columnIndex]
+        let editor = fieldEditor
+        editor.editedFieldInfo = [
+            "usedQuery": contentQuery(offset: pageIndex * pageSize, limit: pageSize, whereClause: ruleFilterStringForCurrentState(showError: false).whereClause, columnInfo: columnInfo, limitResults: limitResults),
+            "tableSource": "content",
+            "tableName": table,
+            "colName": column.name
+        ]
+
+        if let length = UInt64(column.length) {
+            editor.textMaxLength = length
+        }
+        editor.fieldType = column.type
+        editor.fieldEncoding = ""
+        editor.allowNULL = !column.isNullable
+
+        let originalData: Any
+        switch rows[row].values[columnIndex] {
+        case .null:
+            originalData = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        case .notLoaded:
+            originalData = ""
+        case .object(let object):
+            originalData = object
+        }
+
+        editor.edit(with: originalData,
+                    fieldName: column.name,
+                    usingEncoding: connection.stringEncoding(),
+                    isObjectBlob: column.typeGrouping == "textdata" || column.typeGrouping == "blobdata",
+                    isEditable: canModifyRows,
+                    with: view.window,
+                    sender: self,
+                    contextInfo: [
+                        "rowIndex": NSNumber(value: row),
+                        "columnIndex": NSNumber(value: columnIndex),
+                        "isFieldEditable": NSNumber(value: canModifyRows)
+                    ])
+    }
+
     func displayString(for value: ContentValue, columnIndex: Int, truncate: Bool = true) -> String {
+        let column = columnIndex < columnInfo.count ? columnInfo[columnIndex] : nil
+        return Self.displayString(for: value, columnInfo: column, truncate: truncate)
+    }
+
+    static func displayString(for value: ContentValue, columnInfo: ColumnInfo?, truncate: Bool = true) -> String {
         switch value {
         case .null:
             return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
@@ -1697,21 +2235,34 @@ private extension SALightweightContentViewController {
             return NSLocalizedString("(not loaded)", comment: "value shown for hidden blob and text fields")
         case .object(let object):
             guard let data = object as? Data else {
-                return String(describing: object)
+                return displayString(String(describing: object), truncate: truncate)
             }
 
-            let column = columnIndex < columnInfo.count ? columnInfo[columnIndex] : nil
-            if let column = column,
+            if let definition = columnInfo,
                UserDefaults.standard.bool(forKey: SPDisplayBinaryDataAsHex),
-               column.displaysBinaryAsHex {
-                if truncate && data.count > 255 {
-                    return "0x" + data.prefix(255).map { String(format: "%02X", $0) }.joined() + "..."
+               definition.displaysBinaryAsHex {
+                if truncate && data.count > Self.tableCellDisplayMaximumBytes {
+                    return "0x" + data.prefix(Self.tableCellDisplayMaximumBytes).map { String(format: "%02X", $0) }.joined() + "..."
                 }
                 return "0x" + data.map { String(format: "%02X", $0) }.joined()
             }
 
-            return String(data: data, encoding: .utf8) ?? ""
+            return displayString(String(data: data, encoding: .utf8) ?? "", truncate: truncate)
         }
+    }
+
+    static func displayValues(for values: [ContentValue], columnInfo: [ColumnInfo]) -> [String] {
+        return values.enumerated().map { index, value in
+            displayString(for: value, columnInfo: index < columnInfo.count ? columnInfo[index] : nil)
+        }
+    }
+
+    static func displayString(_ value: String, truncate: Bool) -> String {
+        guard truncate else { return value }
+        let value = value as NSString
+        guard value.length > tableCellDisplayMaximumCharacters else { return value as String }
+
+        return value.substring(to: tableCellDisplayMaximumCharacters) + "..."
     }
 
     static func displayString(for value: Any) -> String {
@@ -1858,7 +2409,8 @@ private extension SALightweightContentViewController {
                 let contentValue = Self.contentValue(for: value)
                 self.rows[row].values[columnIndex] = contentValue
                 self.rows[row].originalValues[columnIndex] = contentValue
-                self.tableView.reloadData()
+                self.rows[row].displayValues[columnIndex] = self.displayString(for: contentValue, columnIndex: columnIndex)
+                self.reloadCell(row: row, columnIndex: columnIndex)
                 self.autosizeContentColumns()
                 self.cacheCurrentContentState()
                 self.updateStatus()
@@ -1902,6 +2454,14 @@ private extension SALightweightContentViewController {
         return (baseType.uppercased(), typeGrouping, length, values)
     }
 
+    static func rawColumnType(fromStructureRow row: [String: String]) -> String {
+        let type = row["type"] ?? ""
+        let length = row["length"] ?? ""
+        guard !length.isEmpty else { return type }
+
+        return "\(type)(\(length))"
+    }
+
     static func parenthesizedContent(in value: String) -> String? {
         guard let open = value.firstIndex(of: "("),
               let close = value.lastIndex(of: ")"),
@@ -1917,6 +2477,34 @@ private extension SALightweightContentViewController {
     }
 }
 
+extension SALightweightContentViewController {
+    @objc(processFieldEditorResult:contextInfo:)
+    func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
+        defer {
+            view.window?.makeFirstResponder(tableView)
+        }
+
+        guard let data = data,
+              let contextInfo = contextInfo,
+              (contextInfo["isFieldEditable"] as? NSNumber)?.boolValue == true,
+              let rowNumber = contextInfo["rowIndex"] as? NSNumber,
+              let columnNumber = contextInfo["columnIndex"] as? NSNumber else { return }
+
+        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(columnNumber.intValue)))
+        tableView(tableView, setObjectValue: data, for: tableColumn, row: rowNumber.intValue)
+    }
+
+    @objc(setFieldEditorSelectedRange:)
+    func setFieldEditorSelectedRange(_ range: NSRange) {
+        fieldEditorTextSelectedRange = range
+    }
+
+    @objc
+    func fieldEditorSelectedRange() -> NSRange {
+        return fieldEditorTextSelectedRange
+    }
+}
+
 extension SALightweightContentViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         return rows.count
@@ -1927,9 +2515,9 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               row < rows.count,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].values.count else { return nil }
+              columnIndex < rows[row].displayValues.count else { return nil }
 
-        return displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex)
+        return rows[row].displayValues[columnIndex]
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
@@ -1942,7 +2530,14 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               columnIndex < columnInfo.count,
               canModifyRows else { return false }
 
-        guard case .notLoaded = rows[row].values[columnIndex] else { return true }
+        guard case .notLoaded = rows[row].values[columnIndex] else {
+            if shouldUseFieldEditor(row: row, column: columnIndex) {
+                openFieldEditor(row: row, column: columnIndex)
+                return false
+            }
+
+            return true
+        }
 
         guard let whereClause = Self.rowIdentityWhereClause(for: rows[row].originalValues, columnInfo: columnInfo, connection: connection) else {
             statusLabel.stringValue = NSLocalizedString("Cannot load cell without identifiable columns", comment: "lightweight content blob load no identity")
@@ -1997,17 +2592,18 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                 if let error = error, !error.isEmpty {
                     self.statusLabel.stringValue = error
                     self.updateControls()
-                    self.tableView.reloadData()
+                    self.reloadCell(row: row, columnIndex: columnIndex)
                     self.autosizeContentColumns()
                     return
                 }
 
                 self.rows[row].values[columnIndex] = updatedValue
                 self.rows[row].originalValues[columnIndex] = updatedValue
+                self.rows[row].displayValues[columnIndex] = self.displayString(for: updatedValue, columnIndex: columnIndex)
                 self.tableContentDidChange?()
                 self.updateStatus()
                 self.updateControls()
-                self.tableView.reloadData()
+                self.reloadCell(row: row, columnIndex: columnIndex)
                 self.autosizeContentColumns()
                 self.cacheCurrentContentState()
             }
@@ -2050,6 +2646,12 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         sessionStateDidChange?()
         invalidateCurrentContentCache()
         loadCurrentPage()
+    }
+
+    func rebuildDisplayValues() {
+        for index in rows.indices {
+            rows[index].displayValues = Self.displayValues(for: rows[index].values, columnInfo: columnInfo)
+        }
     }
 }
 

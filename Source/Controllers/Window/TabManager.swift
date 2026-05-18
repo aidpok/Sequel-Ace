@@ -113,6 +113,14 @@ import AppKit
     }
 
     @discardableResult
+    @objc(newWindowForTabInWindow:)
+    func newWindowForTab(inWindow window: NSWindow) -> SPWindowController {
+        let windowController = createNewWindowController()
+        createTab(newWindowController: windowController, inWindow: window, ordered: .above)
+        return windowController
+    }
+
+    @discardableResult
     @objc func newWindowForWindow() -> SPWindowController {
         let windowController = createNewWindowController()
         createWindow(newWindowController: windowController, inWindow: SPWindow(), ordered: .above)
@@ -145,9 +153,16 @@ private extension TabManager {
 
         guard let newManagement = addManagedWindow(windowController: newWindowController) else { preconditionFailure() }
         let newWindow = newManagement.window
+        if window.tabbingIdentifier == nil {
+            window.tabbingIdentifier = "SequelAceMainWindow"
+        }
+        newWindow.tabbingIdentifier = window.tabbingIdentifier
+        window.tabbingMode = .preferred
+        newWindow.tabbingMode = .preferred
 
-        // In case user hits "+" in the UI in tab bar - system automatically creates a tab for us and adds it to the tabGroup - there is no way to avoid it and no way to work around it. In case user hits CMD+T or "New tab" in Menu, it's upon us to do so, so we add tabbed window manually
-        if managedWindows.first(where: { $0.window.isMainWindow }) != nil || window.tabGroup != nil {
+        // If AppKit has not already attached the new tab, attach it explicitly. During app restore the
+        // first restored window may not be main yet, but later restored windows still belong in its tab group.
+        if newWindow.tabGroup == nil || newWindow.tabGroup !== window.tabGroup {
             window.addTabbedWindow(newWindow, ordered: orderingMode)
         }
         let index = managedWindowInsertIndex(for: newWindow, in: window.tabGroup?.windows)

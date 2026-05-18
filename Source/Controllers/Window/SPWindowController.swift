@@ -329,6 +329,13 @@ final class SALightweightSessionState {
     private let lightweightRelationsController = SALightweightRelationsViewController()
     private let lightweightTriggersController = SALightweightTriggersViewController()
     private var activeLightweightViewMode: SAViewMode = .structure
+    private struct LightweightDetailKey: Equatable {
+        let viewMode: SAViewMode?
+        let database: String?
+        let table: String?
+        let placeholder: String?
+    }
+    private var activeLightweightDetailKey: LightweightDetailKey?
     private var lightweightHistoryBackStack: [String] = []
     private var lightweightHistoryForwardStack: [String] = []
     private var isRestoringLightweightHistory = false
@@ -919,6 +926,7 @@ private extension SPWindowController {
         installLightweightSidebarButtonBar()
         lightweightSidebarView.addSubview(lightweightSidebarButtonBar)
 
+        activeLightweightDetailKey = nil
         lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
         lightweightDetailView.frame = NSRect(x: sidebarWidth + lightweightContentSplitView.dividerThickness, y: 0, width: max(0, contentView.bounds.width - sidebarWidth - lightweightContentSplitView.dividerThickness), height: contentView.bounds.height)
         lightweightDetailView.autoresizingMask = [.width, .height]
@@ -950,6 +958,29 @@ private extension SPWindowController {
         }
 
         showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
+    }
+
+    @discardableResult
+    private func installLightweightDetailSubview(_ detailSubview: NSView, key: LightweightDetailKey) -> Bool {
+        detailSubview.frame = lightweightDetailView.bounds
+        detailSubview.autoresizingMask = [.width, .height]
+
+        if activeLightweightDetailKey == key, detailSubview.superview === lightweightDetailView {
+            return false
+        }
+
+        lightweightDetailView.subviews.forEach { subview in
+            guard subview !== detailSubview else { return }
+            subview.removeFromSuperviewWithoutNeedingDisplay()
+        }
+
+        if detailSubview.superview !== lightweightDetailView {
+            detailSubview.removeFromSuperviewWithoutNeedingDisplay()
+            lightweightDetailView.addSubview(detailSubview)
+        }
+
+        activeLightweightDetailKey = key
+        return true
     }
 
     func installLightweightSidebarButtonBar() {
@@ -1289,6 +1320,7 @@ private extension SPWindowController {
     }
 
     func selectLightweightTable(_ table: String, recordsHistory: Bool = true) {
+        let tableChanged = selectedTable != table
         selectedTable = table
         setLightweightFallbackToolbarItemsEnabled(true)
         markLightweightResumeStateChanged()
@@ -1296,7 +1328,9 @@ private extension SPWindowController {
             recordLightweightHistorySelection(table)
         }
         updateLightweightWindowTitle(table: table)
-        loadLightweightTableInfo(for: table)
+        if tableChanged {
+            loadLightweightTableInfo(for: table)
+        }
 
         switch activeLightweightViewMode {
         case .content:
@@ -1431,11 +1465,11 @@ private extension SPWindowController {
     }
 
     func showLightweightPlaceholder(_ message: String) {
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
         lightweightStatusLabel.stringValue = message
-        lightweightStatusLabel.frame = NSRect(x: 20, y: max(0, (lightweightDetailView.bounds.height - 60) / 2), width: max(0, lightweightDetailView.bounds.width - 40), height: 60)
         lightweightStatusLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
-        lightweightDetailView.addSubview(lightweightStatusLabel)
+        let placeholderKey = LightweightDetailKey(viewMode: nil, database: selectedDatabase, table: selectedTable, placeholder: message)
+        _ = installLightweightDetailSubview(lightweightStatusLabel, key: placeholderKey)
+        lightweightStatusLabel.frame = NSRect(x: 20, y: max(0, (lightweightDetailView.bounds.height - 60) / 2), width: max(0, lightweightDetailView.bounds.width - 40), height: 60)
     }
 
     func showLightweightStructure(for table: String) {
@@ -1443,16 +1477,17 @@ private extension SPWindowController {
 
         activeLightweightViewMode = .structure
         databaseToolbarController.selectViewMode(.structure)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let structureView = lightweightStructureController.view
-        structureView.frame = lightweightDetailView.bounds
-        structureView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(structureView)
+        let detailChanged = installLightweightDetailSubview(structureView, key: LightweightDetailKey(viewMode: .structure, database: selectedDatabase, table: table, placeholder: nil))
         lightweightStructureController.tableStructureDidChange = { [weak self] in
             self?.lightweightContentController.clearCachedTables()
             self?.refreshLightweightTableInfoAfterMutation()
         }
+        lightweightStructureController.requestTableInfoView = { [weak self] in
+            self?.viewStatus()
+        }
+        guard detailChanged else { return }
         lightweightStructureController.loadStructure(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
@@ -1461,20 +1496,17 @@ private extension SPWindowController {
 
         activeLightweightViewMode = .content
         databaseToolbarController.selectViewMode(.content)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let contentView = lightweightContentController.view
-        contentView.frame = lightweightDetailView.bounds
-        contentView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(contentView)
-        lightweightContentController.requestLegacyContentFallback = { [weak self] in
-            guard let self = self else { return }
-            self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewContent()
-        }
+        let detailChanged = installLightweightDetailSubview(contentView, key: LightweightDetailKey(viewMode: .content, database: selectedDatabase, table: table, placeholder: nil))
         lightweightContentController.tableContentDidChange = { [weak self] in
             self?.refreshLightweightTableInfoAfterMutation()
             self?.markLightweightResumeStateChanged()
         }
+        if let columnMetadata = lightweightStructureController.cachedColumnMetadata(for: table, database: selectedDatabase) {
+            lightweightContentController.cacheColumnInfo(fromStructureRows: columnMetadata, for: table, database: selectedDatabase, connection: activeConnection)
+        }
+        guard detailChanged else { return }
         lightweightContentController.loadContent(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
@@ -1489,42 +1521,35 @@ private extension SPWindowController {
 
         activeLightweightViewMode = .query
         databaseToolbarController.selectViewMode(.query)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let queryView = lightweightQueryController.view
-        queryView.frame = lightweightDetailView.bounds
-        queryView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(queryView)
+        let detailChanged = installLightweightDetailSubview(queryView, key: LightweightDetailKey(viewMode: .query, database: selectedDatabase, table: selectedTable, placeholder: nil))
+        guard detailChanged else { return }
         lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
     }
 
     func showLightweightStatus(for table: String?) {
         activeLightweightViewMode = .status
         databaseToolbarController.selectViewMode(.status)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let tableInfoView = lightweightTableInfoController.view
-        tableInfoView.frame = lightweightDetailView.bounds
-        tableInfoView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(tableInfoView)
+        let detailChanged = installLightweightDetailSubview(tableInfoView, key: LightweightDetailKey(viewMode: .status, database: selectedDatabase, table: table, placeholder: nil))
 
         guard let table = table, let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else {
             lightweightTableInfoController.showPlaceholder(NSLocalizedString("Select a table to view table information.", comment: "lightweight table info empty state"))
             return
         }
 
+        guard detailChanged else { return }
         lightweightTableInfoController.loadTableInfo(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
     func showLightweightRelations(for table: String?) {
         activeLightweightViewMode = .relations
         databaseToolbarController.selectViewMode(.relations)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let relationsView = lightweightRelationsController.view
-        relationsView.frame = lightweightDetailView.bounds
-        relationsView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(relationsView)
+        let detailChanged = installLightweightDetailSubview(relationsView, key: LightweightDetailKey(viewMode: .relations, database: selectedDatabase, table: table, placeholder: nil))
         lightweightRelationsController.requestLegacyRelationsFallback = { [weak self] in
             guard let self = self else { return }
             self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewRelations()
@@ -1535,28 +1560,23 @@ private extension SPWindowController {
             return
         }
 
+        guard detailChanged else { return }
         lightweightRelationsController.loadRelations(for: table, database: selectedDatabase, connection: activeConnection)
     }
 
     func showLightweightTriggers(for table: String?) {
         activeLightweightViewMode = .triggers
         databaseToolbarController.selectViewMode(.triggers)
-        lightweightDetailView.subviews.forEach { $0.removeFromSuperviewWithoutNeedingDisplay() }
 
         let triggersView = lightweightTriggersController.view
-        triggersView.frame = lightweightDetailView.bounds
-        triggersView.autoresizingMask = [.width, .height]
-        lightweightDetailView.addSubview(triggersView)
-        lightweightTriggersController.requestLegacyTriggersFallback = { [weak self] in
-            guard let self = self else { return }
-            self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewTriggers()
-        }
+        let detailChanged = installLightweightDetailSubview(triggersView, key: LightweightDetailKey(viewMode: .triggers, database: selectedDatabase, table: table, placeholder: nil))
 
         guard let table = table, let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else {
             lightweightTriggersController.showPlaceholder(NSLocalizedString("Select a table to view triggers.", comment: "lightweight triggers empty state"))
             return
         }
 
+        guard detailChanged else { return }
         lightweightTriggersController.loadTriggers(for: table, database: selectedDatabase, connection: activeConnection)
     }
 }
@@ -2129,6 +2149,14 @@ extension SPWindowController: SAConnectionDelegate {
 extension SPWindowController: SADatabaseToolbarControllerDelegate {
     func databaseToolbarDidRequestDatabaseLoad(_ controller: SADatabaseToolbarController) {
         requestLightweightDatabasesIfNeeded()
+    }
+
+    func databaseToolbarDidRequestDatabaseRefresh(_ controller: SADatabaseToolbarController) {
+        refreshLightweightDatabases()
+    }
+
+    func databaseToolbarDidRequestAddDatabase(_ controller: SADatabaseToolbarController) {
+        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).addDatabase(nil)
     }
 
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectDatabase database: String) {

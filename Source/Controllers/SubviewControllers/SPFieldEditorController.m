@@ -288,6 +288,12 @@ typedef enum {
 			[editSheetIsNotEditableCancelButton setHidden:NO];
 			[editSheetOpenButton setEnabled:NO];
 		}
+		else {
+			[editSheetOkButton setHidden:NO];
+			[editSheetCancelButton setHidden:NO];
+			[editSheetIsNotEditableCancelButton setHidden:YES];
+			[editSheetOpenButton setEnabled:YES];
+		}
 
 		// Hide all views in editSheet
 		[self showEditText:NO];
@@ -667,15 +673,24 @@ typedef enum {
 			NSString *unformatted = [SPJSONFormatter stringByUnformattingString:returnData];
 			if(unformatted) returnData = unformatted;
 		}
-    else if (self.displayFormatter) {
-      id convertedData;
-      [self.displayFormatter getObjectValue:&convertedData forString:[editTextView string] errorDescription:nil];
-      returnData = convertedData;
-    }
+		else if (self.displayFormatter) {
+			id convertedData;
+			[self.displayFormatter getObjectValue:&convertedData forString:[editTextView string] errorDescription:nil];
+			returnData = convertedData;
+		}
 
 		if([callerInstance respondsToSelector:@selector(processFieldEditorResult:contextInfo:)]) {
 			[(id <SPFieldEditorControllerDelegate>)callerInstance processFieldEditorResult:returnData contextInfo:contextInfo];
 		}
+	}
+
+	if (usedSheet == editSheet) {
+		[editTextView setString:@""];
+		[hexTextView setString:@""];
+		[jsonTextView setString:@""];
+		[editImage setImage:nil];
+		stringValue = nil;
+		sheetEditData = nil;
 	}
 }
 

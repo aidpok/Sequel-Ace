@@ -611,7 +611,8 @@ static NSTimeInterval SAUIMonotonicTime(void)
         NSMutableArray *tabs = [NSMutableArray array];
         NSMutableDictionary *win = [NSMutableDictionary dictionary];
 
-        NSArray *windowsToProcess = [[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window];
+        NSArray *tabGroupWindows = [[window tabGroup] windows];
+        NSArray *windowsToProcess = [tabGroupWindows count] > 0 ? tabGroupWindows : ([[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window]);
         for (NSWindow *processedWindow in windowsToProcess) {
             SPWindowController *windowController = processedWindow.windowController;
             if (!windowController || [processedWindows containsObject:windowController.uniqueID] || ![windowController hasActiveLightweightConnection]) {
@@ -691,12 +692,14 @@ static NSTimeInterval SAUIMonotonicTime(void)
                 continue;
             }
 
-            SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTab];
-            window = newWindowController.window;
+            SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTabInWindow:window];
+            if (window == nil) {
+                window = newWindowController.window;
+            }
 
             NSString *frame = [windowDictionary objectForKey:@"frame"];
             if ([frame isKindOfClass:[NSString class]]) {
-                [window setFrameFromString:frame];
+                [newWindowController.window setFrameFromString:frame];
             }
 
             if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
@@ -875,7 +878,8 @@ static NSTimeInterval SAUIMonotonicTime(void)
         NSMutableArray *tabs = [NSMutableArray array];
         NSMutableDictionary *win = [NSMutableDictionary dictionary];
 
-        NSArray *windowsToProcess = [[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window];
+        NSArray *tabGroupWindows = [[window tabGroup] windows];
+        NSArray *windowsToProcess = [tabGroupWindows count] > 0 ? tabGroupWindows : ([[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window]);
         for (NSWindow *processedWindow in windowsToProcess) {
             SPWindowController *windowController = processedWindow.windowController;
             if ([processedWindows containsObject:windowController.uniqueID]) {
@@ -1257,14 +1261,16 @@ validateMenuItemDone:
         // Loop through each defined window in reversed order to reconstruct the last active window
         for (NSDictionary *windowDictionary in [[[spfs objectForKey:@"windows"] reverseObjectEnumerator] allObjects]) {
 
-            NSWindow *window;
+            NSWindow *window = nil;
 
             // Loop through all defined tabs / windows
             for (NSDictionary *tab in [windowDictionary objectForKey:@"tabs"]) {
 
                 // Add new the tab or window
-                SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTab];
-                window = newWindowController.window;
+                SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTabInWindow:window];
+                if (window == nil) {
+                    window = newWindowController.window;
+                }
 
                 usleep(1000);
 

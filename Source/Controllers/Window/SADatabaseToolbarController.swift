@@ -31,6 +31,8 @@ import AppKit
 
 protocol SADatabaseToolbarControllerDelegate: AnyObject {
     func databaseToolbarDidRequestDatabaseLoad(_ controller: SADatabaseToolbarController)
+    func databaseToolbarDidRequestDatabaseRefresh(_ controller: SADatabaseToolbarController)
+    func databaseToolbarDidRequestAddDatabase(_ controller: SADatabaseToolbarController)
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectDatabase database: String)
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectViewMode mode: SAViewMode)
     func databaseToolbarDidSelectUserManager(_ controller: SADatabaseToolbarController)
@@ -54,7 +56,8 @@ final class SADatabaseToolbarController: NSObject {
     }()
 
     private lazy var databasePopUpButton: NSPopUpButton = {
-        let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 190, height: 28), pullsDown: false)
+        let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 25), pullsDown: false)
+        button.cell?.alignment = .center
         button.target = self
         button.action = #selector(databaseSelected(_:))
         button.menu?.delegate = self
@@ -122,6 +125,13 @@ final class SADatabaseToolbarController: NSObject {
         databasePopUpButton.removeAllItems()
         databasePopUpButton.addItem(withTitle: NSLocalizedString("Choose Database...", comment: "menu item for choose db"))
         databasePopUpButton.menu?.addItem(NSMenuItem.separator())
+        databasePopUpButton.menu?.addItem(withTitle: NSLocalizedString("Add Database...", comment: "menu item to add db"),
+                                          action: #selector(addDatabase(_:)),
+                                          keyEquivalent: "").target = self
+        databasePopUpButton.menu?.addItem(withTitle: NSLocalizedString("Refresh Databases", comment: "menu item to refresh databases"),
+                                          action: #selector(refreshDatabases(_:)),
+                                          keyEquivalent: "").target = self
+        databasePopUpButton.menu?.addItem(NSMenuItem.separator())
 
         for database in databases {
             databasePopUpButton.addItem(withTitle: database)
@@ -139,11 +149,23 @@ final class SADatabaseToolbarController: NSObject {
     }
 
     @objc private func databaseSelected(_ sender: NSPopUpButton) {
-        let selectedIndex = sender.indexOfSelectedItem
-        guard selectedIndex > 1 else { return }
         guard let database = sender.titleOfSelectedItem, !database.isEmpty else { return }
+        let ignoredTitles = [
+            NSLocalizedString("Choose Database...", comment: "menu item for choose db"),
+            NSLocalizedString("Add Database...", comment: "menu item to add db"),
+            NSLocalizedString("Refresh Databases", comment: "menu item to refresh databases")
+        ]
+        guard !ignoredTitles.contains(database) else { return }
 
         delegate?.databaseToolbar(self, didSelectDatabase: database)
+    }
+
+    @objc private func refreshDatabases(_ sender: Any) {
+        delegate?.databaseToolbarDidRequestDatabaseRefresh(self)
+    }
+
+    @objc private func addDatabase(_ sender: Any) {
+        delegate?.databaseToolbarDidRequestAddDatabase(self)
     }
 
     @objc private func viewModeSelected(_ sender: NSToolbarItem) {

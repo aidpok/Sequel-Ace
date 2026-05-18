@@ -67,6 +67,24 @@ final class SALightweightStructureViewController: NSViewController {
         let indexSortAscending: Bool
     }
 
+    private struct EncodingOption {
+        let title: String
+        let name: String
+        let maxLength: UInt
+    }
+
+    private struct ForeignKeyConstraint {
+        let name: String
+        let columns: [String]
+        let referencedTable: String
+    }
+
+    fileprivate struct IndexField {
+        var name: String
+        var type: String
+        var size: String
+    }
+
     private let structureColumns: [StructureColumn] = [
         StructureColumn(title: NSLocalizedString("Field", comment: "table structure field column"), key: "name", width: 54.5, minWidth: 50, maxWidth: 1000, isBoolean: false, editable: true),
         StructureColumn(title: NSLocalizedString("Type", comment: "table structure type column"), key: "type", width: 69.5, minWidth: 65, maxWidth: 1000, isBoolean: false, editable: true),
@@ -95,10 +113,17 @@ final class SALightweightStructureViewController: NSViewController {
         IndexColumn(title: "Comment", key: "Comment", width: 106, minWidth: 56)
     ]
 
-    private let typeSuggestions = ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL", "DECIMAL", "BIT", "SERIAL", "BOOL", "BOOLEAN", "DEC", "FIXED", "NUMERIC", "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "MEDIUMBLOB", "BLOB", "LONGBLOB", "BINARY", "VARBINARY", "JSON", "ENUM", "SET", "DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR", "GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"]
+    private let typeSuggestions = ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL", "DECIMAL", "BIT", "SERIAL", "BOOL", "BOOLEAN", "DEC", "FIXED", "NUMERIC", "--------", "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "MEDIUMBLOB", "BLOB", "LONGBLOB", "BINARY", "VARBINARY", "JSON", "ENUM", "SET", "--------", "DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR", "--------", "GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"]
     private let extraSuggestions = ["None", "auto_increment", "on update CURRENT_TIMESTAMP", "SERIAL DEFAULT VALUE"]
-    private let encodingSuggestions = ["", "armscii8", "ascii", "big5", "binary", "cp1250", "cp1251", "cp1256", "cp1257", "cp850", "cp852", "cp866", "cp932", "dec8", "eucjpms", "euckr", "gb18030", "gb2312", "gbk", "geostd8", "greek", "hebrew", "hp8", "keybcs2", "koi8r", "koi8u", "latin1", "latin2", "latin5", "latin7", "macce", "macroman", "sjis", "swe7", "tis620", "ucs2", "ujis", "utf8", "utf8mb4", "utf16", "utf16le", "utf32"]
-    private let collationSuggestions = ["", "utf8_general_ci", "utf8_unicode_ci", "utf8_bin", "utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_bin", "latin1_swedish_ci", "latin1_general_ci", "latin1_bin"]
+    private var encodingOptions: [EncodingOption] = []
+    private var collationOptionsByEncoding: [String: [String]] = [:]
+    private var allCollationOptions: [String] = []
+    private var tableEncoding = ""
+    private var tableCollation = ""
+    private var tableEngine = ""
+    private var foreignKeyConstraints: [ForeignKeyConstraint] = []
+    private var pendingAutoIncrementIndex: String?
+    private var indexSheetController: SALightweightStructureIndexSheetController?
 
     private weak var connection: SPMySQLConnection?
     private var database = ""
@@ -119,6 +144,7 @@ final class SALightweightStructureViewController: NSViewController {
     private var structureCacheOrder: [String] = []
     private let maximumStructureCacheEntries = 12
     var tableStructureDidChange: (() -> Void)?
+    var requestTableInfoView: (() -> Void)?
 
     private let tablesIndexesSplitView = SPSplitView(frame: .zero)
     private let indexesHeaderView = NSView(frame: .zero)
@@ -181,6 +207,7 @@ final class SALightweightStructureViewController: NSViewController {
         }
 
         tableView.registerForDraggedTypes([NSPasteboard.PasteboardType("SequelAceLightweightStructureRow")])
+        tableView.menu = structureContextMenu()
         return tableView
     }()
 
@@ -234,6 +261,7 @@ final class SALightweightStructureViewController: NSViewController {
             tableView.addTableColumn(tableColumn)
         }
 
+        tableView.menu = indexesContextMenu()
         return tableView
     }()
 
@@ -241,6 +269,39 @@ final class SALightweightStructureViewController: NSViewController {
     private lazy var removeFieldButton = toolbarButton(imageName: "NSRemoveTemplate", toolTip: NSLocalizedString("Delete selected field (⌫)", comment: "remove field tooltip"), keyEquivalent: "\u{7F}", action: #selector(removeField(_:)))
     private lazy var duplicateFieldButton = toolbarButton(imageName: "button_duplicateTemplate", toolTip: NSLocalizedString("Duplicate selected field (⌘D)", comment: "duplicate field tooltip"), keyEquivalent: "d", modifierMask: .command, action: #selector(duplicateField(_:)))
     private lazy var reloadFieldsButton = toolbarButton(imageName: "NSRefreshTemplate", toolTip: NSLocalizedString("Refresh table structure (⌘R)", comment: "refresh structure tooltip"), keyEquivalent: "r", modifierMask: .command, action: #selector(reloadTable(_:)))
+    private lazy var showIndexesButton: NSButton = {
+        let button = toolbarButton(imageName: "NSQuickLookTemplate", toolTip: NSLocalizedString("Reveal indexes", comment: "show indexes tooltip"), action: #selector(showIndexes(_:)))
+        button.isHidden = true
+        return button
+    }()
+    private lazy var editTableDetailsButton = toolbarButton(imageName: "NSSmartBadgeTemplate", toolTip: NSLocalizedString("Edit Table Details (⌘4)", comment: "edit table details tooltip"), keyEquivalent: "4", modifierMask: .command, action: #selector(showTableDetails(_:)))
+    private lazy var viewColumnsButton: NSPopUpButton = {
+        let button = NSPopUpButton(frame: .zero, pullsDown: true)
+        button.bezelStyle = .regularSquare
+        button.controlSize = .small
+        button.image = NSImage(named: NSImage.Name("NSActionTemplate"))
+        button.imagePosition = .imageOnly
+        button.toolTip = NSLocalizedString("View Columns", comment: "view structure columns tooltip")
+
+        let menu = NSMenu(title: "")
+        let imageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        imageItem.image = NSImage(named: NSImage.Name("NSActionTemplate"))
+        menu.addItem(imageItem)
+
+        let submenuItem = NSMenuItem(title: NSLocalizedString("View Columns", comment: "view structure columns menu title"), action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: submenuItem.title)
+        for column in structureColumns where ["Key", "encodingName", "collationName", "comment"].contains(column.key) {
+            let item = NSMenuItem(title: column.title, action: #selector(toggleStructureColumn(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = column.key
+            item.state = .on
+            submenu.addItem(item)
+        }
+        submenuItem.submenu = submenu
+        menu.addItem(submenuItem)
+        button.menu = menu
+        return button
+    }()
     private lazy var addIndexButton = toolbarButton(imageName: "NSAddTemplate", toolTip: NSLocalizedString("Add index", comment: "add index tooltip"), action: #selector(addIndex(_:)))
     private lazy var removeIndexButton = toolbarButton(imageName: "NSRemoveTemplate", toolTip: NSLocalizedString("Delete selected index", comment: "remove index tooltip"), action: #selector(removeIndex(_:)))
     private lazy var refreshIndexesButton = toolbarButton(imageName: "NSRefreshTemplate", toolTip: NSLocalizedString("Refresh table indexes (⌘R)", comment: "refresh indexes tooltip"), keyEquivalent: "r", modifierMask: .command, action: #selector(reloadTable(_:)))
@@ -265,7 +326,9 @@ final class SALightweightStructureViewController: NSViewController {
         structureScrollView.documentView = structureTableView
         structureScrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let structureToolbar = toolbarView(buttons: [addFieldButton, removeFieldButton, duplicateFieldButton, reloadFieldsButton])
+        let structureToolbar = toolbarView(buttons: [addFieldButton, removeFieldButton, duplicateFieldButton, reloadFieldsButton, showIndexesButton])
+        structureToolbar.addSubview(editTableDetailsButton)
+        structureToolbar.addSubview(viewColumnsButton)
         structurePane.addSubview(structureFilterField)
         structurePane.addSubview(structureScrollView)
         structurePane.addSubview(structureToolbar)
@@ -300,6 +363,8 @@ final class SALightweightStructureViewController: NSViewController {
         indexesHeaderView.translatesAutoresizingMaskIntoConstraints = false
         structureFilterField.translatesAutoresizingMaskIntoConstraints = false
         structureToolbar.translatesAutoresizingMaskIntoConstraints = false
+        editTableDetailsButton.translatesAutoresizingMaskIntoConstraints = false
+        viewColumnsButton.translatesAutoresizingMaskIntoConstraints = false
         indexToolbar.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
@@ -322,6 +387,15 @@ final class SALightweightStructureViewController: NSViewController {
             structureToolbar.trailingAnchor.constraint(equalTo: structurePane.trailingAnchor),
             structureToolbar.bottomAnchor.constraint(equalTo: structurePane.bottomAnchor),
             structureToolbar.heightAnchor.constraint(equalToConstant: 26),
+
+            viewColumnsButton.trailingAnchor.constraint(equalTo: structureToolbar.trailingAnchor, constant: -6),
+            viewColumnsButton.topAnchor.constraint(equalTo: structureToolbar.topAnchor),
+            viewColumnsButton.bottomAnchor.constraint(equalTo: structureToolbar.bottomAnchor),
+            viewColumnsButton.widthAnchor.constraint(equalToConstant: 35),
+
+            editTableDetailsButton.trailingAnchor.constraint(equalTo: viewColumnsButton.leadingAnchor, constant: -5),
+            editTableDetailsButton.topAnchor.constraint(equalTo: structureToolbar.topAnchor),
+            editTableDetailsButton.bottomAnchor.constraint(equalTo: structureToolbar.bottomAnchor),
 
             indexesHeaderView.leadingAnchor.constraint(equalTo: indexPane.leadingAnchor),
             indexesHeaderView.trailingAnchor.constraint(equalTo: indexPane.trailingAnchor),
@@ -377,6 +451,16 @@ final class SALightweightStructureViewController: NSViewController {
         structureCacheOrder.removeAll()
     }
 
+    func cachedColumnMetadata(for table: String, database: String) -> [[String: String]]? {
+        let key = structureCacheKey(database: database, table: table)
+        if let cached = structureCache[key], !cached.rows.isEmpty {
+            return cached.rows.map { $0.values }
+        }
+
+        guard self.database == database, self.table == table, !rows.isEmpty else { return nil }
+        return rows.map { $0.values }
+    }
+
     func loadStructure(for table: String, database: String, connection: SPMySQLConnection, useCache: Bool = true) {
         cacheCurrentStructureState()
 
@@ -401,12 +485,24 @@ final class SALightweightStructureViewController: NSViewController {
             guard let self = self, let connection = connection else { return }
 
             _ = connection.selectDatabase(database)
+            let tableMetadata = self.loadTableMetadata(table: table, database: database, connection: connection)
+            let encodingOptions = self.loadEncodingOptions(connection: connection)
+            let collationOptionsByEncoding = self.loadCollationOptions(connection: connection)
+            let foreignKeyConstraints = self.loadForeignKeyConstraints(table: table, database: database, connection: connection)
             let fields = self.loadFields(table: table, database: database, connection: connection)
             let indexes = self.loadIndexes(table: table, connection: connection)
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else { return }
 
+                self.tableEncoding = tableMetadata.encoding
+                self.tableCollation = tableMetadata.collation
+                self.tableEngine = tableMetadata.engine
+                self.encodingOptions = encodingOptions
+                self.collationOptionsByEncoding = collationOptionsByEncoding
+                self.allCollationOptions = Self.uniqueStrings(collationOptionsByEncoding.values.flatMap { $0 })
+                self.foreignKeyConstraints = foreignKeyConstraints
+                self.refreshStructureComboCells()
                 self.rows = fields
                 self.indexes = indexes
                 self.applyFilter()
@@ -470,6 +566,109 @@ final class SALightweightStructureViewController: NSViewController {
         }
 
         return loadedIndexes
+    }
+
+    private func loadTableMetadata(table: String, database: String, connection: SPMySQLConnection) -> (engine: String, encoding: String, collation: String) {
+        let query = "SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) WHERE Name = \(Self.sqlString(table, connection: connection))"
+        guard let result = connection.queryString(query) else { return ("", "", "") }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        guard let row = result.getRowAsDictionary() as? [String: Any] else { return ("", "", "") }
+
+        let engine = Self.displayString(for: row["Engine"] ?? row["Type"])
+        let collation = Self.displayString(for: row["Collation"])
+        return (engine, Self.encodingName(from: collation), collation)
+    }
+
+    private func loadEncodingOptions(connection: SPMySQLConnection) -> [EncodingOption] {
+        let queries = [
+            "SELECT CHARACTER_SET_NAME, DESCRIPTION, MAXLEN FROM information_schema.character_sets ORDER BY character_set_name ASC",
+            "SHOW CHARACTER SET"
+        ]
+
+        for query in queries {
+            guard let result = connection.queryString(query) else { continue }
+
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            var encodings: [EncodingOption] = []
+
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = Self.displayString(for: row["CHARACTER_SET_NAME"] ?? row["Charset"])
+                guard !name.isEmpty else { continue }
+                let description = Self.displayString(for: row["DESCRIPTION"] ?? row["Description"])
+                let title = description.isEmpty ? name : "\(description) (\(name))"
+                let maxLengthString = Self.displayString(for: row["MAXLEN"] ?? row["Maxlen"])
+                encodings.append(EncodingOption(title: title, name: name, maxLength: UInt(maxLengthString) ?? 1))
+            }
+
+            if !encodings.isEmpty {
+                return encodings
+            }
+        }
+
+        return []
+    }
+
+    private func loadCollationOptions(connection: SPMySQLConnection) -> [String: [String]] {
+        let queries = [
+            "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.collations ORDER BY collation_name ASC",
+            "SHOW COLLATION"
+        ]
+
+        for query in queries {
+            guard let result = connection.queryString(query) else { continue }
+
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            var collationsByEncoding: [String: [String]] = [:]
+
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let collation = Self.displayString(for: row["COLLATION_NAME"] ?? row["Collation"])
+                let encoding = Self.displayString(for: row["CHARACTER_SET_NAME"] ?? row["Charset"])
+                guard !collation.isEmpty, !encoding.isEmpty else { continue }
+                collationsByEncoding[encoding, default: []].append(collation)
+            }
+
+            if !collationsByEncoding.isEmpty {
+                return collationsByEncoding.mapValues { Self.uniqueStrings($0).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } }
+            }
+        }
+
+        return [:]
+    }
+
+    private func loadForeignKeyConstraints(table: String, database: String, connection: SPMySQLConnection) -> [ForeignKeyConstraint] {
+        let query = """
+            SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, ORDINAL_POSITION
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = \(Self.sqlString(database, connection: connection))
+              AND TABLE_NAME = \(Self.sqlString(table, connection: connection))
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+            """
+        guard let result = connection.queryString(query) else { return [] }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        var grouped: [String: (columns: [String], referencedTable: String)] = [:]
+
+        while let row = result.getRowAsDictionary() as? [String: Any] {
+            let name = Self.displayString(for: row["CONSTRAINT_NAME"])
+            let column = Self.displayString(for: row["COLUMN_NAME"])
+            let referencedTable = Self.displayString(for: row["REFERENCED_TABLE_NAME"])
+            guard !name.isEmpty, !column.isEmpty else { continue }
+            var entry = grouped[name] ?? ([], referencedTable)
+            entry.columns.append(column)
+            if entry.referencedTable.isEmpty {
+                entry.referencedTable = referencedTable
+            }
+            grouped[name] = entry
+        }
+
+        return grouped.map { ForeignKeyConstraint(name: $0.key, columns: $0.value.columns, referencedTable: $0.value.referencedTable) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     private static func structureRow(from row: [String: Any]) -> StructureRow {
@@ -604,8 +803,17 @@ final class SALightweightStructureViewController: NSViewController {
         if row.isNew {
             query = addColumnQuery(for: row, at: index)
         } else {
-            query = "ALTER TABLE \(tableReference()) CHANGE \(Self.backtickQuoted(oldRow.originalName ?? oldRow.name)) \(columnDefinition(for: row))"
+            var changeQuery = "ALTER TABLE \(tableReference()) CHANGE \(Self.backtickQuoted(oldRow.originalName ?? oldRow.name)) \(columnDefinition(for: row))"
+            if let autoIncrementIndex = pendingAutoIncrementIndex {
+                if autoIncrementIndex == "PRIMARY KEY" {
+                    changeQuery += ", ADD PRIMARY KEY (\(Self.backtickQuoted(row.name)))"
+                } else {
+                    changeQuery += ", ADD \(autoIncrementIndex) (\(Self.backtickQuoted(row.name)))"
+                }
+            }
+            query = changeQuery
         }
+        pendingAutoIncrementIndex = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
@@ -637,6 +845,13 @@ final class SALightweightStructureViewController: NSViewController {
             query += " FIRST"
         } else if index - 1 < rows.count {
             query += " AFTER \(Self.backtickQuoted(rows[index - 1].name))"
+        }
+        if let autoIncrementIndex = pendingAutoIncrementIndex {
+            if autoIncrementIndex == "PRIMARY KEY" {
+                query += ", ADD PRIMARY KEY (\(Self.backtickQuoted(row.name)))"
+            } else {
+                query += ", ADD \(autoIncrementIndex) (\(Self.backtickQuoted(row.name)))"
+            }
         }
         return query
     }
@@ -776,9 +991,11 @@ final class SALightweightStructureViewController: NSViewController {
         }
     }
 
-    private static func tableRowHeight(for font: NSFont) -> CGFloat {
+    fileprivate static func tableRowHeight(for font: NSFont) -> CGFloat {
         return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
     }
+
+    private static let automaticColumnMaximumWidth: CGFloat = 420
 
     private func autosizeStructureColumns() {
         isApplyingProgrammaticColumnWidths = true
@@ -803,8 +1020,7 @@ final class SALightweightStructureViewController: NSViewController {
 
             targetWidth += 18
             targetWidth = ceil(max(targetWidth, column.minWidth))
-            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
-            tableColumn.width = targetWidth
+            tableColumn.width = min(targetWidth, Self.automaticColumnMaximumWidth)
         }
     }
 
@@ -824,8 +1040,7 @@ final class SALightweightStructureViewController: NSViewController {
             }
 
             targetWidth = ceil(max(targetWidth + 18, column.minWidth))
-            tableColumn.maxWidth = max(tableColumn.maxWidth, targetWidth)
-            tableColumn.width = targetWidth
+            tableColumn.width = min(targetWidth, Self.automaticColumnMaximumWidth)
         }
     }
 
@@ -887,9 +1102,9 @@ final class SALightweightStructureViewController: NSViewController {
         case "Extra":
             values = extraSuggestions
         case "encodingName":
-            values = encodingSuggestions
+            values = [""] + encodingOptions.map { $0.name }
         case "collationName":
-            values = collationSuggestions
+            values = [""] + allCollationOptions
         default:
             return nil
         }
@@ -905,6 +1120,98 @@ final class SALightweightStructureViewController: NSViewController {
         cell.lineBreakMode = .byTruncatingTail
         cell.font = UserDefaults.getFont()
         return cell
+    }
+
+    private func updateCollationCell(for encoding: String) {
+        guard let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("collationName")) else { return }
+
+        let values = [""] + (collationOptionsByEncoding[encoding] ?? allCollationOptions)
+        let cell = NSComboBoxCell(textCell: "")
+        cell.addItems(withObjectValues: values)
+        cell.isEditable = true
+        cell.isSelectable = true
+        cell.usesDataSource = false
+        cell.completes = true
+        cell.numberOfVisibleItems = 10
+        cell.isButtonBordered = false
+        cell.lineBreakMode = .byTruncatingTail
+        cell.font = UserDefaults.getFont()
+        tableColumn.dataCell = cell
+    }
+
+    private func defaultCollation(forEncoding encoding: String) -> String? {
+        guard !encoding.isEmpty else { return nil }
+        if tableEncoding.caseInsensitiveCompare(encoding) == .orderedSame, !tableCollation.isEmpty {
+            return tableCollation
+        }
+        return collationOptionsByEncoding[encoding]?.first { $0.range(of: "_\(encoding)_", options: .caseInsensitive) == nil && $0.hasSuffix("_ci") }
+            ?? collationOptionsByEncoding[encoding]?.first
+    }
+
+    private func typeDisallowsDefaultOrLength(_ type: String) -> Bool {
+        let upper = type.uppercased()
+        return upper.hasSuffix("TEXT") || upper.hasSuffix("BLOB") || upper == "JSON" || isGeometryType(upper) || (isDateType(upper) && upper != "YEAR")
+    }
+
+    private func isDateType(_ type: String) -> Bool {
+        return ["DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR"].contains(type.uppercased())
+    }
+
+    private func isGeometryType(_ type: String) -> Bool {
+        return ["GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"].contains(type.uppercased())
+    }
+
+    private func promptForAutoIncrementIndex(completion: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Field must be indexed to support auto_increment.", comment: "auto increment index title")
+        alert.informativeText = NSLocalizedString("Choose the index to add for this auto_increment field.", comment: "auto increment index message")
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 26), pullsDown: false)
+        popup.addItems(withTitles: ["PRIMARY KEY", "INDEX", "UNIQUE"])
+        alert.accessoryView = popup
+        alert.addButton(withTitle: NSLocalizedString("Add", comment: "add button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+        completion(alert.runModal() == .alertFirstButtonReturn ? popup.titleOfSelectedItem : nil)
+    }
+
+    @objc private func showIndexes(_ sender: Any?) {
+        guard tablesIndexesSplitView.subviews.count > 1 else { return }
+
+        let splitHeight = tablesIndexesSplitView.bounds.height
+        tablesIndexesSplitView.setPosition(max(130, splitHeight - 180), ofDividerAt: 0)
+        showIndexesButton.isHidden = true
+    }
+
+    @objc private func showTableDetails(_ sender: Any?) {
+        requestTableInfoView?()
+    }
+
+    @objc private func toggleStructureColumn(_ sender: NSMenuItem) {
+        guard let columnKey = sender.representedObject as? String,
+              let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(columnKey)) else { return }
+
+        tableColumn.isHidden.toggle()
+        sender.state = tableColumn.isHidden ? .off : .on
+        autosizeStructureColumns()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(addField(_:)):
+            return !isSaving
+        case #selector(duplicateField(_:)), #selector(removeField(_:)), #selector(showOptimizedFieldType(_:)):
+            return !isSaving && structureTableView.selectedRow >= 0
+        case #selector(addIndex(_:)):
+            return !isSaving && !rows.isEmpty
+        case #selector(removeIndex(_:)):
+            return !isSaving && indexesTableView.selectedRow >= 0
+        case #selector(resetAutoIncrement(_:)):
+            let selectedRow = indexesTableView.selectedRow
+            return !isSaving && selectedRow >= 0 && selectedRow < indexes.count && (indexes[selectedRow]["Key_name"] ?? "") == "PRIMARY"
+        default:
+            return true
+        }
     }
 
     private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
@@ -939,6 +1246,32 @@ final class SALightweightStructureViewController: NSViewController {
         }
 
         return view
+    }
+
+    private func structureContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "")
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Add Field", comment: "add field menu item"), action: #selector(addField(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Duplicate Field", comment: "duplicate field menu item"), action: #selector(duplicateField(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Delete Field", comment: "delete field menu item"), action: #selector(removeField(_:)), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Add Index", comment: "add index menu item"), action: #selector(addIndex(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Show Optimized Field Type", comment: "show optimized field type menu item"), action: #selector(showOptimizedFieldType(_:)), keyEquivalent: ""))
+        for item in menu.items {
+            item.target = self
+        }
+        return menu
+    }
+
+    private func indexesContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "")
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Add Index", comment: "add index menu item"), action: #selector(addIndex(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Delete Index", comment: "delete index menu item"), action: #selector(removeIndex(_:)), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: NSLocalizedString("Reset AUTO_INCREMENT", comment: "reset auto increment menu item"), action: #selector(resetAutoIncrement(_:)), keyEquivalent: ""))
+        for item in menu.items {
+            item.target = self
+        }
+        return menu
     }
 
     private func showError(title: String, message: String?) {
@@ -1001,8 +1334,30 @@ final class SALightweightStructureViewController: NSViewController {
         return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
     }
 
+    private static func sqlString(_ value: String, connection: SPMySQLConnection) -> String {
+        return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private static func uniqueStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            guard seen.insert(value).inserted else { continue }
+            result.append(value)
+        }
+        return result
+    }
+
     private func tableReference() -> String {
         return "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+    }
+
+    private func refreshStructureComboCells() {
+        for columnKey in ["type", "Extra", "encodingName", "collationName"] {
+            guard let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(columnKey)),
+                  let cell = comboBoxCell(for: columnKey) else { continue }
+            tableColumn.dataCell = cell
+        }
     }
 }
 
@@ -1065,20 +1420,41 @@ private extension SALightweightStructureViewController {
         let selectedRow = structureTableView.selectedRow
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), rows.count > 1, let connection = connection else { return }
         let row = rows[sourceIndex]
+        let fieldConstraints = foreignKeyConstraints.filter { $0.columns.contains(row.name) }
 
         let alert = NSAlert()
         alert.messageText = String(format: NSLocalizedString("Delete field '%@'?", comment: "delete field title"), row.name)
-        alert.informativeText = NSLocalizedString("This action cannot be undone.", comment: "delete field message")
-        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
+        if let constraint = fieldConstraints.first {
+            alert.informativeText = String(format: NSLocalizedString("This field is part of a foreign key relationship with the table '%@'. This relationship must be removed before the field can be deleted.\n\nAre you sure you want to continue to delete the relationship and the field? This action cannot be undone.", comment: "delete field and foreign key informative message"), constraint.referencedTable)
+            alert.addButton(withTitle: NSLocalizedString("Delete Both", comment: "delete field and relation button"))
+        } else {
+            alert.informativeText = String(format: NSLocalizedString("Are you sure you want to delete the field '%@'? This action cannot be undone.", comment: "delete field informative message"), row.name)
+            alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
+        }
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            let query = "ALTER TABLE \(self.tableReference()) DROP \(Self.backtickQuoted(row.name))"
-            connection.queryString(query)
-            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            var error: String?
+
+            for constraint in fieldConstraints {
+                let relationQuery = "ALTER TABLE \(self.tableReference()) DROP FOREIGN KEY \(Self.backtickQuoted(constraint.name))"
+                connection.queryString(relationQuery)
+                if connection.queryErrored() {
+                    error = String(format: NSLocalizedString("An error occurred while trying to delete the relation '%@'.\n\nMySQL said: %@", comment: "error deleting relation informative message"), constraint.name, connection.lastErrorMessage() ?? "")
+                    break
+                }
+            }
+
+            if error == nil {
+                let query = "ALTER TABLE \(self.tableReference()) DROP \(Self.backtickQuoted(row.name))"
+                connection.queryString(query)
+                if connection.queryErrored() {
+                    error = String(format: NSLocalizedString("Couldn't delete field %@.\nMySQL said: %@", comment: "message of panel when field cannot be deleted"), row.name, connection.lastErrorMessage() ?? "")
+                }
+            }
 
             DispatchQueue.main.async {
                 self.isSaving = false
@@ -1098,6 +1474,131 @@ private extension SALightweightStructureViewController {
         guard let connection = connection else { return }
         invalidateCurrentStructureCache()
         loadStructure(for: table, database: database, connection: connection, useCache: false)
+    }
+
+    @objc func resetAutoIncrement(_ sender: Any?) {
+        guard let connection = connection else { return }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Reset AUTO_INCREMENT", comment: "reset auto increment title")
+        alert.informativeText = String(format: NSLocalizedString("Reset AUTO_INCREMENT for table '%@'.", comment: "reset auto increment informative text"), table)
+        let valueField = NSTextField(frame: NSRect(x: 0, y: 0, width: 180, height: 24))
+        valueField.stringValue = "1"
+        alert.accessoryView = valueField
+        alert.addButton(withTitle: NSLocalizedString("Reset", comment: "reset button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let value = max(valueField.integerValue, 1)
+        isSaving = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+            connection.queryString("ALTER TABLE \(self.tableReference()) AUTO_INCREMENT = \(value)")
+            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+
+            DispatchQueue.main.async {
+                self.isSaving = false
+                if let error = error, !error.isEmpty {
+                    self.showError(title: NSLocalizedString("Error", comment: "error"), message: String(format: NSLocalizedString("An error occurred while trying to reset AUTO_INCREMENT of table '%@'.\n\nMySQL said: %@", comment: "error resetting auto_increment informative message"), self.table, error))
+                    return
+                }
+                self.tableStructureDidChange?()
+            }
+        }
+    }
+
+    @objc func showOptimizedFieldType(_ sender: Any?) {
+        let selectedRow = structureTableView.selectedRow
+        guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), let connection = connection else { return }
+        let row = rows[sourceIndex]
+        let fieldName = row.name
+
+        isSaving = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+            var message: String?
+
+            if let result = connection.queryString("SELECT \(Self.backtickQuoted(fieldName)) FROM \(self.tableReference()) PROCEDURE ANALYSE(0,8192)"), !connection.queryErrored() {
+                result.returnDataAsStrings = true
+                result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+                if let analysis = result.getRowAsDictionary() as? [String: Any] {
+                    message = Self.displayString(for: analysis["Optimal_fieldtype"])
+                }
+            }
+
+            if message?.isEmpty != false {
+                message = self.estimatedOptimizedFieldType(for: row, connection: connection)
+                    ?? NSLocalizedString("No optimized field type found.", comment: "no optimized field type found message")
+            }
+
+            DispatchQueue.main.async {
+                self.isSaving = false
+                self.showError(title: String(format: NSLocalizedString("Optimized type for field '%@'", comment: "Optimized type for field %@"), fieldName), message: message)
+            }
+        }
+    }
+
+    private func estimatedOptimizedFieldType(for row: StructureRow, connection: SPMySQLConnection) -> String? {
+        let fieldType = (row.values["type"] ?? "").uppercased()
+        let fieldName = row.name
+
+        if ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"].contains(fieldType) {
+            guard let stats = columnStats(for: fieldName, lengthFunction: nil, connection: connection),
+                  nonNullRows(in: stats),
+                  let minimum = SPOptimizedFieldTypeEstimator.decimalNumber(fromStatValue: stats["min_value"]),
+                  let maximum = SPOptimizedFieldTypeEstimator.decimalNumber(fromStatValue: stats["max_value"]) else { return nil }
+            return SPOptimizedFieldTypeEstimator.estimatedIntegerType(forMinimum: minimum, maximum: maximum)
+        }
+
+        if ["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"].contains(fieldType) {
+            guard let stats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", connection: connection),
+                  nonNullRows(in: stats) else { return nil }
+            let minLength = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["min_length"])
+            let maxLength = max(UInt(1), SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["max_length"]))
+            if minLength == maxLength, maxLength <= 255 { return "BINARY(\(maxLength))" }
+            if maxLength <= 65_535 { return "VARBINARY(\(maxLength))" }
+            if maxLength <= 16_777_215 { return "MEDIUMBLOB" }
+            return "LONGBLOB"
+        }
+
+        if ["CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"].contains(fieldType) {
+            guard let stats = columnStats(for: fieldName, lengthFunction: "CHAR_LENGTH", connection: connection),
+                  let byteStats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", connection: connection),
+                  nonNullRows(in: stats) else { return nil }
+            let minLength = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["min_length"])
+            let maxLength = max(UInt(1), SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["max_length"]))
+            let maxByteLength = max(UInt(1), SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: byteStats["max_length"]))
+            if minLength == maxLength, maxLength <= 255 { return "CHAR(\(maxLength))" }
+            let maxBytesPerCharacter = encodingOptions.first(where: { $0.name == (row.values["encodingName"] ?? tableEncoding) })?.maxLength ?? 1
+            let maxSafeVarcharLength = 65_535 / max(maxBytesPerCharacter, 1)
+            if maxByteLength <= 65_535, maxLength <= maxSafeVarcharLength { return "VARCHAR(\(maxLength))" }
+            if maxByteLength <= 65_535 { return "TEXT" }
+            if maxByteLength <= 16_777_215 { return "MEDIUMTEXT" }
+            return "LONGTEXT"
+        }
+
+        return nil
+    }
+
+    private func columnStats(for fieldName: String, lengthFunction: String?, connection: SPMySQLConnection) -> [String: Any]? {
+        let quotedField = Self.backtickQuoted(fieldName)
+        let query: String
+        if let lengthFunction = lengthFunction {
+            let expression = "\(lengthFunction)(\(quotedField))"
+            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(expression)) AS min_length, MAX(\(expression)) AS max_length FROM \(tableReference())"
+        } else {
+            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(quotedField)) AS min_value, MAX(\(quotedField)) AS max_value FROM \(tableReference())"
+        }
+        guard let result = connection.queryString(query), !connection.queryErrored() else { return nil }
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        return result.getRowAsDictionary() as? [String: Any]
+    }
+
+    private func nonNullRows(in stats: [String: Any]) -> Bool {
+        let rowCount = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["row_count"])
+        let nullCount = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["null_count"])
+        return rowCount > nullCount
     }
 
     private func structureCacheKey(database: String? = nil, table: String? = nil) -> String {
@@ -1161,34 +1662,42 @@ private extension SALightweightStructureViewController {
     @objc func addIndex(_ sender: Any?) {
         let selectedRow = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow : 0
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), let connection = connection else { return }
-        let field = rows[sourceIndex].name
+        let primaryKeyExists = indexes.contains { ($0["Key_name"] ?? "") == "PRIMARY" }
+        let indexedColumnNames = Set(indexes.compactMap { $0["Column_name"] })
+        let initialField = rows.indices.contains(sourceIndex) ? rows[sourceIndex] : rows[0]
+        let fields = rows.map { IndexField(name: $0.name, type: $0.values["type"] ?? "", size: "") }
+        let selectedFieldName = indexedColumnNames.contains(initialField.name)
+            ? (rows.first { !indexedColumnNames.contains($0.name) }?.name ?? initialField.name)
+            : initialField.name
+        let sheetController = SALightweightStructureIndexSheetController(fields: fields,
+                                                                        selectedFieldName: selectedFieldName,
+                                                                        tableEngine: tableEngine,
+                                                                        primaryKeyExists: primaryKeyExists,
+                                                                        supportsFullTextOnInnoDB: supportsFullTextOnInnoDB(connection: connection))
+        guard let parentWindow = view.window else { return }
+        indexSheetController = sheetController
 
-        let alert = NSAlert()
-        alert.messageText = String(format: NSLocalizedString("Add index for '%@'", comment: "add index title"), field)
-        alert.informativeText = NSLocalizedString("Choose the index type to create for the selected field.", comment: "add index message")
-
-        let typePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 26), pullsDown: false)
-        typePopup.addItems(withTitles: ["INDEX", "UNIQUE", "FULLTEXT", "PRIMARY KEY"])
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 220, height: 24))
-        nameField.placeholderString = NSLocalizedString("Index name", comment: "index name placeholder")
-        nameField.stringValue = field
-
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 58))
-        accessory.addSubview(typePopup)
-        accessory.addSubview(nameField)
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: NSLocalizedString("Add", comment: "add button"))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let type = typePopup.titleOfSelectedItem ?? "INDEX"
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        var query = "ALTER TABLE \(tableReference()) ADD \(type)"
-        if type != "PRIMARY KEY", !name.isEmpty {
-            query += " \(Self.backtickQuoted(name))"
+        parentWindow.beginSheet(sheetController.window!) { [weak self, weak connection] response in
+            guard let self = self else { return }
+            defer { self.indexSheetController = nil }
+            guard response == .OK, let connection = connection else { return }
+            let query = sheetController.indexQuery(tableReference: self.tableReference(), quoteIdentifier: Self.backtickQuoted)
+            self.runIndexQuery(query, connection: connection, errorTitle: NSLocalizedString("Unable to add index", comment: "add index error title"))
         }
-        query += " (\(Self.backtickQuoted(field)))"
+    }
+
+    private func supportsFullTextOnInnoDB(connection: SPMySQLConnection) -> Bool {
+        let major = Int(connection.serverMajorVersion())
+        let minor = Int(connection.serverMinorVersion())
+        let release = Int(connection.serverReleaseVersion())
+        if major > 5 { return true }
+        if major == 5, minor > 6 { return true }
+        if major == 5, minor == 6, release >= 4 { return true }
+        return false
+    }
+
+    private func runIndexQuery(_ query: String, connection: SPMySQLConnection, errorTitle: String) {
+        guard !query.isEmpty else { return }
 
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -1199,7 +1708,7 @@ private extension SALightweightStructureViewController {
             DispatchQueue.main.async {
                 self.isSaving = false
                 if let error = error, !error.isEmpty {
-                    self.showError(title: NSLocalizedString("Unable to add index", comment: "add index error title"), message: error)
+                    self.showError(title: errorTitle, message: error)
                     return
                 }
 
@@ -1232,10 +1741,15 @@ private extension SALightweightStructureViewController {
             guard let self = self, let connection = connection else { return }
             connection.queryString(query)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            let errorID = connection.queryErrored() ? connection.lastErrorID() : 0
 
             DispatchQueue.main.async {
                 self.isSaving = false
                 if let error = error, !error.isEmpty {
+                    if errorID == 1553, let foreignKey = self.foreignKeyDepending(onIndex: indexName) {
+                        self.confirmRemoveIndex(indexName, foreignKey: foreignKey, connection: connection, originalError: error)
+                        return
+                    }
                     self.showError(title: NSLocalizedString("Unable to delete index", comment: "delete index error title"), message: error)
                     return
                 }
@@ -1245,6 +1759,368 @@ private extension SALightweightStructureViewController {
                 self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
             }
         }
+    }
+
+    private func foreignKeyDepending(onIndex indexName: String) -> ForeignKeyConstraint? {
+        let indexColumns = indexes.filter { ($0["Key_name"] ?? "") == indexName }.compactMap { $0["Column_name"] }.sorted()
+        guard !indexColumns.isEmpty else { return nil }
+
+        let matches = foreignKeyConstraints.filter { $0.columns.sorted() == indexColumns }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    private func confirmRemoveIndex(_ indexName: String, foreignKey: ForeignKeyConstraint, connection: SPMySQLConnection, originalError: String) {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("A foreign key needs this index", comment: "foreign key needs index title")
+        alert.informativeText = String(format: NSLocalizedString("The foreign key relationship '%@' has a dependency on index '%@'. This relationship must be removed before the index can be deleted.\n\nAre you sure you want to continue to delete the relationship and the index? This action cannot be undone.", comment: "foreign key needs index message"), foreignKey.name, indexName)
+        alert.addButton(withTitle: NSLocalizedString("Delete Both", comment: "delete both button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let dropForeignKeyQuery = "ALTER TABLE \(tableReference()) DROP FOREIGN KEY \(Self.backtickQuoted(foreignKey.name))"
+        let dropIndexQuery = indexName == "PRIMARY"
+            ? "ALTER TABLE \(tableReference()) DROP PRIMARY KEY"
+            : "ALTER TABLE \(tableReference()) DROP INDEX \(Self.backtickQuoted(indexName))"
+
+        isSaving = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+            connection.queryString(dropForeignKeyQuery)
+            var error = connection.queryErrored() ? String(format: NSLocalizedString("An error occurred while trying to delete the relation '%@'.\n\nMySQL said: %@", comment: "error deleting relation informative message"), foreignKey.name, connection.lastErrorMessage() ?? "") : nil
+            if error == nil {
+                connection.queryString(dropIndexQuery)
+                error = connection.queryErrored() ? (connection.lastErrorMessage() ?? originalError) : nil
+            }
+
+            DispatchQueue.main.async {
+                self.isSaving = false
+                if let error = error, !error.isEmpty {
+                    self.showError(title: NSLocalizedString("Unable to delete index", comment: "delete index error title"), message: error)
+                    return
+                }
+                self.invalidateCurrentStructureCache()
+                self.tableStructureDidChange?()
+                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+            }
+        }
+    }
+}
+
+private final class SALightweightStructureIndexSheetController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+
+    private let allFields: [SALightweightStructureViewController.IndexField]
+    private var indexedFields: [SALightweightStructureViewController.IndexField]
+    private let supportsLength = Set(["CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"])
+    private let requiresLength = Set(["TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"])
+    private let tableEngine: String
+    private let primaryKeyExists: Bool
+    private let supportsFullTextOnInnoDB: Bool
+
+    private let typePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let nameField = NSTextField(frame: .zero)
+    private let columnsTableView = NSTableView(frame: .zero)
+    private let sizeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Size"))
+    private let addColumnButton = NSButton(image: NSImage(named: NSImage.Name("NSAddTemplate")) ?? NSImage(), target: nil, action: nil)
+    private let removeColumnButton = NSButton(image: NSImage(named: NSImage.Name("NSRemoveTemplate")) ?? NSImage(), target: nil, action: nil)
+    private let advancedDisclosure = NSButton(checkboxWithTitle: NSLocalizedString("Advanced Options", comment: "advanced index options label"), target: nil, action: nil)
+    private let advancedView = NSView(frame: .zero)
+    private let storagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let keyBlockSizeField = NSTextField(frame: .zero)
+    private let addButton = NSButton(title: NSLocalizedString("Add", comment: "add button"), target: nil, action: nil)
+
+    init(fields: [SALightweightStructureViewController.IndexField], selectedFieldName: String, tableEngine: String, primaryKeyExists: Bool, supportsFullTextOnInnoDB: Bool) {
+        self.allFields = fields
+        self.indexedFields = fields.first(where: { $0.name == selectedFieldName }).map { [$0] } ?? Array(fields.prefix(1))
+        self.tableEngine = tableEngine
+        self.primaryKeyExists = primaryKeyExists
+        self.supportsFullTextOnInnoDB = supportsFullTextOnInnoDB
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 310),
+                              styleMask: [.titled],
+                              backing: .buffered,
+                              defer: false)
+        window.title = NSLocalizedString("Add Index", comment: "add index sheet title")
+        super.init(window: window)
+        buildInterface()
+        updateTypeControls()
+        updateButtonState()
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    func indexQuery(tableReference: String, quoteIdentifier: (String) -> String) -> String {
+        let indexType = selectedIndexType()
+        var queryType = indexType
+        if indexType != "INDEX", indexType != "PRIMARY KEY" {
+            queryType += " INDEX"
+        }
+
+        var query = "ALTER TABLE \(tableReference) ADD \(queryType)"
+        let indexName = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if indexType != "PRIMARY KEY", !indexName.isEmpty {
+            query += " \(quoteIdentifier(indexName))"
+        }
+
+        if storagePopup.indexOfSelectedItem > 0, indexType != "SPATIAL" {
+            query += " USING \(storagePopup.titleOfSelectedItem ?? "")"
+        }
+
+        let columns = indexedFields.compactMap { field -> String? in
+            guard !field.name.isEmpty else { return nil }
+            let type = field.type.uppercased()
+            let size = field.size.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !isFullTextSelected(), supportsLength.contains(type), !size.isEmpty {
+                return "\(quoteIdentifier(field.name)) (\(size))"
+            }
+            if !isFullTextSelected(), requiresLength.contains(type), size.isEmpty {
+                return nil
+            }
+            return quoteIdentifier(field.name)
+        }
+        guard !columns.isEmpty else { return "" }
+        query += " (\(columns.joined(separator: ", ")))"
+
+        let keyBlockSize = keyBlockSizeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keyBlockSize.isEmpty {
+            query += " KEY_BLOCK_SIZE = \(keyBlockSize)"
+        }
+
+        return query
+    }
+
+    private func buildInterface() {
+        guard let contentView = window?.contentView else { return }
+
+        let typeLabel = NSTextField(labelWithString: NSLocalizedString("Index Type:", comment: "index type label"))
+        let nameLabel = NSTextField(labelWithString: NSLocalizedString("Index Name:", comment: "index name label"))
+        typePopup.addItems(withTitles: availableIndexTypes())
+        storagePopup.addItems(withTitles: ["", "BTREE", "HASH"])
+        keyBlockSizeField.placeholderString = NSLocalizedString("Key Block Size", comment: "index key block size placeholder")
+
+        let fieldColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        fieldColumn.title = NSLocalizedString("Column", comment: "indexed column title")
+        fieldColumn.width = 320
+        let fieldCell = NSComboBoxCell(textCell: "")
+        fieldCell.addItems(withObjectValues: allFields.map { $0.name })
+        fieldCell.completes = true
+        fieldColumn.dataCell = fieldCell
+
+        sizeColumn.title = NSLocalizedString("Size", comment: "index size column title")
+        sizeColumn.width = 90
+        let sizeCell = NSTextFieldCell(textCell: "")
+        sizeCell.placeholderString = NSLocalizedString("optional", comment: "optional placeholder string")
+        sizeColumn.dataCell = sizeCell
+
+        columnsTableView.addTableColumn(fieldColumn)
+        columnsTableView.addTableColumn(sizeColumn)
+        columnsTableView.dataSource = self
+        columnsTableView.delegate = self
+        columnsTableView.usesAlternatingRowBackgroundColors = true
+        columnsTableView.rowHeight = SALightweightStructureViewController.tableRowHeight(for: UserDefaults.getFont())
+
+        let scrollView = NSScrollView(frame: .zero)
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.documentView = columnsTableView
+
+        addColumnButton.bezelStyle = .smallSquare
+        removeColumnButton.bezelStyle = .smallSquare
+        addColumnButton.target = self
+        removeColumnButton.target = self
+        addColumnButton.action = #selector(addIndexedField(_:))
+        removeColumnButton.action = #selector(removeIndexedField(_:))
+
+        advancedDisclosure.target = self
+        advancedDisclosure.action = #selector(toggleAdvancedOptions(_:))
+        advancedView.isHidden = true
+
+        let storageLabel = NSTextField(labelWithString: NSLocalizedString("Storage Type:", comment: "index storage type label"))
+        let keyBlockSizeLabel = NSTextField(labelWithString: NSLocalizedString("Key Block Size:", comment: "index key block size label"))
+        advancedView.addSubview(storageLabel)
+        advancedView.addSubview(storagePopup)
+        advancedView.addSubview(keyBlockSizeLabel)
+        advancedView.addSubview(keyBlockSizeField)
+
+        let cancelButton = NSButton(title: NSLocalizedString("Cancel", comment: "cancel button"), target: self, action: #selector(cancel(_:)))
+        addButton.target = self
+        addButton.action = #selector(confirm(_:))
+        addButton.keyEquivalent = "\r"
+
+        [typeLabel, typePopup, nameLabel, nameField, scrollView, addColumnButton, removeColumnButton, advancedDisclosure, advancedView, cancelButton, addButton].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview($0)
+        }
+        [storageLabel, storagePopup, keyBlockSizeLabel, keyBlockSizeField].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+
+        NSLayoutConstraint.activate([
+            typeLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            typeLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            typeLabel.widthAnchor.constraint(equalToConstant: 85),
+            typePopup.leadingAnchor.constraint(equalTo: typeLabel.trailingAnchor, constant: 8),
+            typePopup.centerYAnchor.constraint(equalTo: typeLabel.centerYAnchor),
+            typePopup.widthAnchor.constraint(equalToConstant: 180),
+
+            nameLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            nameLabel.topAnchor.constraint(equalTo: typeLabel.bottomAnchor, constant: 14),
+            nameLabel.widthAnchor.constraint(equalTo: typeLabel.widthAnchor),
+            nameField.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 8),
+            nameField.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
+            nameField.widthAnchor.constraint(equalToConstant: 260),
+
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -56),
+            scrollView.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 18),
+            scrollView.heightAnchor.constraint(equalToConstant: 105),
+
+            addColumnButton.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 6),
+            addColumnButton.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            addColumnButton.widthAnchor.constraint(equalToConstant: 25),
+            removeColumnButton.leadingAnchor.constraint(equalTo: addColumnButton.leadingAnchor),
+            removeColumnButton.topAnchor.constraint(equalTo: addColumnButton.bottomAnchor, constant: 4),
+            removeColumnButton.widthAnchor.constraint(equalToConstant: 25),
+
+            advancedDisclosure.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            advancedDisclosure.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 10),
+
+            advancedView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            advancedView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            advancedView.topAnchor.constraint(equalTo: advancedDisclosure.bottomAnchor, constant: 6),
+            advancedView.heightAnchor.constraint(equalToConstant: 48),
+
+            storageLabel.leadingAnchor.constraint(equalTo: advancedView.leadingAnchor),
+            storageLabel.topAnchor.constraint(equalTo: advancedView.topAnchor),
+            storageLabel.widthAnchor.constraint(equalToConstant: 90),
+            storagePopup.leadingAnchor.constraint(equalTo: storageLabel.trailingAnchor, constant: 8),
+            storagePopup.centerYAnchor.constraint(equalTo: storageLabel.centerYAnchor),
+            storagePopup.widthAnchor.constraint(equalToConstant: 115),
+
+            keyBlockSizeLabel.leadingAnchor.constraint(equalTo: advancedView.leadingAnchor),
+            keyBlockSizeLabel.topAnchor.constraint(equalTo: storageLabel.bottomAnchor, constant: 10),
+            keyBlockSizeLabel.widthAnchor.constraint(equalTo: storageLabel.widthAnchor),
+            keyBlockSizeField.leadingAnchor.constraint(equalTo: keyBlockSizeLabel.trailingAnchor, constant: 8),
+            keyBlockSizeField.centerYAnchor.constraint(equalTo: keyBlockSizeLabel.centerYAnchor),
+            keyBlockSizeField.widthAnchor.constraint(equalToConstant: 115),
+
+            addButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            addButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            cancelButton.trailingAnchor.constraint(equalTo: addButton.leadingAnchor, constant: -8),
+            cancelButton.centerYAnchor.constraint(equalTo: addButton.centerYAnchor)
+        ])
+
+        typePopup.target = self
+        typePopup.action = #selector(indexTypeChanged(_:))
+    }
+
+    private func availableIndexTypes() -> [String] {
+        var types = primaryKeyExists ? ["INDEX", "UNIQUE"] : ["PRIMARY KEY", "INDEX", "UNIQUE"]
+        let engine = tableEngine.uppercased()
+        if engine == "MYISAM" {
+            types.append("SPATIAL")
+        }
+        if engine == "MYISAM" || (engine == "INNODB" && supportsFullTextOnInnoDB) {
+            types.append("FULLTEXT")
+        }
+        return types
+    }
+
+    private func selectedIndexType() -> String {
+        return typePopup.titleOfSelectedItem ?? "INDEX"
+    }
+
+    private func isFullTextSelected() -> Bool {
+        return selectedIndexType() == "FULLTEXT"
+    }
+
+    private func updateTypeControls() {
+        let isPrimary = selectedIndexType() == "PRIMARY KEY"
+        nameField.isEnabled = !isPrimary
+        nameField.stringValue = isPrimary ? "PRIMARY" : (nameField.stringValue == "PRIMARY" ? "" : nameField.stringValue)
+        storagePopup.isEnabled = selectedIndexType() != "SPATIAL" && tableEngine.uppercased() != "MYISAM" && tableEngine.uppercased() != "INNODB"
+        updateButtonState()
+    }
+
+    private func updateButtonState() {
+        removeColumnButton.isEnabled = indexedFields.count > 1 && columnsTableView.selectedRow >= 0
+        addColumnButton.isEnabled = indexedFields.count < allFields.count
+        addButton.isEnabled = !indexedFields.isEmpty && !indexedFields.contains { requiresSize($0) && $0.size.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        sizeColumn.isHidden = isFullTextSelected() || !indexedFields.contains { requiresLength.contains($0.type.uppercased()) || !$0.size.isEmpty }
+    }
+
+    private func requiresSize(_ field: SALightweightStructureViewController.IndexField) -> Bool {
+        return !isFullTextSelected() && requiresLength.contains(field.type.uppercased())
+    }
+
+    @objc private func indexTypeChanged(_ sender: Any?) {
+        updateTypeControls()
+        columnsTableView.reloadData()
+    }
+
+    @objc private func addIndexedField(_ sender: Any?) {
+        guard let field = allFields.first(where: { candidate in !indexedFields.contains(where: { $0.name == candidate.name }) }) else { return }
+        indexedFields.append(field)
+        columnsTableView.reloadData()
+        columnsTableView.selectRowIndexes(IndexSet(integer: indexedFields.count - 1), byExtendingSelection: false)
+        updateButtonState()
+    }
+
+    @objc private func removeIndexedField(_ sender: Any?) {
+        guard columnsTableView.selectedRow >= 0, indexedFields.count > 1 else { return }
+        indexedFields.remove(at: columnsTableView.selectedRow)
+        columnsTableView.reloadData()
+        updateButtonState()
+    }
+
+    @objc private func toggleAdvancedOptions(_ sender: Any?) {
+        advancedView.isHidden = advancedDisclosure.state != .on
+    }
+
+    @objc private func confirm(_ sender: Any?) {
+        window?.sheetParent?.endSheet(window!, returnCode: .OK)
+    }
+
+    @objc private func cancel(_ sender: Any?) {
+        window?.sheetParent?.endSheet(window!, returnCode: .cancel)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return indexedFields.count
+    }
+
+    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+        guard row >= 0, row < indexedFields.count else { return nil }
+        if tableColumn?.identifier.rawValue == "Size" {
+            return indexedFields[row].size
+        }
+        return indexedFields[row].name
+    }
+
+    func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
+        guard row >= 0, row < indexedFields.count else { return }
+        if tableColumn?.identifier.rawValue == "Size" {
+            indexedFields[row].size = "\(object ?? "")"
+        } else if let field = allFields.first(where: { $0.name == "\(object ?? "")" }) {
+            var replacement = field
+            replacement.size = indexedFields[row].size
+            indexedFields[row] = replacement
+        }
+        columnsTableView.reloadData()
+        updateButtonState()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateButtonState()
+    }
+
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard tableColumn?.identifier.rawValue == "Size",
+              row >= 0,
+              row < indexedFields.count,
+              let textCell = cell as? NSTextFieldCell else { return }
+        textCell.placeholderString = requiresSize(indexedFields[row])
+            ? NSLocalizedString("required", comment: "required placeholder string")
+            : NSLocalizedString("optional", comment: "optional placeholder string")
     }
 }
 
@@ -1295,12 +2171,44 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
             return
         }
 
-        rows[sourceIndex].values[key] = newValue
         if key == "type" {
-            rows[sourceIndex].values[key] = newValue.uppercased()
+            let uppercasedType = newValue.uppercased()
+            guard !uppercasedType.hasPrefix("--") else {
+                reloadVisibleRows()
+                return
+            }
+            rows[sourceIndex].values[key] = uppercasedType
+            if typeDisallowsDefaultOrLength(uppercasedType) {
+                rows[sourceIndex].values["default"] = ""
+                rows[sourceIndex].values["length"] = ""
+            }
+        } else {
+            rows[sourceIndex].values[key] = newValue
         }
         if key == "Extra", extraIsAutoIncrement(newValue) {
             rows[sourceIndex].values["null"] = "0"
+            if (rows[sourceIndex].values["Key"] ?? "").isEmpty {
+                promptForAutoIncrementIndex { [weak self] indexType in
+                    guard let self = self else { return }
+                    self.pendingAutoIncrementIndex = indexType
+                    if indexType == nil {
+                        self.rows[sourceIndex].values["Extra"] = "None"
+                        self.reloadVisibleRows()
+                        return
+                    }
+                    self.saveRow(at: sourceIndex, oldRow: oldRow)
+                }
+                return
+            }
+        } else if key == "Extra" {
+            pendingAutoIncrementIndex = nil
+        }
+        if key == "encodingName" {
+            rows[sourceIndex].values["collationName"] = defaultCollation(forEncoding: newValue) ?? ""
+            updateCollationCell(for: newValue)
+        }
+        if key == "binary", rows[sourceIndex].values[key] != oldRow.values[key] {
+            rows[sourceIndex].values["collationName"] = ""
         }
 
         saveRow(at: sourceIndex, oldRow: oldRow)
@@ -1308,7 +2216,37 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
         guard isStructureTable(tableView), !isSaving, let key = tableColumn?.identifier.rawValue else { return false }
+        if key == "collationName", let sourceIndex = sourceIndex(forDisplayedRow: row) {
+            updateCollationCell(for: rows[sourceIndex].values["encodingName"] ?? "")
+        }
         return structureColumns.first(where: { $0.key == key })?.editable == true
+    }
+
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard isStructureTable(tableView),
+              let key = tableColumn?.identifier.rawValue,
+              let sourceIndex = sourceIndex(forDisplayedRow: row),
+              let cell = cell as? NSCell else { return }
+
+        let rowType = (rows[sourceIndex].values["type"] ?? "").uppercased()
+        switch key {
+        case "encodingName":
+            cell.isEnabled = rowType != "JSON" && isStringType(rowType)
+        case "collationName":
+            cell.isEnabled = isStringType(rowType) && !boolValue(rows[sourceIndex].values["binary"])
+        case "unsigned", "zerofill":
+            cell.isEnabled = isNumericType(rowType) && rowType != "BIT"
+        case "binary":
+            cell.isEnabled = rowType != "JSON" && isStringType(rowType)
+        case "default":
+            cell.isEnabled = !typeDisallowsDefaultOrLength(rowType)
+        case "length":
+            cell.isEnabled = !typeDisallowsDefaultOrLength(rowType)
+        case "null":
+            cell.isEnabled = rows[sourceIndex].values["Key"] != "PRI" && !extraIsAutoIncrement(rows[sourceIndex].values["Extra"])
+        default:
+            cell.isEnabled = true
+        }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

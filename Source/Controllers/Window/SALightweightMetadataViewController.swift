@@ -51,12 +51,17 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     private var didRegisterPreferenceObservers = false
 
     var selectionDidChange: (() -> Void)?
-    var doubleClickAction: (() -> Void)?
+    var doubleClickAction: ((Int) -> Void)?
     var selectedRows: [[String: String]] {
         return tableView.selectedRowIndexes.compactMap { row in
             guard row >= 0, row < rows.count else { return nil }
             return rows[row]
         }
+    }
+
+    func row(at index: Int) -> [String: String]? {
+        guard index >= 0, index < rows.count else { return nil }
+        return rows[index]
     }
 
     private lazy var placeholderLabel: NSTextField = {
@@ -69,7 +74,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     }()
 
     private lazy var tableView: NSTableView = {
-        let tableView = NSTableView(frame: .zero)
+        let tableView = SPCopyTable(frame: .zero)
         tableView.dataSource = self
         tableView.delegate = self
         tableView.allowsEmptySelection = true
@@ -237,7 +242,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     }
 
     @objc private func doubleClickTable(_ sender: NSTableView) {
-        doubleClickAction?()
+        doubleClickAction?(sender.clickedRow)
     }
 
     private func showLoadingMessage() {
@@ -286,6 +291,8 @@ final class SALightweightRelationsViewController: NSViewController {
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
+    private var relationsSupported = false
+    private var relationSheetController: SALightweightRelationSheetController?
 
     private let tableController = SALightweightMetadataTableViewController(columns: [
         SALightweightMetadataColumn(identifier: "name", title: NSLocalizedString("Name", comment: "relations name column"), width: 120.5, minWidth: 8),
@@ -329,8 +336,10 @@ final class SALightweightRelationsViewController: NSViewController {
         tableController.selectionDidChange = { [weak self] in
             self?.updateButtonState()
         }
-        tableController.doubleClickAction = { [weak self] in
-            self?.requestLegacyRelationsFallback?()
+        tableController.doubleClickAction = { [weak self] row in
+            if row < 0 {
+                self?.addRelation(row)
+            }
         }
         updateButtonState()
     }
@@ -339,6 +348,7 @@ final class SALightweightRelationsViewController: NSViewController {
         connection = nil
         database = ""
         table = ""
+        relationsSupported = false
         titleLabel.stringValue = ""
         tableController.showPlaceholder(message)
         updateButtonState()
@@ -348,6 +358,15 @@ final class SALightweightRelationsViewController: NSViewController {
         self.table = table
         self.database = database
         self.connection = connection
+        relationsSupported = SALightweightSchemaMetadataLoader.tableSupportsRelations(table: table, database: database, connection: connection)
+
+        guard relationsSupported else {
+            titleLabel.stringValue = NSLocalizedString("This table currently does not support relations. Only tables that use the InnoDB storage engine support them.", comment: "This table currently does not support relations. Only tables that use the InnoDB storage engine support them.")
+            tableController.showPlaceholder("")
+            updateButtonState()
+            return
+        }
+
         titleLabel.stringValue = String(format: NSLocalizedString("Relations for table: %@", comment: "Relations tab subtitle showing table name"), table)
         updateButtonState()
         tableController.load {
@@ -356,7 +375,7 @@ final class SALightweightRelationsViewController: NSViewController {
     }
 
     @objc private func addRelation(_ sender: Any) {
-        requestLegacyRelationsFallback?()
+        openRelationSheet()
     }
 
     @objc private func refreshRelations(_ sender: Any) {
@@ -392,10 +411,64 @@ final class SALightweightRelationsViewController: NSViewController {
     }
 
     private func updateButtonState() {
-        let hasTable = connection != nil && !table.isEmpty && !database.isEmpty
+        let hasTable = connection != nil && !table.isEmpty && !database.isEmpty && relationsSupported
         addButton.isEnabled = hasTable
         refreshButton.isEnabled = hasTable
         removeButton.isEnabled = hasTable && tableController.canRemoveSelection()
+    }
+
+    private func openRelationSheet() {
+        guard let connection = connection, !database.isEmpty, !table.isEmpty, relationsSupported else { return }
+
+        let sheetController = SALightweightRelationSheetController(table: table, database: database, connection: connection)
+        sheetController.onConfirm = { [weak self] relation in
+            guard let self = self, let connection = self.connection else { return .failure }
+            return self.saveRelation(relation, connection: connection)
+        }
+
+        relationSheetController = sheetController
+        guard let parentWindow = view.window, let sheet = sheetController.window else {
+            sheetController.window?.makeKeyAndOrderFront(self)
+            return
+        }
+
+        parentWindow.beginSheet(sheet) { [weak self] _ in
+            self?.relationSheetController = nil
+        }
+    }
+
+    private func saveRelation(_ relation: SALightweightRelationValue, connection: SPMySQLConnection) -> SALightweightRelationSaveResult {
+        var query = "ALTER TABLE \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(table)) ADD "
+        if !relation.constraintName.isEmpty {
+            query += "CONSTRAINT \(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.constraintName)) "
+        }
+
+        query += "FOREIGN KEY (\(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.column))) REFERENCES \(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.referenceDatabase)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.referenceTable)) (\(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.referenceColumn)))"
+
+        if let onDelete = relation.onDelete {
+            query += " ON DELETE \(onDelete)"
+        }
+
+        if let onUpdate = relation.onUpdate {
+            query += " ON UPDATE \(onUpdate)"
+        }
+
+        connection.queryString(query)
+
+        if connection.queryErrored() {
+            let errorText = connection.lastErrorMessage() ?? ""
+            showError(title: NSLocalizedString("Error creating relation", comment: "error creating relation message"),
+                      message: String(format: NSLocalizedString("The specified relation could not be created.\n\nMySQL said: %@", comment: "error creating relation informative message"), errorText))
+
+            if !relation.constraintName.isEmpty && errorText.contains("errno: 121") && errorText.contains("already exists") {
+                return .duplicateName
+            }
+
+            return .failure
+        }
+
+        refreshRelations(self)
+        return .success
     }
 
     private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
@@ -418,12 +491,327 @@ final class SALightweightRelationsViewController: NSViewController {
     }
 }
 
-final class SALightweightTriggersViewController: NSViewController {
-    var requestLegacyTriggersFallback: (() -> Void)?
+private struct SALightweightRelationColumn {
+    let name: String
+    let type: String
+}
 
+private struct SALightweightRelationValue {
+    let constraintName: String
+    let column: String
+    let referenceDatabase: String
+    let referenceTable: String
+    let referenceColumn: String
+    let onUpdate: String?
+    let onDelete: String?
+}
+
+private enum SALightweightRelationSaveResult {
+    case success
+    case failure
+    case duplicateName
+}
+
+private final class SALightweightRelationSheetController: NSWindowController, NSTextFieldDelegate {
+    var onConfirm: ((SALightweightRelationValue) -> SALightweightRelationSaveResult)?
+
+    private weak var connection: SPMySQLConnection?
+    private let table: String
+    private let database: String
+    private var localColumns: [SALightweightRelationColumn] = []
+    private var takenConstraintNames = Set<String>()
+
+    private let constraintNameField = NSTextField(frame: NSRect(x: 118, y: 10, width: 165, height: 19))
+    private let columnPopUpButton = NSPopUpButton(frame: NSRect(x: 115, y: 6, width: 171, height: 22), pullsDown: false)
+    private let refDatabasePopUpButton = NSPopUpButton(frame: NSRect(x: 115, y: 66, width: 171, height: 22), pullsDown: false)
+    private let refTablePopUpButton = NSPopUpButton(frame: NSRect(x: 115, y: 36, width: 171, height: 22), pullsDown: false)
+    private let refColumnPopUpButton = NSPopUpButton(frame: NSRect(x: 115, y: 6, width: 171, height: 22), pullsDown: false)
+    private let onUpdatePopUpButton = NSPopUpButton(frame: NSRect(x: 116, y: 36, width: 170, height: 22), pullsDown: false)
+    private let onDeletePopUpButton = NSPopUpButton(frame: NSRect(x: 116, y: 6, width: 170, height: 22), pullsDown: false)
+    private let confirmButton = NSButton(frame: NSRect(x: 268, y: 13, width: 96, height: 28))
+    private let cancelButton = NSButton(frame: NSRect(x: 174, y: 13, width: 96, height: 28))
+
+    init(table: String, database: String, connection: SPMySQLConnection) {
+        self.table = table
+        self.database = database
+        self.connection = connection
+
+        let panel = NSPanel(contentRect: NSRect(x: 196, y: 141, width: 379, height: 404),
+                            styleMask: [.titled],
+                            backing: .buffered,
+                            defer: false)
+        panel.title = NSLocalizedString("New Relation", comment: "new relation sheet title")
+        panel.isReleasedWhenClosed = false
+
+        super.init(window: panel)
+        buildInterface()
+        loadRelationData()
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        validate()
+    }
+
+    @objc private func selectTableColumn(_ sender: Any) {
+        updateAvailableTableColumns()
+    }
+
+    @objc private func selectReferenceDatabase(_ sender: Any) {
+        updateAvailableTables()
+        updateAvailableTableColumns()
+    }
+
+    @objc private func selectReferenceTable(_ sender: Any) {
+        updateAvailableTableColumns()
+    }
+
+    @objc private func closeRelationSheet(_ sender: Any) {
+        guard let window = window else { return }
+
+        if let parent = window.sheetParent {
+            parent.endSheet(window)
+        } else {
+            window.orderOut(self)
+        }
+    }
+
+    @objc private func confirmAddRelation(_ sender: Any) {
+        guard let relation = currentRelationValue() else { return }
+
+        switch onConfirm?(relation) {
+        case .success:
+            closeRelationSheet(sender)
+        case .duplicateName:
+            markConstraintNameTaken(relation.constraintName)
+        case .failure, .none:
+            break
+        }
+    }
+
+    private func buildInterface() {
+        guard let contentView = window?.contentView else { return }
+
+        addNameBox(to: contentView)
+        addTableBox(to: contentView)
+        addReferencesBox(to: contentView)
+        addActionBox(to: contentView)
+
+        confirmButton.title = NSLocalizedString("Add", comment: "add relation button")
+        confirmButton.bezelStyle = .rounded
+        confirmButton.controlSize = .small
+        confirmButton.keyEquivalent = "\r"
+        confirmButton.target = self
+        confirmButton.action = #selector(confirmAddRelation(_:))
+        contentView.addSubview(confirmButton)
+
+        cancelButton.title = NSLocalizedString("Cancel", comment: "cancel button")
+        cancelButton.bezelStyle = .rounded
+        cancelButton.controlSize = .small
+        cancelButton.keyEquivalent = "\u{1B}"
+        cancelButton.target = self
+        cancelButton.action = #selector(closeRelationSheet(_:))
+        contentView.addSubview(cancelButton)
+    }
+
+    private func addNameBox(to contentView: NSView) {
+        let box = NSBox(frame: NSRect(x: 17, y: 326, width: 345, height: 58))
+        box.title = NSLocalizedString("Name", comment: "relation name box title")
+        box.borderType = .lineBorder
+        contentView.addSubview(box)
+
+        let content = box.contentView ?? box
+        content.addSubview(label(title: NSLocalizedString("Name:", comment: "relation name label"), frame: NSRect(x: 15, y: 13, width: 98, height: 14)))
+        constraintNameField.controlSize = .small
+        constraintNameField.font = NSFont.messageFont(ofSize: 11)
+        constraintNameField.placeholderString = NSLocalizedString("Generate one", comment: "generate constraint name placeholder")
+        constraintNameField.delegate = self
+        content.addSubview(constraintNameField)
+    }
+
+    private func addTableBox(to contentView: NSView) {
+        let box = NSBox(frame: NSRect(x: 17, y: 266, width: 345, height: 56))
+        box.title = String(format: NSLocalizedString("Table: %@", comment: "Add Relation sheet title, showing table name"), table)
+        box.borderType = .lineBorder
+        contentView.addSubview(box)
+
+        let content = box.contentView ?? box
+        content.addSubview(label(title: NSLocalizedString("Column:", comment: "relation column label"), frame: NSRect(x: 15, y: 11, width: 98, height: 14)))
+        configurePopUp(columnPopUpButton, action: #selector(selectTableColumn(_:)))
+        content.addSubview(columnPopUpButton)
+    }
+
+    private func addReferencesBox(to contentView: NSView) {
+        let box = NSBox(frame: NSRect(x: 17, y: 145, width: 345, height: 117))
+        box.title = NSLocalizedString("References", comment: "relation references box title")
+        box.borderType = .lineBorder
+        contentView.addSubview(box)
+
+        let content = box.contentView ?? box
+        content.addSubview(label(title: NSLocalizedString("Database:", comment: "reference database label"), frame: NSRect(x: 15, y: 71, width: 98, height: 14)))
+        content.addSubview(label(title: NSLocalizedString("Table:", comment: "reference table label"), frame: NSRect(x: 15, y: 41, width: 98, height: 14)))
+        content.addSubview(label(title: NSLocalizedString("Column:", comment: "reference column label"), frame: NSRect(x: 15, y: 11, width: 98, height: 14)))
+
+        configurePopUp(refDatabasePopUpButton, action: #selector(selectReferenceDatabase(_:)))
+        configurePopUp(refTablePopUpButton, action: #selector(selectReferenceTable(_:)))
+        configurePopUp(refColumnPopUpButton, action: nil)
+        content.addSubview(refDatabasePopUpButton)
+        content.addSubview(refTablePopUpButton)
+        content.addSubview(refColumnPopUpButton)
+    }
+
+    private func addActionBox(to contentView: NSView) {
+        let box = NSBox(frame: NSRect(x: 17, y: 54, width: 345, height: 87))
+        box.title = NSLocalizedString("Action", comment: "relation action box title")
+        box.borderType = .lineBorder
+        contentView.addSubview(box)
+
+        let content = box.contentView ?? box
+        content.addSubview(label(title: NSLocalizedString("On update:", comment: "relation on update label"), frame: NSRect(x: 15, y: 41, width: 99, height: 14)))
+        content.addSubview(label(title: NSLocalizedString("On delete:", comment: "relation on delete label"), frame: NSRect(x: 15, y: 11, width: 98, height: 14)))
+
+        configurePopUp(onUpdatePopUpButton, action: nil)
+        configurePopUp(onDeletePopUpButton, action: nil)
+        configureActionPopUp(onUpdatePopUpButton)
+        configureActionPopUp(onDeletePopUpButton)
+        content.addSubview(onUpdatePopUpButton)
+        content.addSubview(onDeletePopUpButton)
+    }
+
+    private func loadRelationData() {
+        guard let connection = connection else { return }
+
+        localColumns = SALightweightSchemaMetadataLoader.columns(for: table, database: database, connection: connection)
+        takenConstraintNames = SALightweightSchemaMetadataLoader.relationConstraintNames(for: table, database: database, connection: connection)
+        setPopUpItems(columnPopUpButton, items: localColumns.map { $0.name }, selecting: nil)
+        setPopUpItems(refDatabasePopUpButton, items: SALightweightSchemaMetadataLoader.userDatabases(connection: connection), selecting: database)
+
+        constraintNameField.stringValue = ""
+        updateAvailableTables()
+        updateAvailableTableColumns()
+        validate()
+    }
+
+    private func updateAvailableTables() {
+        guard let connection = connection, let selectedDatabase = refDatabasePopUpButton.titleOfSelectedItem else { return }
+
+        setPopUpItems(refTablePopUpButton,
+                      items: SALightweightSchemaMetadataLoader.innodbTables(database: selectedDatabase, connection: connection),
+                      selecting: nil)
+        validate()
+    }
+
+    private func updateAvailableTableColumns() {
+        guard
+            let connection = connection,
+            let localColumn = localColumns.first(where: { $0.name == columnPopUpButton.titleOfSelectedItem }),
+            let selectedDatabase = refDatabasePopUpButton.titleOfSelectedItem,
+            let selectedTable = refTablePopUpButton.titleOfSelectedItem else {
+            setPopUpItems(refColumnPopUpButton, items: [], selecting: nil)
+            validate()
+            return
+        }
+
+        let columns = SALightweightSchemaMetadataLoader.columns(for: selectedTable, database: selectedDatabase, connection: connection)
+            .filter { $0.type == localColumn.type }
+            .map { $0.name }
+        setPopUpItems(refColumnPopUpButton, items: columns, selecting: nil)
+        validate()
+    }
+
+    private func validate() {
+        let constraintName = constraintNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedConstraintName = constraintName.lowercased()
+        let duplicateName = !lowercasedConstraintName.isEmpty
+            && takenConstraintNames.contains(lowercasedConstraintName)
+
+        constraintNameField.textColor = duplicateName ? .red : .controlTextColor
+        confirmButton.isEnabled = !duplicateName
+            && columnPopUpButton.titleOfSelectedItem?.isEmpty == false
+            && refDatabasePopUpButton.titleOfSelectedItem?.isEmpty == false
+            && refTablePopUpButton.titleOfSelectedItem?.isEmpty == false
+            && refColumnPopUpButton.titleOfSelectedItem?.isEmpty == false
+    }
+
+    private func currentRelationValue() -> SALightweightRelationValue? {
+        validate()
+
+        guard
+            confirmButton.isEnabled,
+            let column = columnPopUpButton.titleOfSelectedItem,
+            let referenceDatabase = refDatabasePopUpButton.titleOfSelectedItem,
+            let referenceTable = refTablePopUpButton.titleOfSelectedItem,
+            let referenceColumn = refColumnPopUpButton.titleOfSelectedItem else { return nil }
+
+        return SALightweightRelationValue(constraintName: constraintNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                                          column: column,
+                                          referenceDatabase: referenceDatabase,
+                                          referenceTable: referenceTable,
+                                          referenceColumn: referenceColumn,
+                                          onUpdate: selectedAction(onUpdatePopUpButton),
+                                          onDelete: selectedAction(onDeletePopUpButton))
+    }
+
+    private func configurePopUp(_ popUpButton: NSPopUpButton, action: Selector?) {
+        popUpButton.controlSize = .small
+        popUpButton.font = NSFont.messageFont(ofSize: 11)
+        popUpButton.target = self
+        popUpButton.action = action
+    }
+
+    private func markConstraintNameTaken(_ constraintName: String) {
+        takenConstraintNames.insert(constraintName.lowercased())
+        validate()
+    }
+
+    private func configureActionPopUp(_ popUpButton: NSPopUpButton) {
+        let actions = ["", "Restrict", "Cascade", "Set NULL", "No Action"]
+
+        popUpButton.removeAllItems()
+        popUpButton.addItems(withTitles: actions)
+        for index in actions.indices {
+            popUpButton.item(at: index)?.tag = index - 1
+        }
+    }
+
+    private func selectedAction(_ popUpButton: NSPopUpButton) -> String? {
+        let actions = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION"]
+        let tag = popUpButton.selectedTag()
+        guard tag >= 0, tag < actions.count else { return nil }
+        return actions[tag]
+    }
+
+    private func setPopUpItems(_ popUpButton: NSPopUpButton, items: [String], selecting selectedItem: String?) {
+        let sortedItems = UserDefaults.standard.bool(forKey: SPAlphabeticalTableSorting) ? items.sorted() : items
+
+        popUpButton.removeAllItems()
+        popUpButton.addItems(withTitles: sortedItems)
+        if let selectedItem = selectedItem, sortedItems.contains(selectedItem) {
+            popUpButton.selectItem(withTitle: selectedItem)
+        } else if !sortedItems.isEmpty {
+            popUpButton.selectItem(at: 0)
+        }
+        popUpButton.isEnabled = !sortedItems.isEmpty
+    }
+
+    private func label(title: String, frame: NSRect) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.frame = frame
+        label.alignment = .right
+        label.controlSize = .small
+        label.font = NSFont.messageFont(ofSize: 11)
+        return label
+    }
+}
+
+final class SALightweightTriggersViewController: NSViewController {
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
+    private var triggerSheetController: SALightweightTriggerSheetController?
 
     private let tableController = SALightweightMetadataTableViewController(columns: [
         SALightweightMetadataColumn(identifier: "TriggerName", title: NSLocalizedString("Trigger", comment: "triggers trigger column"), width: 86.5, minWidth: 10),
@@ -467,8 +855,12 @@ final class SALightweightTriggersViewController: NSViewController {
         tableController.selectionDidChange = { [weak self] in
             self?.updateButtonState()
         }
-        tableController.doubleClickAction = { [weak self] in
-            self?.requestLegacyTriggersFallback?()
+        tableController.doubleClickAction = { [weak self] row in
+            if row >= 0 {
+                self?.editTrigger(at: row)
+            } else {
+                self?.addTrigger(row)
+            }
         }
         updateButtonState()
     }
@@ -494,7 +886,7 @@ final class SALightweightTriggersViewController: NSViewController {
     }
 
     @objc private func addTrigger(_ sender: Any) {
-        requestLegacyTriggersFallback?()
+        openTriggerSheet(editing: nil)
     }
 
     @objc private func refreshTriggers(_ sender: Any) {
@@ -536,6 +928,71 @@ final class SALightweightTriggersViewController: NSViewController {
         removeButton.isEnabled = hasTable && tableController.canRemoveSelection()
     }
 
+    private func editTrigger(at row: Int) {
+        guard let trigger = tableController.row(at: row) else { return }
+        openTriggerSheet(editing: trigger)
+    }
+
+    private func openTriggerSheet(editing trigger: [String: String]?) {
+        guard connection != nil, !database.isEmpty, !table.isEmpty else { return }
+
+        let sheetController = SALightweightTriggerSheetController(trigger: trigger)
+        sheetController.onConfirm = { [weak self] value in
+            guard let self = self, let connection = self.connection else { return false }
+            return self.saveTrigger(value, replacing: trigger, connection: connection)
+        }
+
+        triggerSheetController = sheetController
+        guard let parentWindow = view.window, let sheet = sheetController.window else {
+            sheetController.window?.makeKeyAndOrderFront(self)
+            return
+        }
+
+        parentWindow.beginSheet(sheet) { [weak self] _ in
+            self?.triggerSheetController = nil
+        }
+    }
+
+    private func saveTrigger(_ trigger: SALightweightTriggerValue, replacing originalTrigger: [String: String]?, connection: SPMySQLConnection) -> Bool {
+        _ = connection.selectDatabase(database)
+
+        if let originalName = originalTrigger?["TriggerName"], !originalName.isEmpty {
+            connection.queryString(dropTriggerQuery(named: originalName))
+
+            if connection.queryErrored() {
+                showError(title: NSLocalizedString("Unable to delete trigger", comment: "error deleting trigger message"),
+                          message: String(format: NSLocalizedString("The selected trigger couldn't be deleted.\n\nMySQL said: %@", comment: "error deleting trigger informative message"), connection.lastErrorMessage() ?? ""))
+                return false
+            }
+        }
+
+        connection.queryString(createTriggerQuery(trigger))
+
+        if connection.queryErrored() {
+            let createError = connection.lastErrorMessage() ?? ""
+
+            if let originalTrigger = originalTrigger,
+               let originalValue = SALightweightTriggerValue(row: originalTrigger) {
+                connection.queryString(createTriggerQuery(originalValue))
+            }
+
+            showError(title: NSLocalizedString("Error creating trigger", comment: "error creating trigger message"),
+                      message: String(format: NSLocalizedString("The specified trigger was unable to be created.\n\nMySQL said: %@", comment: "error creating trigger informative message"), createError))
+            return false
+        }
+
+        refreshTriggers(self)
+        return true
+    }
+
+    private func createTriggerQuery(_ trigger: SALightweightTriggerValue) -> String {
+        return "CREATE TRIGGER \(SALightweightSchemaMetadataLoader.sqlIdentifier(trigger.name)) \(trigger.timing) \(trigger.event) ON \(SALightweightSchemaMetadataLoader.sqlIdentifier(table)) FOR EACH ROW \(trigger.statement)"
+    }
+
+    private func dropTriggerQuery(named triggerName: String) -> String {
+        return "DROP TRIGGER \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(triggerName))"
+    }
+
     private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
         let button = NSButton(image: NSImage(named: NSImage.Name(imageName)) ?? NSImage(), target: self, action: action)
         button.bezelStyle = .smallSquare
@@ -556,7 +1013,211 @@ final class SALightweightTriggersViewController: NSViewController {
     }
 }
 
+private struct SALightweightTriggerValue {
+    let name: String
+    let timing: String
+    let event: String
+    let statement: String
+
+    init(name: String, timing: String, event: String, statement: String) {
+        self.name = name
+        self.timing = timing
+        self.event = event
+        self.statement = statement
+    }
+
+    init?(row: [String: String]) {
+        guard let name = row["TriggerName"], !name.isEmpty,
+              let timing = row["TriggerActionTime"], !timing.isEmpty,
+              let event = row["TriggerEvent"], !event.isEmpty,
+              let statement = row["TriggerStatement"], !statement.isEmpty else { return nil }
+
+        self.init(name: name, timing: timing.uppercased(), event: event.uppercased(), statement: statement)
+    }
+}
+
+private final class SALightweightTriggerSheetController: NSWindowController, NSTextFieldDelegate, NSTextViewDelegate {
+    var onConfirm: ((SALightweightTriggerValue) -> Bool)?
+
+    private let originalTrigger: [String: String]?
+    private let nameField = NSTextField(frame: NSRect(x: 92, y: 317, width: 222, height: 22))
+    private let timingPopUpButton = NSPopUpButton(frame: NSRect(x: 386, y: 317, width: 98, height: 22), pullsDown: false)
+    private let eventPopUpButton = NSPopUpButton(frame: NSRect(x: 386, y: 289, width: 98, height: 22), pullsDown: false)
+    private let statementTextView = NSTextView(frame: .zero)
+    private let statementScrollView = NSScrollView(frame: NSRect(x: 20, y: 58, width: 464, height: 218))
+    private let confirmButton = NSButton(frame: NSRect(x: 388, y: 18, width: 96, height: 28))
+    private let cancelButton = NSButton(frame: NSRect(x: 290, y: 18, width: 96, height: 28))
+
+    init(trigger: [String: String]?) {
+        originalTrigger = trigger
+
+        let panel = NSPanel(contentRect: NSRect(x: 196, y: 141, width: 504, height: 358),
+                            styleMask: [.titled],
+                            backing: .buffered,
+                            defer: false)
+        panel.title = trigger == nil
+            ? NSLocalizedString("New Trigger", comment: "new trigger sheet title")
+            : NSLocalizedString("Edit Trigger", comment: "edit trigger sheet title")
+        panel.isReleasedWhenClosed = false
+
+        super.init(window: panel)
+        buildInterface()
+        populate(trigger)
+        validate()
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        validate()
+    }
+
+    func textDidChange(_ notification: Notification) {
+        validate()
+    }
+
+    @objc private func closeTriggerSheet(_ sender: Any) {
+        guard let window = window else { return }
+
+        if let parent = window.sheetParent {
+            parent.endSheet(window)
+        } else {
+            window.orderOut(self)
+        }
+    }
+
+    @objc private func confirmTrigger(_ sender: Any) {
+        guard let value = currentValue(), onConfirm?(value) == true else { return }
+        closeTriggerSheet(sender)
+    }
+
+    private func buildInterface() {
+        guard let contentView = window?.contentView else { return }
+
+        contentView.addSubview(label(title: NSLocalizedString("Name:", comment: "trigger name label"), frame: NSRect(x: 20, y: 321, width: 66, height: 14)))
+        contentView.addSubview(label(title: NSLocalizedString("Timing:", comment: "trigger timing label"), frame: NSRect(x: 322, y: 321, width: 58, height: 14)))
+        contentView.addSubview(label(title: NSLocalizedString("Event:", comment: "trigger event label"), frame: NSRect(x: 322, y: 293, width: 58, height: 14)))
+        contentView.addSubview(label(title: NSLocalizedString("Statement:", comment: "trigger statement label"), frame: NSRect(x: 20, y: 293, width: 80, height: 14)))
+
+        nameField.controlSize = .small
+        nameField.font = NSFont.messageFont(ofSize: 11)
+        nameField.delegate = self
+        contentView.addSubview(nameField)
+
+        configurePopUp(timingPopUpButton, items: ["BEFORE", "AFTER"])
+        configurePopUp(eventPopUpButton, items: ["INSERT", "UPDATE", "DELETE"])
+        contentView.addSubview(timingPopUpButton)
+        contentView.addSubview(eventPopUpButton)
+
+        statementScrollView.borderType = .bezelBorder
+        statementScrollView.focusRingType = .none
+        statementScrollView.hasVerticalScroller = true
+        statementScrollView.hasHorizontalScroller = true
+        statementScrollView.autohidesScrollers = true
+        statementScrollView.documentView = statementTextView
+
+        statementTextView.frame = NSRect(origin: .zero, size: statementScrollView.contentSize)
+        statementTextView.minSize = NSSize(width: 0, height: statementScrollView.contentSize.height)
+        statementTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        statementTextView.isVerticallyResizable = true
+        statementTextView.isHorizontallyResizable = true
+        statementTextView.autoresizingMask = [.width, .height]
+        statementTextView.font = UserDefaults.getFont()
+        statementTextView.delegate = self
+        statementTextView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        statementTextView.textContainer?.widthTracksTextView = false
+        contentView.addSubview(statementScrollView)
+
+        confirmButton.title = originalTrigger == nil
+            ? NSLocalizedString("Add", comment: "Add trigger button label")
+            : NSLocalizedString("Save", comment: "Save trigger button label")
+        confirmButton.bezelStyle = .rounded
+        confirmButton.controlSize = .small
+        confirmButton.keyEquivalent = "\r"
+        confirmButton.target = self
+        confirmButton.action = #selector(confirmTrigger(_:))
+        contentView.addSubview(confirmButton)
+
+        cancelButton.title = NSLocalizedString("Cancel", comment: "cancel button")
+        cancelButton.bezelStyle = .rounded
+        cancelButton.controlSize = .small
+        cancelButton.keyEquivalent = "\u{1B}"
+        cancelButton.target = self
+        cancelButton.action = #selector(closeTriggerSheet(_:))
+        contentView.addSubview(cancelButton)
+
+        window?.initialFirstResponder = nameField
+    }
+
+    private func populate(_ trigger: [String: String]?) {
+        guard let trigger = trigger else {
+            timingPopUpButton.selectItem(withTitle: "BEFORE")
+            eventPopUpButton.selectItem(withTitle: "INSERT")
+            return
+        }
+
+        nameField.stringValue = trigger["TriggerName"] ?? ""
+        statementTextView.string = trigger["TriggerStatement"] ?? ""
+        timingPopUpButton.selectItem(withTitle: (trigger["TriggerActionTime"] ?? "BEFORE").uppercased())
+        eventPopUpButton.selectItem(withTitle: (trigger["TriggerEvent"] ?? "INSERT").uppercased())
+    }
+
+    private func currentValue() -> SALightweightTriggerValue? {
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let statement = statementTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !name.isEmpty, !statement.isEmpty else { return nil }
+
+        return SALightweightTriggerValue(name: name,
+                                         timing: timingPopUpButton.titleOfSelectedItem ?? "BEFORE",
+                                         event: eventPopUpButton.titleOfSelectedItem ?? "INSERT",
+                                         statement: statement)
+    }
+
+    private func validate() {
+        confirmButton.isEnabled = currentValue() != nil
+    }
+
+    private func configurePopUp(_ popUpButton: NSPopUpButton, items: [String]) {
+        popUpButton.controlSize = .small
+        popUpButton.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        popUpButton.removeAllItems()
+        popUpButton.addItems(withTitles: items)
+    }
+
+    private func label(title: String, frame: NSRect) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.frame = frame
+        label.alignment = .right
+        label.controlSize = .small
+        label.font = NSFont.messageFont(ofSize: 11)
+        return label
+    }
+}
+
 enum SALightweightSchemaMetadataLoader {
+    fileprivate static func tableSupportsRelations(table: String, database: String, connection: SPMySQLConnection) -> Bool {
+        let query = """
+            SELECT ENGINE \
+            FROM information_schema.TABLES \
+            WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) \
+              AND TABLE_NAME = \(sqlString(table, connection: connection)) \
+              AND TABLE_TYPE = 'BASE TABLE'
+            """
+
+        guard let result = connection.queryString(query) else { return false }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsArray
+        result.returnDataAsStrings = true
+
+        guard let row = result.getRowAsArray(),
+              let engine = row.first else { return false }
+
+        return String(describing: engine).caseInsensitiveCompare("InnoDB") == .orderedSame
+    }
+
     static func relations(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
         let query = """
             SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
@@ -577,24 +1238,117 @@ enum SALightweightSchemaMetadataLoader {
         }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
-        var rows: [[String: String]] = []
+        result.returnDataAsStrings = true
+        var relationOrder: [String] = []
+        var relationRows: [String: [String: String]] = [:]
+        var relationColumns: [String: [String]] = [:]
+        var relationReferenceColumns: [String: [String]] = [:]
         while let row = result.getRowAsDictionary() as? [String: Any] {
-            rows.append([
-                "name": displayString(row["CONSTRAINT_NAME"]),
-                "columns": displayString(row["COLUMN_NAME"]),
-                "fk_database": displayString(row["REFERENCED_TABLE_SCHEMA"]),
-                "fk_table": displayString(row["REFERENCED_TABLE_NAME"]),
-                "fk_columns": displayString(row["REFERENCED_COLUMN_NAME"]),
-                "on_update": displayString(row["UPDATE_RULE"]),
-                "on_delete": displayString(row["DELETE_RULE"])
-            ])
+            let constraintName = displayString(row["CONSTRAINT_NAME"])
+            if relationRows[constraintName] == nil {
+                relationOrder.append(constraintName)
+                relationRows[constraintName] = [
+                    "name": constraintName,
+                    "columns": "",
+                    "fk_database": displayString(row["REFERENCED_TABLE_SCHEMA"]),
+                    "fk_table": displayString(row["REFERENCED_TABLE_NAME"]),
+                    "fk_columns": "",
+                    "on_update": displayString(row["UPDATE_RULE"]),
+                    "on_delete": displayString(row["DELETE_RULE"])
+                ]
+            }
+
+            relationColumns[constraintName, default: []].append(displayString(row["COLUMN_NAME"]))
+            relationReferenceColumns[constraintName, default: []].append(displayString(row["REFERENCED_COLUMN_NAME"]))
         }
 
         if connection.queryErrored() {
             return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load relations.", comment: "relations error placeholder"), connection: connection))
         }
 
+        let rows = relationOrder.compactMap { constraintName -> [String: String]? in
+            guard var relationRow = relationRows[constraintName] else { return nil }
+            relationRow["columns"] = relationColumns[constraintName]?.joined(separator: ", ") ?? ""
+            relationRow["fk_columns"] = relationReferenceColumns[constraintName]?.joined(separator: ", ") ?? ""
+            return relationRow
+        }
+
         return SALightweightMetadataSnapshot(rows: rows, emptyMessage: NSLocalizedString("No relations for this table.", comment: "relations empty placeholder"))
+    }
+
+    fileprivate static func relationConstraintNames(for table: String, database: String, connection: SPMySQLConnection) -> Set<String> {
+        let query = """
+            SELECT CONSTRAINT_NAME \
+            FROM information_schema.KEY_COLUMN_USAGE \
+            WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) \
+              AND TABLE_NAME = \(sqlString(table, connection: connection)) \
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            """
+
+        guard let result = connection.queryString(query) else { return [] }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsArray
+        result.returnDataAsStrings = true
+
+        var names = Set<String>()
+        while let row = result.getRowAsArray(), let name = row.first {
+            names.insert(String(describing: name).lowercased())
+        }
+        return names
+    }
+
+    fileprivate static func userDatabases(connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW DATABASES") else { return [] }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsArray
+        result.returnDataAsStrings = true
+
+        var databases: [String] = []
+        while let row = result.getRowAsArray(), let database = row.first {
+            let databaseName = String(describing: database)
+            guard !systemDatabases.contains(databaseName.lowercased()) else { continue }
+            databases.append(databaseName)
+        }
+        return databases
+    }
+
+    fileprivate static func innodbTables(database: String, connection: SPMySQLConnection) -> [String] {
+        let query = """
+            SELECT TABLE_NAME \
+            FROM information_schema.TABLES \
+            WHERE TABLE_TYPE = 'BASE TABLE' \
+              AND ENGINE = 'InnoDB' \
+              AND TABLE_SCHEMA = \(sqlString(database, connection: connection)) \
+            ORDER BY TABLE_NAME
+            """
+
+        guard let result = connection.queryString(query) else { return [] }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsArray
+        result.returnDataAsStrings = true
+
+        var tables: [String] = []
+        while let row = result.getRowAsArray(), let table = row.first {
+            tables.append(String(describing: table))
+        }
+        return tables
+    }
+
+    fileprivate static func columns(for table: String, database: String, connection: SPMySQLConnection) -> [SALightweightRelationColumn] {
+        let result = connection.queryString("SHOW FULL COLUMNS FROM \(sqlIdentifier(table)) FROM \(sqlIdentifier(database))")
+
+        result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        result?.returnDataAsStrings = true
+
+        var columns: [SALightweightRelationColumn] = []
+        while let row = result?.getRowAsDictionary() as? [String: Any] {
+            let name = displayString(row["Field"])
+            let type = displayString(row["Type"])
+            if !name.isEmpty && !type.isEmpty {
+                columns.append(SALightweightRelationColumn(name: name, type: type))
+            }
+        }
+        return columns
     }
 
     static func triggers(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
@@ -656,4 +1410,11 @@ enum SALightweightSchemaMetadataLoader {
     static func sqlIdentifier(_ value: String) -> String {
         return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
     }
+
+    private static let systemDatabases: Set<String> = [
+        "information_schema",
+        "performance_schema",
+        "mysql",
+        "sys"
+    ]
 }

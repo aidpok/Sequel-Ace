@@ -45,6 +45,19 @@ struct SALightweightTableInfoRow {
 struct SALightweightTableInfoSnapshot {
     let rows: [SALightweightTableInfoRow]
     let createSyntax: String?
+    let objectType: SALightweightTableInfoObjectType
+    let values: [String: String]
+    let engineOptions: [String]
+    let encodingOptions: [SALightweightTableInfoEncodingOption]
+    let collationOptions: [String]
+    let selectedEncodingName: String?
+    let canEdit: Bool
+    let hasAutoIncrement: Bool
+}
+
+struct SALightweightTableInfoEncodingOption {
+    let title: String
+    let name: String
 }
 
 enum SALightweightTableInfoLoader {
@@ -67,11 +80,6 @@ enum SALightweightTableInfoLoader {
         addCompactDateRow(key: "Create_time", label: NSLocalizedString("created", comment: "Table Info Section : time+date table was created at"), status: tableStatus, rows: &rows)
         addCompactDateRow(key: "Update_time", label: NSLocalizedString("updated", comment: "updated"), status: tableStatus, rows: &rows)
         addCompactStringRow(key: "Engine", label: NSLocalizedString("engine", comment: "Table Info Section : Table Engine"), status: tableStatus, rows: &rows)
-
-        if displayString(tableStatus["Rows"]) == nil, let rowCount = rowCount(for: table, database: database, connection: connection) {
-            tableStatus["Rows"] = rowCount
-            tableStatus["RowsCountAccurate"] = "y"
-        }
 
         if let rowCount = integerString(tableStatus["Rows"]) {
             let accurate = displayString(tableStatus["RowsCountAccurate"]) == "y"
@@ -103,28 +111,35 @@ enum SALightweightTableInfoLoader {
             return SALightweightTableInfoSnapshot(rows: [
                 SALightweightTableInfoRow(NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane"), isGroup: true),
                 SALightweightTableInfoRow(NSLocalizedString("error occurred", comment: "error occurred"))
-            ], createSyntax: nil)
+            ], createSyntax: nil, objectType: .table, values: [:], engineOptions: [], encodingOptions: [], collationOptions: [], selectedEncodingName: nil, canEdit: false, hasAutoIncrement: false)
         }
 
         let tableType = objectType(for: table, database: database, status: tableStatus, connection: connection)
         var rows = [SALightweightTableInfoRow(tableType.headerTitle, isGroup: true)]
+        let selectedCollation = displayString(tableStatus["Collation"])
+        let selectedEncoding = selectedCollation.map { encodingName(from: $0) }
+        let canEdit = tableType == .table && !isSystemDatabase(database)
 
         if tableType == .view {
             addViewRows(for: table, database: database, connection: connection, rows: &rows)
             addCommentRow(tableStatus: tableStatus, rows: &rows)
 
             let createSyntax = includeCreateSyntax ? createSyntax(for: table, database: database, connection: connection) : nil
-            return SALightweightTableInfoSnapshot(rows: rows, createSyntax: createSyntax)
+            return SALightweightTableInfoSnapshot(rows: rows,
+                                                  createSyntax: createSyntax,
+                                                  objectType: tableType,
+                                                  values: formValues(from: tableStatus),
+                                                  engineOptions: [],
+                                                  encodingOptions: [],
+                                                  collationOptions: [],
+                                                  selectedEncodingName: selectedEncoding,
+                                                  canEdit: false,
+                                                  hasAutoIncrement: false)
         }
 
         addDateRow(key: "Create_time", label: NSLocalizedString("created", comment: "Table Info Section : time+date table was created at"), status: tableStatus, rows: &rows)
         addDateRow(key: "Update_time", label: NSLocalizedString("updated", comment: "updated"), status: tableStatus, rows: &rows)
         addStringRow(key: "Engine", label: NSLocalizedString("engine", comment: "Table Info Section : Table Engine"), status: tableStatus, rows: &rows)
-
-        if displayString(tableStatus["Rows"]) == nil, let rowCount = rowCount(for: table, database: database, connection: connection) {
-            tableStatus["Rows"] = rowCount
-            tableStatus["RowsCountAccurate"] = "y"
-        }
 
         if let rowCount = integerString(tableStatus["Rows"]) {
             let accurate = displayString(tableStatus["RowsCountAccurate"]) == "y"
@@ -147,7 +162,16 @@ enum SALightweightTableInfoLoader {
         addCommentRow(tableStatus: tableStatus, rows: &rows)
 
         let createSyntax = includeCreateSyntax ? createSyntax(for: table, database: database, connection: connection) : nil
-        return SALightweightTableInfoSnapshot(rows: rows, createSyntax: createSyntax)
+        return SALightweightTableInfoSnapshot(rows: rows,
+                                              createSyntax: createSyntax,
+                                              objectType: tableType,
+                                              values: formValues(from: tableStatus),
+                                              engineOptions: storageEngineOptions(connection: connection),
+                                              encodingOptions: encodingOptions(connection: connection),
+                                              collationOptions: selectedEncoding.map { collationOptions(for: $0, connection: connection) } ?? [],
+                                              selectedEncodingName: selectedEncoding,
+                                              canEdit: canEdit,
+                                              hasAutoIncrement: displayString(tableStatus["Auto_increment"]) != nil)
     }
 
     private static func addViewRows(for table: String, database: String, connection: SPMySQLConnection, rows: inout [SALightweightTableInfoRow]) {
@@ -256,6 +280,117 @@ enum SALightweightTableInfoLoader {
         rows.append(SALightweightTableInfoRow(NSLocalizedString("comment", comment: "Table Info Section : table comment"), value: comment))
     }
 
+    private static func formValues(from tableStatus: [String: Any]) -> [String: String] {
+        var values: [String: String] = [:]
+
+        values["Engine"] = formattedValue("Engine", tableStatus: tableStatus)
+        values["Create_time"] = formattedValue("Create_time", tableStatus: tableStatus)
+        values["Update_time"] = formattedValue("Update_time", tableStatus: tableStatus)
+        values["Rows"] = formattedValue("Rows", tableStatus: tableStatus)
+        values["Row_format"] = formattedValue("Row_format", tableStatus: tableStatus)
+        values["Avg_row_length"] = formattedValue("Avg_row_length", tableStatus: tableStatus)
+        values["Auto_increment"] = formattedValue("Auto_increment", tableStatus: tableStatus)
+        values["Data_length"] = formattedValue("Data_length", tableStatus: tableStatus)
+        values["Max_data_length"] = formattedValue("Max_data_length", tableStatus: tableStatus)
+        values["Index_length"] = formattedValue("Index_length", tableStatus: tableStatus)
+        values["Data_free"] = formattedValue("Data_free", tableStatus: tableStatus)
+        values["Collation"] = displayString(tableStatus["Collation"]) ?? ""
+        values["Comment"] = displayString(tableStatus["Comment"]) == "VIEW" ? "" : (displayString(tableStatus["Comment"]) ?? "")
+
+        if let collation = displayString(tableStatus["Collation"]) {
+            values["Encoding"] = encodingName(from: collation)
+        }
+
+        return values
+    }
+
+    private static func formattedValue(_ key: String, tableStatus: [String: Any]) -> String {
+        let notAvailable = NSLocalizedString("Not available", comment: "not available label")
+        guard let rawValue = displayString(tableStatus[key]) else { return notAvailable }
+
+        switch key {
+        case "Data_length", "Max_data_length", "Index_length", "Data_free":
+            guard let value = Int64(rawValue) else { return notAvailable }
+            return ByteCountFormatter.string(byteSize: value) as String
+
+        case "Create_time", "Update_time":
+            guard let date = DateFormatter.naturalLanguageFormatter.date(from: rawValue) else { return rawValue }
+            return DateFormatter.mediumStyleFormatter.string(from: date)
+
+        case "Rows", "Avg_row_length", "Auto_increment":
+            guard let value = Int64(rawValue),
+                  let formattedValue = NumberFormatter.decimalStyleFormatter.string(from: NSNumber(value: value)) else { return notAvailable }
+
+            if key == "Rows", displayString(tableStatus["RowsCountAccurate"]) != "y" {
+                return "~\(formattedValue)"
+            }
+
+            return formattedValue
+
+        default:
+            return rawValue.isEmpty ? notAvailable : rawValue
+        }
+    }
+
+    private static func storageEngineOptions(connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW ENGINES") else { return [] }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        var engines: [String] = []
+
+        while let row = result.getRowAsDictionary() as? [String: Any] {
+            guard let engine = displayString(row["Engine"]),
+                  engine != "PERFORMANCE_SCHEMA",
+                  let support = displayString(row["Support"])?.uppercased(),
+                  support == "YES" || support == "DEFAULT" else { continue }
+
+            engines.append(engine)
+        }
+
+        return engines.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private static func encodingOptions(connection: SPMySQLConnection) -> [SALightweightTableInfoEncodingOption] {
+        let queries = [
+            "SELECT CHARACTER_SET_NAME, DESCRIPTION FROM information_schema.character_sets ORDER BY character_set_name ASC",
+            "SHOW CHARACTER SET"
+        ]
+
+        for query in queries {
+            guard let result = connection.queryString(query) else { continue }
+
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            var encodings: [SALightweightTableInfoEncodingOption] = []
+
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                guard let name = displayString(row["CHARACTER_SET_NAME"] ?? row["Charset"]) else { continue }
+                let description = displayString(row["DESCRIPTION"] ?? row["Description"])
+                let title = description.map { "\($0) (\(name))" } ?? name
+                encodings.append(SALightweightTableInfoEncodingOption(title: title, name: name))
+            }
+
+            if !encodings.isEmpty {
+                return encodings
+            }
+        }
+
+        return []
+    }
+
+    static func collationOptions(for encoding: String, connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW COLLATION WHERE Charset = \(sqlString(encoding, connection: connection))") else { return [] }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        var collations: [String] = []
+
+        while let row = result.getRowAsDictionary() as? [String: Any] {
+            guard let collation = displayString(row["Collation"]) else { continue }
+            collations.append(collation)
+        }
+
+        return collations
+    }
+
     private static func tableStatusValues(for table: String, database: String, connection: SPMySQLConnection) -> [String: Any]? {
         let query = "SHOW TABLE STATUS FROM \(backtickQuoted(database)) WHERE Name = \(sqlString(table, connection: connection))"
         guard let result = connection.queryString(query) else { return nil }
@@ -289,15 +424,6 @@ enum SALightweightTableInfoLoader {
               tableType.uppercased().contains("VIEW") else { return .table }
 
         return .view
-    }
-
-    private static func rowCount(for table: String, database: String, connection: SPMySQLConnection) -> String? {
-        let query = "SELECT COUNT(1) FROM \(backtickQuoted(database)).\(backtickQuoted(table))"
-        guard let result = connection.queryString(query),
-              let row = result.getRowAsArray() as? [Any],
-              let value = row.first else { return nil }
-
-        return displayString(value)
     }
 
     static func createSyntax(for table: String, database: String, connection: SPMySQLConnection) -> String? {
@@ -355,12 +481,16 @@ enum SALightweightTableInfoLoader {
         return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
+    private static func isSystemDatabase(_ database: String) -> Bool {
+        return ["information_schema", "performance_schema", "mysql"].contains(database.lowercased())
+    }
+
     private static func backtickQuoted(_ value: String) -> String {
         return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
     }
 }
 
-private enum SALightweightTableInfoObjectType {
+enum SALightweightTableInfoObjectType {
     case table
     case view
 
@@ -374,15 +504,80 @@ private enum SALightweightTableInfoObjectType {
     }
 }
 
-final class SALightweightTableInfoViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class SALightweightTableInfoViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate, NSTextFieldDelegate {
+    private static let formBaseSize = NSSize(width: 706, height: 546)
+
     private var loadToken = UUID()
     private var rows: [SALightweightTableInfoRow] = []
     private var didRegisterPreferenceObservers = false
+    private var table = ""
+    private var database = ""
+    private weak var connection: SPMySQLConnection?
+    private var currentSnapshot: SALightweightTableInfoSnapshot?
+    private var isApplyingSnapshot = false
 
+    private let formView = NSView(frame: .zero)
     private let tableContainerView = NSView(frame: .zero)
     private let syntaxContainerView = NSView(frame: .zero)
     private let tableScrollView = NSScrollView(frame: .zero)
+    private let commentsScrollView = NSScrollView(frame: .zero)
     private let syntaxScrollView = NSScrollView(frame: .zero)
+
+    private lazy var typePopUpButton = formPopUpButton(action: #selector(updateTableType(_:)))
+    private lazy var encodingPopUpButton = formPopUpButton(action: #selector(updateTableEncoding(_:)))
+    private lazy var collationPopUpButton = formPopUpButton(action: #selector(updateTableCollation(_:)))
+    private lazy var resetAutoIncrementButton: NSPopUpButton = {
+        let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 20, height: 20), pullsDown: true)
+        button.controlSize = .small
+        button.bezelStyle = .smallSquare
+        button.isBordered = true
+        button.imagePosition = .imageOnly
+        button.addItem(withTitle: "")
+        button.item(at: 0)?.image = NSImage(named: "NSAdvanced")
+        button.item(at: 0)?.isHidden = true
+        button.addItem(withTitle: NSLocalizedString("Reset AUTO_INCREMENT", comment: "Reset AUTO_INCREMENT menu item"))
+        button.item(at: 1)?.target = self
+        button.item(at: 1)?.action = #selector(resetAutoIncrement(_:))
+        button.item(at: 1)?.tag = 2
+        button.addItem(withTitle: NSLocalizedString("Reset AUTO_INCREMENT to...", comment: "Reset AUTO_INCREMENT to menu item"))
+        button.item(at: 2)?.target = self
+        button.item(at: 2)?.action = #selector(resetAutoIncrement(_:))
+        button.item(at: 2)?.tag = 1
+        button.toolTip = NSLocalizedString("Reset AUTO_INCREMENT...", comment: "Reset AUTO_INCREMENT tooltip")
+        return button
+    }()
+
+    private lazy var createdAtField = valueTextField()
+    private lazy var updatedAtField = valueTextField()
+    private lazy var rowNumberField = valueTextField()
+    private lazy var rowFormatField = valueTextField()
+    private lazy var rowAvgLengthField = valueTextField()
+    private lazy var autoIncrementField: NSTextField = {
+        let field = valueTextField()
+        field.isEditable = false
+        field.target = self
+        field.action = #selector(tableRowAutoIncrementWasEdited(_:))
+        field.delegate = self
+        return field
+    }()
+    private lazy var dataSizeField = valueTextField()
+    private lazy var maxDataSizeField = valueTextField()
+    private lazy var indexSizeField = valueTextField()
+    private lazy var sizeFreeField = valueTextField()
+
+    private lazy var commentsTextView: NSTextView = {
+        let textView = NSTextView(frame: .zero)
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = UserDefaults.getFont()
+        textView.textColor = .textColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.drawsBackground = true
+        textView.isVerticallyResizable = true
+        textView.delegate = self
+        return textView
+    }()
 
     private lazy var placeholderLabel: NSTextField = {
         let label = NSTextField(labelWithString: "")
@@ -466,52 +661,53 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     }()
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        view = NSView(frame: NSRect(origin: .zero, size: Self.formBaseSize))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
-        tableScrollView.borderType = .noBorder
-        tableScrollView.focusRingType = .none
-        tableScrollView.hasVerticalScroller = true
-        tableScrollView.hasHorizontalScroller = true
-        tableScrollView.autohidesScrollers = true
-        tableScrollView.contentView.drawsBackground = false
-        tableScrollView.documentView = tableView
+        formView.frame = view.bounds
+        formView.autoresizingMask = [.width, .height]
+        view.addSubview(formView)
 
-        syntaxScrollView.focusRingType = .none
-        syntaxScrollView.hasVerticalScroller = true
-        syntaxScrollView.hasHorizontalScroller = false
-        syntaxScrollView.autohidesScrollers = true
-        syntaxScrollView.documentView = syntaxTextView
+        addFormLabel(NSLocalizedString("Type:", comment: "table info type label"), frame: NSRect(x: 22, y: 503, width: 91, height: 14))
+        addFormLabel(NSLocalizedString("Encoding:", comment: "table info encoding label"), frame: NSRect(x: 23, y: 477, width: 90, height: 14))
+        addFormLabel(NSLocalizedString("Collation:", comment: "table info collation label"), frame: NSRect(x: 23, y: 452, width: 91, height: 14))
+        addFormLabel(NSLocalizedString("Created at:", comment: "table info created at label"), frame: NSRect(x: 286, y: 502, width: 82, height: 14))
+        addFormLabel(NSLocalizedString("Updated at:", comment: "table info updated at label"), frame: NSRect(x: 286, y: 477, width: 82, height: 14))
 
-        tableContainerView.addSubview(tableScrollView)
-        syntaxContainerView.addSubview(syntaxLabel)
-        syntaxContainerView.addSubview(syntaxScrollView)
-        splitView.addArrangedSubview(tableContainerView)
-        splitView.addArrangedSubview(syntaxContainerView)
-        splitView.frame = view.bounds.insetBy(dx: 12, dy: 30)
-        splitView.autoresizingMask = [.width, .height]
-        view.addSubview(splitView)
+        addFormView(typePopUpButton, frame: NSRect(x: 115, y: 498, width: 161, height: 22), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(encodingPopUpButton, frame: NSRect(x: 115, y: 473, width: 161, height: 22), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(collationPopUpButton, frame: NSRect(x: 115, y: 448, width: 161, height: 22), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(createdAtField, frame: NSRect(x: 369, y: 502, width: 305, height: 14), resizingMask: [.width, .minYMargin])
+        addFormView(updatedAtField, frame: NSRect(x: 369, y: 477, width: 305, height: 14), resizingMask: [.width, .minYMargin])
 
-        tableScrollView.translatesAutoresizingMaskIntoConstraints = false
-        syntaxLabel.translatesAutoresizingMaskIntoConstraints = false
-        syntaxScrollView.translatesAutoresizingMaskIntoConstraints = false
+        addSeparator(frame: NSRect(x: 25, y: 429, width: 650, height: 5))
+        addSeparator(frame: NSRect(x: 24, y: 318, width: 650, height: 5))
 
-        NSLayoutConstraint.activate([
-            tableScrollView.leadingAnchor.constraint(equalTo: tableContainerView.leadingAnchor),
-            tableScrollView.trailingAnchor.constraint(equalTo: tableContainerView.trailingAnchor),
-            tableScrollView.topAnchor.constraint(equalTo: tableContainerView.topAnchor),
-            tableScrollView.bottomAnchor.constraint(equalTo: tableContainerView.bottomAnchor),
+        addFormLabel(NSLocalizedString("Number of rows:", comment: "table info number of rows label"), frame: NSRect(x: 23, y: 402, width: 150, height: 14))
+        addFormLabel(NSLocalizedString("Row format:", comment: "table info row format label"), frame: NSRect(x: 23, y: 380, width: 150, height: 14))
+        addFormLabel(NSLocalizedString("Avg. row length:", comment: "table info average row length label"), frame: NSRect(x: 23, y: 358, width: 150, height: 14))
+        addFormLabel(NSLocalizedString("Auto increment:", comment: "table info auto increment label"), frame: NSRect(x: 50, y: 336, width: 123, height: 14))
+        addFormLabel(NSLocalizedString("Data size:", comment: "table info data size label"), frame: NSRect(x: 286, y: 402, width: 172, height: 14))
+        addFormLabel(NSLocalizedString("Max data size:", comment: "table info max data size label"), frame: NSRect(x: 286, y: 380, width: 172, height: 14))
+        addFormLabel(NSLocalizedString("Index size:", comment: "table info index size label"), frame: NSRect(x: 286, y: 358, width: 172, height: 14))
+        addFormLabel(NSLocalizedString("Free data size:", comment: "table info free data size label"), frame: NSRect(x: 286, y: 336, width: 172, height: 14))
 
-            syntaxLabel.leadingAnchor.constraint(equalTo: syntaxContainerView.leadingAnchor, constant: 3),
-            syntaxLabel.topAnchor.constraint(equalTo: syntaxContainerView.topAnchor, constant: 7),
-            syntaxLabel.widthAnchor.constraint(equalToConstant: 101),
+        addFormView(rowNumberField, frame: NSRect(x: 175, y: 402, width: 99, height: 14), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(rowFormatField, frame: NSRect(x: 175, y: 380, width: 99, height: 14), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(rowAvgLengthField, frame: NSRect(x: 175, y: 358, width: 99, height: 14), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(resetAutoIncrementButton, frame: NSRect(x: 26, y: 334, width: 20, height: 20), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(autoIncrementField, frame: NSRect(x: 175, y: 336, width: 101, height: 14), resizingMask: [.maxXMargin, .minYMargin])
+        addFormView(dataSizeField, frame: NSRect(x: 462, y: 402, width: 210, height: 14), resizingMask: [.width, .minYMargin])
+        addFormView(maxDataSizeField, frame: NSRect(x: 462, y: 380, width: 210, height: 14), resizingMask: [.width, .minYMargin])
+        addFormView(indexSizeField, frame: NSRect(x: 462, y: 358, width: 212, height: 14), resizingMask: [.width, .minYMargin])
+        addFormView(sizeFreeField, frame: NSRect(x: 462, y: 336, width: 212, height: 14), resizingMask: [.width, .minYMargin])
 
-            syntaxScrollView.leadingAnchor.constraint(equalTo: syntaxContainerView.leadingAnchor, constant: 109),
-            syntaxScrollView.trailingAnchor.constraint(equalTo: syntaxContainerView.trailingAnchor),
-            syntaxScrollView.topAnchor.constraint(equalTo: syntaxContainerView.topAnchor),
-            syntaxScrollView.bottomAnchor.constraint(equalTo: syntaxContainerView.bottomAnchor)
-        ])
+        addFormLabel(NSLocalizedString("Comments:", comment: "table info comments label"), frame: NSRect(x: 4, y: 273, width: 100, height: 14))
+        configureTextScrollView(commentsScrollView, textView: commentsTextView, frame: NSRect(x: 109, y: 214, width: 554, height: 73))
+
+        addFormLabel(NSLocalizedString("Create syntax:", comment: "table info create syntax label"), frame: NSRect(x: 3, y: 186, width: 101, height: 14))
+        configureTextScrollView(syntaxScrollView, textView: syntaxTextView, frame: NSRect(x: 109, y: 30, width: 554, height: 170))
     }
 
     override func viewDidLoad() {
@@ -542,18 +738,16 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
     override func viewDidLayout() {
         super.viewDidLayout()
-
-        if splitView.arrangedSubviews.count == 2, splitView.arrangedSubviews[1].frame.height < 160 {
-            splitView.setPosition(max(120, splitView.bounds.height - 200), ofDividerAt: 0)
-        }
+        updateFormDocumentFrame()
     }
 
     func showPlaceholder(_ message: String) {
         loadToken = UUID()
         rows = []
         tableView.reloadData()
+        clearForm()
         syntaxTextView.string = ""
-        splitView.isHidden = true
+        formView.isHidden = true
 
         placeholderLabel.stringValue = message
         placeholderLabel.frame = NSRect(x: 20, y: max(0, (view.bounds.height - 60) / 2), width: max(0, view.bounds.width - 40), height: 60)
@@ -566,13 +760,19 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     func loadTableInfo(for table: String, database: String, connection: SPMySQLConnection) {
         loadToken = UUID()
         let token = loadToken
+        self.table = table
+        self.database = database
+        self.connection = connection
 
         placeholderLabel.removeFromSuperviewWithoutNeedingDisplay()
-        splitView.isHidden = false
+        formView.isHidden = false
         rows = [
             SALightweightTableInfoRow(NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane"), isGroup: true),
             SALightweightTableInfoRow(NSLocalizedString("loading...", comment: "table info loading row"))
         ]
+        clearForm()
+        typePopUpButton.addItem(withTitle: NSLocalizedString("loading...", comment: "table info loading row"))
+        typePopUpButton.isEnabled = false
         syntaxTextView.string = ""
         tableView.reloadData()
 
@@ -584,7 +784,8 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
             DispatchQueue.main.async {
                 guard self.loadToken == token else { return }
                 self.rows = snapshot.rows
-                self.syntaxTextView.string = snapshot.createSyntax ?? ""
+                self.currentSnapshot = snapshot
+                self.applySnapshot(snapshot)
                 self.tableView.reloadData()
             }
         }
@@ -626,6 +827,367 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         cell.setIndentationLevel(0)
         cell.setNote("")
         cell.image = !rows[row].isGroup && tableColumn?.identifier.rawValue == "name" ? NSImage(named: "table-property") : nil
+    }
+
+    private func applySnapshot(_ snapshot: SALightweightTableInfoSnapshot) {
+        isApplyingSnapshot = true
+        updateFormDocumentFrame()
+
+        populate(typePopUpButton, with: snapshot.engineOptions, selectedTitle: snapshot.values["Engine"])
+        populateEncodingPopUpButton(snapshot)
+        populate(collationPopUpButton, with: snapshot.collationOptions, selectedTitle: snapshot.values["Collation"])
+
+        createdAtField.stringValue = snapshot.values["Create_time"] ?? ""
+        updatedAtField.stringValue = snapshot.values["Update_time"] ?? ""
+        rowNumberField.stringValue = snapshot.values["Rows"] ?? ""
+        rowFormatField.stringValue = snapshot.values["Row_format"] ?? ""
+        rowAvgLengthField.stringValue = snapshot.values["Avg_row_length"] ?? ""
+        autoIncrementField.stringValue = snapshot.values["Auto_increment"] ?? ""
+        dataSizeField.stringValue = snapshot.values["Data_length"] ?? ""
+        maxDataSizeField.stringValue = snapshot.values["Max_data_length"] ?? ""
+        indexSizeField.stringValue = snapshot.values["Index_length"] ?? ""
+        sizeFreeField.stringValue = snapshot.values["Data_free"] ?? ""
+        commentsTextView.string = snapshot.values["Comment"] ?? ""
+        syntaxTextView.string = snapshot.createSyntax ?? ""
+
+        typePopUpButton.isEnabled = snapshot.canEdit && snapshot.engineOptions.count > 1
+        encodingPopUpButton.isEnabled = snapshot.canEdit && snapshot.encodingOptions.count > 1
+        collationPopUpButton.isEnabled = snapshot.canEdit && snapshot.collationOptions.count > 1
+        commentsTextView.isEditable = snapshot.canEdit
+        resetAutoIncrementButton.isHidden = !snapshot.hasAutoIncrement
+        autoIncrementField.isEditable = false
+
+        if snapshot.objectType == .view {
+            populate(typePopUpButton, with: ["View"], selectedTitle: "View")
+            encodingPopUpButton.isEnabled = false
+            collationPopUpButton.isEnabled = false
+        }
+
+        isApplyingSnapshot = false
+    }
+
+    private func clearForm() {
+        isApplyingSnapshot = true
+
+        for popUpButton in [typePopUpButton, encodingPopUpButton, collationPopUpButton] {
+            popUpButton.removeAllItems()
+            popUpButton.isEnabled = false
+        }
+
+        for field in [createdAtField, updatedAtField, rowNumberField, rowFormatField, rowAvgLengthField, autoIncrementField, dataSizeField, maxDataSizeField, indexSizeField, sizeFreeField] {
+            field.stringValue = ""
+        }
+
+        commentsTextView.string = ""
+        commentsTextView.isEditable = false
+        syntaxTextView.string = ""
+        resetAutoIncrementButton.isHidden = true
+        autoIncrementField.isEditable = false
+        currentSnapshot = nil
+
+        isApplyingSnapshot = false
+    }
+
+    private func populate(_ popUpButton: NSPopUpButton, with items: [String], selectedTitle: String?) {
+        popUpButton.removeAllItems()
+
+        if items.isEmpty {
+            popUpButton.addItem(withTitle: selectedTitle?.isEmpty == false ? selectedTitle! : NSLocalizedString("Not available", comment: "not available label"))
+            return
+        }
+
+        for item in items {
+            popUpButton.addItem(withTitle: item)
+        }
+
+        if let selectedTitle, popUpButton.itemTitles.contains(selectedTitle) {
+            popUpButton.selectItem(withTitle: selectedTitle)
+        } else if let selectedTitle, !selectedTitle.isEmpty {
+            popUpButton.addItem(withTitle: selectedTitle)
+            popUpButton.selectItem(withTitle: selectedTitle)
+        }
+    }
+
+    private func populateEncodingPopUpButton(_ snapshot: SALightweightTableInfoSnapshot) {
+        encodingPopUpButton.removeAllItems()
+
+        if snapshot.encodingOptions.isEmpty {
+            encodingPopUpButton.addItem(withTitle: snapshot.values["Encoding"] ?? NSLocalizedString("Not available", comment: "not available label"))
+            return
+        }
+
+        for option in snapshot.encodingOptions {
+            encodingPopUpButton.addItem(withTitle: option.title)
+            encodingPopUpButton.lastItem?.representedObject = option.name
+        }
+
+        if let selectedEncodingName = snapshot.selectedEncodingName,
+           let item = encodingPopUpButton.itemArray.first(where: { ($0.representedObject as? String) == selectedEncodingName }) {
+            encodingPopUpButton.select(item)
+        }
+    }
+
+    @objc private func updateTableType(_ sender: NSPopUpButton) {
+        guard !isApplyingSnapshot,
+              let currentType = currentSnapshot?.values["Engine"],
+              let newType = sender.titleOfSelectedItem,
+              newType != currentType else { return }
+
+        let changeType = { [weak self] in
+            guard let self = self else { return }
+            self.executeTableInfoMutation(query: "ALTER TABLE \(self.qualifiedTableName()) ENGINE = \(newType)",
+                                          errorTitle: NSLocalizedString("Error changing table type", comment: "error changing table type message"),
+                                          errorMessage: { mysqlError in
+                                              String(format: NSLocalizedString("An error occurred when trying to change the table type to '%@'.\n\nMySQL said: %@", comment: "error changing table type informative message"), newType, mysqlError ?? "")
+                                          },
+                                          useQueryWarning: false,
+                                          restoreHandler: { sender.selectItem(withTitle: currentType) })
+        }
+
+        if formattedIntegerIsZero(currentSnapshot?.values["Rows"]) {
+            changeType()
+            return
+        }
+
+        NSAlert.createDefaultAlert(title: NSLocalizedString("Change table type", comment: "change table type message"),
+                                   message: String(format: NSLocalizedString("Are you sure you want to change this table's type to %@?\n\nPlease be aware that changing a table's type has the potential to cause the loss of some or all of its data. This action cannot be undone.", comment: "change table type informative message"), newType),
+                                   primaryButtonTitle: NSLocalizedString("Change", comment: "change button"),
+                                   primaryButtonHandler: changeType,
+                                   cancelButtonHandler: {
+                                       sender.selectItem(withTitle: currentType)
+                                   })
+    }
+
+    @objc private func updateTableEncoding(_ sender: NSPopUpButton) {
+        guard !isApplyingSnapshot,
+              let currentEncoding = currentSnapshot?.selectedEncodingName,
+              let newEncoding = sender.selectedItem?.representedObject as? String,
+              newEncoding != currentEncoding else { return }
+
+        executeTableInfoMutation(query: "ALTER TABLE \(qualifiedTableName()) CHARACTER SET = \(newEncoding)",
+                                 errorTitle: NSLocalizedString("Error changing table encoding", comment: "error changing table encoding message"),
+                                 errorMessage: { mysqlError in
+                                     String(format: NSLocalizedString("An error occurred when trying to change the table encoding to '%@'.\n\nMySQL said: %@", comment: "error changing table encoding informative message"), newEncoding, mysqlError ?? "")
+                                 },
+                                 useQueryWarning: false,
+                                 restoreHandler: { [weak self] in
+                                     self?.selectEncoding(named: currentEncoding)
+                                 })
+    }
+
+    @objc private func updateTableCollation(_ sender: NSPopUpButton) {
+        guard !isApplyingSnapshot,
+              let currentCollation = currentSnapshot?.values["Collation"],
+              let newCollation = sender.titleOfSelectedItem,
+              newCollation != currentCollation else { return }
+
+        executeTableInfoMutation(query: "ALTER TABLE \(qualifiedTableName()) COLLATE = \(newCollation)",
+                                 errorTitle: NSLocalizedString("Error changing table collation", comment: "error changing table collation message"),
+                                 errorMessage: { mysqlError in
+                                     String(format: NSLocalizedString("An error occurred when trying to change the table collation to '%@'.\n\nMySQL said: %@", comment: "error changing table collation informative message"), newCollation, mysqlError ?? "")
+                                 },
+                                 useQueryWarning: false,
+                                 restoreHandler: { sender.selectItem(withTitle: currentCollation) })
+    }
+
+    @objc private func resetAutoIncrement(_ sender: NSMenuItem) {
+        if sender.tag == 1 {
+            autoIncrementField.isEditable = true
+            autoIncrementField.selectText(nil)
+            return
+        }
+
+        executeTableInfoMutation(query: "ALTER TABLE \(qualifiedTableName()) AUTO_INCREMENT = 1",
+                                 errorTitle: NSLocalizedString("Error", comment: "error"),
+                                 errorMessage: { [weak self] mysqlError in
+                                     String(format: NSLocalizedString("An error occurred while trying to reset AUTO_INCREMENT of table '%@'.\n\nMySQL said: %@", comment: "error resetting auto_increment informative message"), self?.table ?? "", mysqlError ?? "")
+                                 },
+                                 useQueryWarning: false,
+                                 restoreHandler: nil)
+    }
+
+    @objc private func tableRowAutoIncrementWasEdited(_ sender: NSTextField) {
+        sender.isEditable = false
+
+        guard let value = NumberFormatter.decimalStyleFormatter.number(from: sender.stringValue) else {
+            reloadCurrentTableInfo()
+            return
+        }
+
+        executeTableInfoMutation(query: "ALTER TABLE \(qualifiedTableName()) AUTO_INCREMENT = \(value.uint64Value)",
+                                 errorTitle: NSLocalizedString("Error", comment: "error"),
+                                 errorMessage: { [weak self] mysqlError in
+                                     String(format: NSLocalizedString("An error occurred while trying to reset AUTO_INCREMENT of table '%@'.\n\nMySQL said: %@", comment: "error resetting auto_increment informative message"), self?.table ?? "", mysqlError ?? "")
+                                 },
+                                 useQueryWarning: false,
+                                 restoreHandler: nil)
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        guard !isApplyingSnapshot,
+              let textView = notification.object as? NSTextView,
+              textView === commentsTextView,
+              commentsTextView.isEditable,
+              let connection = connection else { return }
+
+        let currentCommentRaw = currentSnapshot?.values["Comment"] ?? ""
+        let currentComment = currentCommentRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newComment = commentsTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard currentComment != newComment else { return }
+
+        let quotedComment = connection.escapeAndQuoteString(newComment) ?? "'\(newComment.replacingOccurrences(of: "'", with: "''"))'"
+        executeTableInfoMutation(query: "ALTER TABLE \(qualifiedTableName()) COMMENT = \(quotedComment)",
+                                 errorTitle: NSLocalizedString("Error changing table comment", comment: "error changing table comment message"),
+                                 errorMessage: { mysqlError in
+                                     String(format: NSLocalizedString("An error occurred when trying to change the table's comment to '%@'.\n\nMySQL said: %@", comment: "error changing table comment informative message"), newComment, mysqlError ?? "")
+                                 },
+                                 useQueryWarning: true,
+                                 restoreHandler: { [weak self] in
+                                     self?.commentsTextView.string = currentCommentRaw
+                                 })
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(cancelOperation(_:)), control == autoIncrementField {
+            autoIncrementField.abortEditing()
+            autoIncrementField.isEditable = false
+            return true
+        }
+
+        return false
+    }
+
+    private func executeTableInfoMutation(query: String,
+                                          errorTitle: String,
+                                          errorMessage: ((String?) -> String)? = nil,
+                                          useQueryWarning: Bool,
+                                          restoreHandler: (() -> Void)?) {
+        guard let connection = connection else { return }
+
+        let executeChange = { [weak self] in
+            guard let self = self else { return }
+
+            _ = connection.queryString(query)
+
+            if connection.queryErrored() {
+                restoreHandler?()
+                let mysqlError = connection.lastErrorMessage()
+                self.showError(title: errorTitle, message: errorMessage?(mysqlError) ?? mysqlError)
+                return
+            }
+
+            self.reloadCurrentTableInfo()
+        }
+
+        if useQueryWarning && UserDefaults.standard.bool(forKey: SPQueryWarningEnabled) {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Execute SQL?", comment: "Execute SQL?")
+            alert.informativeText = String(format: NSLocalizedString("Do you really want to proceed with this query?\n\n %@", comment: "message of panel asking for confirmation for exec query"), query)
+            alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+            if alert.runModal() == .alertFirstButtonReturn {
+                executeChange()
+            } else {
+                restoreHandler?()
+            }
+        } else {
+            executeChange()
+        }
+    }
+
+    private func reloadCurrentTableInfo() {
+        guard let connection = connection, !table.isEmpty, !database.isEmpty else { return }
+        loadTableInfo(for: table, database: database, connection: connection)
+    }
+
+    private func formattedIntegerIsZero(_ value: String?) -> Bool {
+        guard let value = value else { return false }
+        let digits = value
+            .replacingOccurrences(of: "~", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return UInt64(digits) == 0
+    }
+
+    private func selectEncoding(named encodingName: String) {
+        guard let item = encodingPopUpButton.itemArray.first(where: { ($0.representedObject as? String) == encodingName }) else { return }
+        encodingPopUpButton.select(item)
+    }
+
+    private func qualifiedTableName() -> String {
+        return "\(backtickQuoted(database)).\(backtickQuoted(table))"
+    }
+
+    private func backtickQuoted(_ value: String) -> String {
+        return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
+    }
+
+    private func showError(title: String, message: String?) {
+        NSAlert.createWarningAlert(title: title, message: message ?? "", callback: nil)
+    }
+
+    private func updateFormDocumentFrame() {
+        let size = NSSize(width: max(Self.formBaseSize.width, view.bounds.width),
+                          height: max(Self.formBaseSize.height, view.bounds.height))
+
+        guard formView.frame.size != size else { return }
+
+        formView.frame = NSRect(origin: .zero, size: size)
+    }
+
+    private func addFormLabel(_ title: String, frame: NSRect) {
+        let label = NSTextField(labelWithString: title)
+        label.frame = frame
+        label.autoresizingMask = [.maxXMargin, .minYMargin]
+        label.alignment = .right
+        label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = .controlTextColor
+        formView.addSubview(label)
+    }
+
+    private func addFormView(_ subview: NSView, frame: NSRect, resizingMask: NSView.AutoresizingMask) {
+        subview.frame = frame
+        subview.autoresizingMask = resizingMask
+        formView.addSubview(subview)
+    }
+
+    private func addSeparator(frame: NSRect) {
+        let separator = NSBox(frame: frame)
+        separator.boxType = .separator
+        separator.autoresizingMask = [.width, .minYMargin]
+        formView.addSubview(separator)
+    }
+
+    private func configureTextScrollView(_ scrollView: NSScrollView, textView: NSTextView, frame: NSRect) {
+        scrollView.frame = frame
+        scrollView.autoresizingMask = [.width, .height, .minYMargin]
+        scrollView.focusRingType = .none
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        textView.frame = NSRect(origin: .zero, size: frame.size)
+        textView.autoresizingMask = [.width, .height]
+        formView.addSubview(scrollView)
+    }
+
+    private func formPopUpButton(action: Selector) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 161, height: 22), pullsDown: false)
+        button.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.target = self
+        button.action = action
+        return button
+    }
+
+    private func valueTextField() -> NSTextField {
+        let field = NSTextField(labelWithString: "")
+        field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.textColor = .controlTextColor
+        field.lineBreakMode = .byClipping
+        return field
     }
 
     private func registerPreferenceObserversIfNeeded() {
