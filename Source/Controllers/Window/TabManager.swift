@@ -146,6 +146,7 @@ private extension TabManager {
     func createNewWindowController() -> SPWindowController {
         let windowController = SPWindowController(windowNibName: "MainWindow")
         windowController.window?.delegate = windowController
+        windowController.window?.isRestorable = false
         return windowController
     }
 

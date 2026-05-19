@@ -180,6 +180,7 @@ typedef enum {
 
 		fieldType = @"";
 		fieldEncoding = @"";
+		restoresUsedSheetAnimationBehavior = NO;
 	}
 
 	return self;
@@ -315,11 +316,22 @@ typedef enum {
 		NSSize screen = [[NSScreen mainScreen] visibleFrame].size;
 		NSRect sheet = [usedSheet frame];
 
+		BOOL disableSheetAnimation = [[theContextInfo objectForKey:@"disableSheetAnimation"] boolValue];
+
 		[usedSheet setFrame:
-		 NSMakeRect(sheet.origin.x, sheet.origin.y, 
-					(sheet.size.width > screen.width) ? screen.width : sheet.size.width, 
+		 NSMakeRect(sheet.origin.x, sheet.origin.y,
+					(sheet.size.width > screen.width) ? screen.width : sheet.size.width,
 					(sheet.size.height > screen.height) ? screen.height - 100 : sheet.size.height)
 					display:YES];
+
+		if (disableSheetAnimation && [usedSheet respondsToSelector:@selector(setAnimationBehavior:)]) {
+			usedSheetAnimationBehavior = [usedSheet animationBehavior];
+			restoresUsedSheetAnimationBehavior = YES;
+			[usedSheet setAnimationBehavior:NSWindowAnimationBehaviorNone];
+		}
+		else {
+			restoresUsedSheetAnimationBehavior = NO;
+		}
 
 		[theWindow beginSheet:usedSheet completionHandler:^(NSModalResponse returnCode) {
 			// Remember spell cheecker status
@@ -330,102 +342,125 @@ typedef enum {
 		[editSheetSegmentControl setEnabled:NO forSegment:ImageSegment];
 		[hexTextView setString:@""]; // Set hex view to "" - load on demand only
 
-		NSImage *image = nil;
-		if (self.displayFormatter) {
-			// data comes with it's own display formatter so let's use that.
-			stringValue = [self.displayFormatter stringForObjectValue: sheetEditData];
-			[self showEditText:YES];
-			[editSheetSegmentControl setSelectedSegment:TextSegment];
-		}
-		else if ([sheetEditData isKindOfClass:[NSData class]]) {
-			image       = [[NSImage alloc] initWithData:sheetEditData];
-			stringValue = [[NSString alloc] initWithData:sheetEditData encoding:encoding];
+		BOOL deferTextLoading = [[theContextInfo objectForKey:@"deferTextLoading"] boolValue];
+		if (deferTextLoading && _isEditable) [editSheetOkButton setEnabled:NO];
+		id sheetBeingPopulated = usedSheet;
 
-			if (stringValue == nil) {
-				stringValue = [[NSString alloc] initWithData:sheetEditData encoding:NSASCIIStringEncoding];
+		void (^populateEditSheet)(void) = ^{
+			if (deferTextLoading && self->usedSheet != sheetBeingPopulated) return;
+
+			if (deferTextLoading && ![sheetBeingPopulated isVisible]) {
+				if (_isEditable) [editSheetOkButton setEnabled:YES];
+				editSheetWillBeInitialized = NO;
+				[editSheetProgressBar stopAnimation:self];
+				return;
 			}
 
-			if (isBinary) {
-				stringValue	= [[NSString alloc] initWithFormat:@"0x%@", [sheetEditData dataToHexString]];
+			NSImage *image = nil;
+			if (self.displayFormatter) {
+				// data comes with it's own display formatter so let's use that.
+				stringValue = [self.displayFormatter stringForObjectValue: sheetEditData];
+				[self showEditText:YES];
+				[editSheetSegmentControl setSelectedSegment:TextSegment];
 			}
+			else if ([sheetEditData isKindOfClass:[NSData class]]) {
+				image       = [[NSImage alloc] initWithData:sheetEditData];
+				stringValue = [[NSString alloc] initWithData:sheetEditData encoding:encoding];
 
-			[editSheetSegmentControl setSelectedSegment:HexSegment];
-			[self showHexText:YES];
-		}
-		else if ([sheetEditData isKindOfClass:[SPMySQLGeometryData class]]) {
-			SPGeometryDataView *v = [[SPGeometryDataView alloc] initWithCoordinates:[sheetEditData coordinates] targetDimension:2000.0f];
-			image = [v thumbnailImage];
-			stringValue = [sheetEditData wktString];
+				if (stringValue == nil) {
+					stringValue = [[NSString alloc] initWithData:sheetEditData encoding:NSASCIIStringEncoding];
+				}
 
-			[editSheetSegmentControl setEnabled:NO forSegment:HexSegment];
-			[editSheetSegmentControl setSelectedSegment:TextSegment];
-			[self showEditText:YES];
-		}
-		else {
-			// If the input is a JSON type column we can format it.
-			// Since MySQL internally stores JSON in binary, it does not retain any formatting
-      BOOL useSoftIndent = [prefs boolForKey:SPCustomQuerySoftIndent];
-      NSInteger indentWidth = [prefs integerForKey:SPCustomQuerySoftIndentWidth];
+				if (isBinary) {
+					stringValue	= [[NSString alloc] initWithFormat:@"0x%@", [sheetEditData dataToHexString]];
+				}
 
-			do {
-				if (_isJSON) {
-          NSString *formatted = [SPJSONFormatter stringByFormattingString:sheetEditData useSoftIndent:useSoftIndent indentWidth:indentWidth];
-					if (formatted) {
-						stringValue = formatted;
-						break;
+				[editSheetSegmentControl setSelectedSegment:HexSegment];
+				[self showHexText:YES];
+			}
+			else if ([sheetEditData isKindOfClass:[SPMySQLGeometryData class]]) {
+				SPGeometryDataView *v = [[SPGeometryDataView alloc] initWithCoordinates:[sheetEditData coordinates] targetDimension:2000.0f];
+				image = [v thumbnailImage];
+				stringValue = [sheetEditData wktString];
+
+				[editSheetSegmentControl setEnabled:NO forSegment:HexSegment];
+				[editSheetSegmentControl setSelectedSegment:TextSegment];
+				[self showEditText:YES];
+			}
+			else {
+				// If the input is a JSON type column we can format it.
+				// Since MySQL internally stores JSON in binary, it does not retain any formatting
+				BOOL useSoftIndent = [prefs boolForKey:SPCustomQuerySoftIndent];
+				NSInteger indentWidth = [prefs integerForKey:SPCustomQuerySoftIndentWidth];
+
+				do {
+					if (_isJSON) {
+						NSString *formatted = [SPJSONFormatter stringByFormattingString:sheetEditData useSoftIndent:useSoftIndent indentWidth:indentWidth];
+						if (formatted) {
+							stringValue = formatted;
+							break;
+						}
 					}
-				}
-				stringValue = sheetEditData;
-			} while(0);
+					stringValue = sheetEditData;
+				} while(0);
 
-			[hexTextView setString:@""];
-
-			[self showEditText:YES];
-			[editSheetSegmentControl setSelectedSegment:TextSegment];
-		}
-
-		[editImage setImage:image];
-		if (image) {
-			[editSheetSegmentControl setEnabled:YES forSegment:ImageSegment];
-			if(!_isGeometry) {
-				[self showImage:YES];
-				[editSheetSegmentControl setSelectedSegment:ImageSegment];
-			}
-		}
-
-		if (stringValue) {
-			[editTextView setString:stringValue];
-
-			if (image == nil) {
-				if (!isBinary) {
-					[self showHexText:NO];
-				}
-				else {
-					[editSheetSegmentControl setEnabled:NO forSegment:ImageSegment];
-				}
+				[hexTextView setString:@""];
 
 				[self showEditText:YES];
 				[editSheetSegmentControl setSelectedSegment:TextSegment];
 			}
 
-			// Locate the caret in editTextView
-			// (restore a given selection coming from the in-cell editing mode)
-			NSRange selRange = [callerInstance fieldEditorSelectedRange];
-
-			[editTextView setSelectedRange:selRange];
-			[callerInstance setFieldEditorSelectedRange:NSMakeRange(0,0)];
-
-			// If the string content is NULL select NULL for convenience
-			if ([stringValue isEqualToString:[prefs objectForKey:SPNullValue]]) {
-				[editTextView setSelectedRange:NSMakeRange(0,[[editTextView string] length])];
+			[editImage setImage:image];
+			if (image) {
+				[editSheetSegmentControl setEnabled:YES forSegment:ImageSegment];
+				if(!_isGeometry) {
+					[self showImage:YES];
+					[editSheetSegmentControl setSelectedSegment:ImageSegment];
+				}
 			}
 
-			// Set focus
-			[usedSheet makeFirstResponder:image == nil || _isGeometry ? editTextView : editImage];
-		}
+			if (stringValue) {
+				[editTextView setString:stringValue];
 
-		editSheetWillBeInitialized = NO;
-		[editSheetProgressBar stopAnimation:self];
+				if (image == nil) {
+					if (!isBinary) {
+						[self showHexText:NO];
+					}
+					else {
+						[editSheetSegmentControl setEnabled:NO forSegment:ImageSegment];
+					}
+
+					[self showEditText:YES];
+					[editSheetSegmentControl setSelectedSegment:TextSegment];
+				}
+
+				// Locate the caret in editTextView
+				// (restore a given selection coming from the in-cell editing mode)
+				NSRange selRange = [callerInstance fieldEditorSelectedRange];
+
+				[editTextView setSelectedRange:selRange];
+				[callerInstance setFieldEditorSelectedRange:NSMakeRange(0,0)];
+
+				// If the string content is NULL select NULL for convenience
+				if ([stringValue isEqualToString:[prefs objectForKey:SPNullValue]]) {
+					[editTextView setSelectedRange:NSMakeRange(0,[[editTextView string] length])];
+				}
+
+				// Set focus
+				[usedSheet makeFirstResponder:image == nil || _isGeometry ? editTextView : editImage];
+			}
+
+			if (deferTextLoading && _isEditable) [editSheetOkButton setEnabled:YES];
+			editSheetWillBeInitialized = NO;
+			[editSheetProgressBar stopAnimation:self];
+		};
+
+		if (deferTextLoading) {
+			dispatch_async(dispatch_get_main_queue(), populateEditSheet);
+		}
+		else {
+			populateEditSheet();
+		}
 	}
 }
 
@@ -662,8 +697,14 @@ typedef enum {
 		}
 	}
 
-	[NSApp endSheet:usedSheet returnCode:editSheetReturnCode];
-	[usedSheet orderOut:self];
+	NSWindow *sheetToClose = usedSheet;
+	[NSApp endSheet:sheetToClose returnCode:editSheetReturnCode];
+	[sheetToClose orderOut:self];
+
+	if (restoresUsedSheetAnimationBehavior && [sheetToClose respondsToSelector:@selector(setAnimationBehavior:)]) {
+		[sheetToClose setAnimationBehavior:usedSheetAnimationBehavior];
+		restoresUsedSheetAnimationBehavior = NO;
+	}
 
 	if(callerInstance) {
 		id returnData = ( editSheetReturnCode && _isEditable ) ? (_isGeometry) ? [editTextView string] : sheetEditData : nil;
@@ -685,12 +726,23 @@ typedef enum {
 	}
 
 	if (usedSheet == editSheet) {
-		[editTextView setString:@""];
-		[hexTextView setString:@""];
-		[jsonTextView setString:@""];
-		[editImage setImage:nil];
-		stringValue = nil;
-		sheetEditData = nil;
+		void (^clearEditSheetData)(void) = ^{
+			if ([self->editSheet isVisible]) return;
+
+			[self->editTextView setString:@""];
+			[self->hexTextView setString:@""];
+			[self->jsonTextView setString:@""];
+			[self->editImage setImage:nil];
+			self->stringValue = nil;
+			self->sheetEditData = nil;
+		};
+
+		if ([[contextInfo objectForKey:@"disableSheetAnimation"] boolValue]) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), clearEditSheetData);
+		}
+		else {
+			clearEditSheetData();
+		}
 	}
 }
 

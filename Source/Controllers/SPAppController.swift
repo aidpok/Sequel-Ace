@@ -331,6 +331,28 @@ extension SPAppController {
 }
 
 extension SPAppController {
+    @objc func installFastQuitMenuAction() {
+        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
+
+        for item in appMenu.items where item.action == #selector(NSApplication.terminate(_:)) {
+            item.target = self
+            item.action = #selector(promptedTerminate(_:))
+            return
+        }
+    }
+
+    @objc func promptedTerminate(_ sender: Any?) {
+        if NSApp.keyWindow != nil,
+           UserDefaults.standard.bool(forKey: SPApplicationPromptOnQuit),
+           !dialogOKCancel(question: NSLocalizedString("Close the app?", comment: "quitting app informal alert title"),
+                           text: NSLocalizedString("Are you sure you want to quit the app?", comment: "quitting app informal alert body")) {
+            return
+        }
+
+        fastQuitConfirmationApproved = true
+        NSApp.terminate(sender)
+    }
+
     @objc func dialogOKCancel(question: String, text: String) -> Bool {
         let alert = NSAlert()
         alert.messageText = question
@@ -338,6 +360,7 @@ extension SPAppController {
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.window.animationBehavior = .none
         return alert.runModal() == .alertFirstButtonReturn
     }
 }

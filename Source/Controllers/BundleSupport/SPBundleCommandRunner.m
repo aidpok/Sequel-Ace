@@ -284,7 +284,7 @@ static NSString * const SPBundlePythonRuntimeRemovalURL = @"https://developer.ap
         for (SPWindow *window in [NSApp orderedWindows]) {
             if ([[window windowController] isKindOfClass:[SPWindowController class]]) {
                 // Check if connected
-                SPDatabaseDocument *document = [(SPWindowController *)[window windowController] databaseDocument];
+                SPDatabaseDocument *document = [(SPWindowController *)[window windowController] loadedDatabaseDocumentIfAvailable];
                 if ([document getConnection]) {
                     databaseDocument = document;
                 } else {

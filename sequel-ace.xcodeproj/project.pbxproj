@@ -247,6 +247,7 @@
 		51B09FEC2F7696C7003BAFFF /* SAConnectionWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51B09FEB2F7696C7003BAFFF /* SAConnectionWindowController.swift */; };
 		51BC153325BE13C400F1CDC9 /* SALightweightContentViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */; };
 		51BC153525BE13C400F1CDC9 /* SALightweightQueryViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */; };
+		51BC154125BE13C400F1CDC9 /* SALightweightResultGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */; };
 		51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */; };
 		51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */; };
 		51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */; };
@@ -967,6 +968,7 @@
 		51BC14F725BE135500F1CDC9 /* SPWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPWindowController.swift; sourceTree = "<group>"; };
 		51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightContentViewController.swift; sourceTree = "<group>"; };
 		51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightQueryViewController.swift; sourceTree = "<group>"; };
+		51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightResultGrid.swift; sourceTree = "<group>"; };
 		51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightStructureViewController.swift; sourceTree = "<group>"; };
 		51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightTableInfoViewController.swift; sourceTree = "<group>"; };
 		51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightMetadataViewController.swift; sourceTree = "<group>"; };
@@ -1696,6 +1698,7 @@
 				51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */,
 				51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */,
 				51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */,
+				51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */,
 				51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */,
 				51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */,
 				51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */,
@@ -3169,6 +3172,7 @@
 				51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */,
 				51BC153325BE13C400F1CDC9 /* SALightweightContentViewController.swift in Sources */,
 				51BC153525BE13C400F1CDC9 /* SALightweightQueryViewController.swift in Sources */,
+				51BC154125BE13C400F1CDC9 /* SALightweightResultGrid.swift in Sources */,
 				51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */,
 				51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */,
 				51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */,

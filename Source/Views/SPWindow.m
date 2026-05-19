@@ -63,6 +63,14 @@
 
 		unichar theCharacter = [[theEvent charactersIgnoringModifiers] characterAtIndex:0];
 
+		if (theCharacter == 'q' && (([theEvent modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask) == NSEventModifierFlagCommand)) {
+			id appDelegate = [NSApp delegate];
+			if ([appDelegate respondsToSelector:@selector(promptedTerminate:)]) {
+				[appDelegate promptedTerminate:self];
+				return;
+			}
+		}
+
 		// ⌃⎋ sends a right-click to order front the context menu under the first responder's visible Rect
 		if ([theEvent keyCode] == 53 && (([theEvent modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask) == (NSEventModifierFlagOption))) {
 

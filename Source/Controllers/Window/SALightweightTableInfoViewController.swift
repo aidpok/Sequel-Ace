@@ -728,7 +728,13 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
                                of object: Any?,
                                change: [NSKeyValueChangeKey: Any]?,
                                context: UnsafeMutableRawPointer?) {
-        if keyPath == SPDisplayTableViewVerticalGridlines || keyPath == SPGlobalFontSettings {
+        if keyPath == SPDisplayTableViewVerticalGridlines {
+            tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+            tableView.setNeedsDisplay(tableView.visibleRect)
+            return
+        }
+
+        if keyPath == SPGlobalFontSettings {
             applyTablePreferences()
             return
         }
@@ -746,7 +752,6 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         rows = []
         tableView.reloadData()
         clearForm()
-        syntaxTextView.string = ""
         formView.isHidden = true
 
         placeholderLabel.stringValue = message
@@ -773,7 +778,6 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         clearForm()
         typePopUpButton.addItem(withTitle: NSLocalizedString("loading...", comment: "table info loading row"))
         typePopUpButton.isEnabled = false
-        syntaxTextView.string = ""
         tableView.reloadData()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -1008,9 +1012,16 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
     @objc private func tableRowAutoIncrementWasEdited(_ sender: NSTextField) {
         sender.isEditable = false
+        let currentAutoIncrement = currentSnapshot?.values["Auto_increment"] ?? ""
 
         guard let value = NumberFormatter.decimalStyleFormatter.number(from: sender.stringValue) else {
-            reloadCurrentTableInfo()
+            sender.stringValue = currentAutoIncrement
+            return
+        }
+
+        if let currentValue = NumberFormatter.decimalStyleFormatter.number(from: currentAutoIncrement),
+           currentValue.uint64Value == value.uint64Value {
+            sender.stringValue = currentAutoIncrement
             return
         }
 
@@ -1082,6 +1093,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
         if useQueryWarning && UserDefaults.standard.bool(forKey: SPQueryWarningEnabled) {
             let alert = NSAlert()
+            alert.window.animationBehavior = .none
             alert.messageText = NSLocalizedString("Execute SQL?", comment: "Execute SQL?")
             alert.informativeText = String(format: NSLocalizedString("Do you really want to proceed with this query?\n\n %@", comment: "message of panel asking for confirmation for exec query"), query)
             alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))

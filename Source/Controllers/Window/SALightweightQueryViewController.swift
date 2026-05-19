@@ -29,38 +29,6 @@
 
 import AppKit
 
-private let SALightweightCopyWithColumnsTag = 2002
-private let SALightweightCopyAsSQLTag = 2003
-private let SALightweightCopyAsSQLNoAutoIncTag = 2004
-
-private final class SALightweightQueryTableView: NSTableView {
-    weak var queryController: SALightweightQueryViewController?
-
-    @objc(copy:)
-    func copy(_ sender: Any?) {
-        if let menuItem = sender as? NSMenuItem,
-           menuItem.tag == SALightweightCopyAsSQLTag || menuItem.tag == SALightweightCopyAsSQLNoAutoIncTag {
-            queryController?.copySelectedResultRowsAsSQL(sender)
-            return
-        }
-
-        queryController?.copySelectedResultRows(sender)
-    }
-
-    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(copy(_:)) {
-            return numberOfSelectedRows > 0
-        }
-
-        return super.validateUserInterfaceItem(item)
-    }
-
-    override func menu(for event: NSEvent) -> NSMenu? {
-        queryController?.prepareResultContextMenu(for: event)
-        return super.menu(for: event)
-    }
-}
-
 @objcMembers
 private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
     weak var queryController: SALightweightQueryViewController?
@@ -142,6 +110,7 @@ final class SALightweightQueryViewController: NSViewController {
     private lazy var fieldEditor = SPFieldEditorController()
     private var favoritesManager: SPQueryFavoriteManager?
     private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
+    private var isFieldEditorPresented = false
     private lazy var favoriteDocumentProxy = SALightweightQueryFavoriteDocumentProxy(queryController: self)
     private let maxDisplayedRows = 10_000
     private var baseStatusText = NSLocalizedString("Ready", comment: "lightweight query ready status")
@@ -201,8 +170,6 @@ final class SALightweightQueryViewController: NSViewController {
     private static let queryEditorInitialHeightRatio: CGFloat = 142.0 / 387.0
     private static let queryEditorMinimumInitialHeight: CGFloat = 143.0
     private static let queryEditorMaximumInitialHeight: CGFloat = 360.0
-    private static let tabularPasteboardType = NSPasteboard.PasteboardType("public.utf8-tab-separated-values-text")
-
     private lazy var actionButton: NSPopUpButton = {
         let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 35, height: 25), pullsDown: true)
         button.bezelStyle = .regularSquare
@@ -246,22 +213,17 @@ final class SALightweightQueryViewController: NSViewController {
         return textView
     }()
 
-    private lazy var tableView: SALightweightQueryTableView = {
-        let tableView = SALightweightQueryTableView(frame: .zero)
+    private lazy var tableView: SALightweightResultGridTableView = {
+        let tableView = SALightweightResultGridTableView(frame: .zero)
         tableView.identifier = NSUserInterfaceItemIdentifier("LightweightQueryTable")
-        tableView.queryController = self
+        tableView.resultGridDelegate = self
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.allowsColumnReordering = true
-        tableView.allowsColumnResizing = true
-        tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
-        tableView.intercellSpacing = NSSize(width: 3, height: 2)
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height
-        tableView.registerForDraggedTypes([Self.tabularPasteboardType, .string])
+        tableView.allowsExpansionToolTips = false
+        SALightweightResultGrid.configureTableView(tableView,
+                                                   rowHeight: 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height,
+                                                   columnAutoresizingStyle: .lastColumnOnlyAutoresizingStyle)
         return tableView
     }()
 
@@ -377,6 +339,7 @@ final class SALightweightQueryViewController: NSViewController {
         resultScrollView.hasVerticalScroller = true
         resultScrollView.hasHorizontalScroller = true
         resultScrollView.autohidesScrollers = true
+        SALightweightResultGrid.configureScrollView(resultScrollView)
         resultScrollView.documentView = tableView
 
         infoTextScrollView.borderType = .noBorder
@@ -541,7 +504,7 @@ final class SALightweightQueryViewController: NSViewController {
         switch keyPath {
         case SPDisplayTableViewVerticalGridlines:
             tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-            tableView.reloadData()
+            tableView.setNeedsDisplay(tableView.visibleRect)
         case SPGlobalFontSettings:
             updateAppearanceFromPreferences()
         case SPDisplayTableViewColumnTypes:
@@ -682,7 +645,6 @@ private extension SALightweightQueryViewController {
         }
         updateQueryInteractionInterface()
         rebuildColumns()
-        tableView.reloadData()
     }
 
     func configureControlsIfNeeded() {
@@ -722,51 +684,13 @@ private extension SALightweightQueryViewController {
     }
 
     func configureResultContextMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = true
-
-        let copyItem = NSMenuItem(title: NSLocalizedString("Copy", comment: "copy result rows menu item"),
-                                  action: #selector(copySelectedResultRows(_:)),
-                                  keyEquivalent: "")
-        copyItem.target = self
-        menu.addItem(copyItem)
-
-        let copyWithColumnsItem = NSMenuItem(title: NSLocalizedString("Copy With Column Names", comment: "copy result rows with column names menu item"),
-                                             action: #selector(copySelectedResultRows(_:)),
-                                             keyEquivalent: "")
-        copyWithColumnsItem.target = self
-        copyWithColumnsItem.tag = SALightweightCopyWithColumnsTag
-        menu.addItem(copyWithColumnsItem)
-
-        let copyAsSQLItem = NSMenuItem(title: NSLocalizedString("Copy as SQL INSERT", comment: "copy result rows as SQL INSERT menu item"),
-                                       action: #selector(copySelectedResultRowsAsSQL(_:)),
-                                       keyEquivalent: "")
-        copyAsSQLItem.target = self
-        copyAsSQLItem.tag = SALightweightCopyAsSQLTag
-        menu.addItem(copyAsSQLItem)
-
-        let copyAsSQLNoAutoIncItem = NSMenuItem(title: NSLocalizedString("Copy as SQL INSERT (no auto_inc)", comment: "copy result rows as SQL INSERT without auto increment menu item"),
-                                                action: #selector(copySelectedResultRowsAsSQL(_:)),
-                                                keyEquivalent: "")
-        copyAsSQLNoAutoIncItem.target = self
-        copyAsSQLNoAutoIncItem.tag = SALightweightCopyAsSQLNoAutoIncTag
-        menu.addItem(copyAsSQLNoAutoIncItem)
-
-        menu.addItem(.separator())
-
-        let exportCSVItem = NSMenuItem(title: NSLocalizedString("Export Result as CSV...", comment: "export result as csv context menu item"),
-                                       action: #selector(exportQueryResultAsCSV(_:)),
-                                       keyEquivalent: "")
-        exportCSVItem.target = self
-        menu.addItem(exportCSVItem)
-
-        let exportXMLItem = NSMenuItem(title: NSLocalizedString("Export Result as XML...", comment: "export result as xml context menu item"),
-                                       action: #selector(exportQueryResultAsXML(_:)),
-                                       keyEquivalent: "")
-        exportXMLItem.target = self
-        menu.addItem(exportXMLItem)
-
-        tableView.menu = menu
+        tableView.menu = SALightweightResultGrid.contextMenu(target: self,
+                                                             copyAction: #selector(copySelectedResultRows(_:)),
+                                                             copySQLAction: #selector(copySelectedResultRowsAsSQL(_:)),
+                                                             exportCSVAction: #selector(exportQueryResultAsCSV(_:)),
+                                                             exportXMLAction: #selector(exportQueryResultAsXML(_:)),
+                                                             copyCommentPrefix: "query",
+                                                             exportCommentPrefix: "query")
     }
 
     func configureActionMenu() {
@@ -1170,6 +1094,7 @@ private extension SALightweightQueryViewController {
         if UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
            queriesContainDestructiveSQL(runnableQueries) {
             let alert = NSAlert()
+            alert.window.animationBehavior = .none
             alert.messageText = NSLocalizedString("Execute SQL?", comment: "execute sql alert title")
             alert.informativeText = destructiveQueryWarning(for: runnableQueries)
             alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "execute sql proceed button"))
@@ -1413,6 +1338,7 @@ private extension SALightweightQueryViewController {
 
     private func multiQueryErrorChoice(for error: String) -> MultiQueryErrorChoice {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("MySQL Error", comment: "mysql error message")
         alert.informativeText = error
         alert.addButton(withTitle: NSLocalizedString("Run All", comment: "run all button"))
@@ -1458,10 +1384,13 @@ private extension SALightweightQueryViewController {
     func updateCurrentQueryRange() {
         let selection = queryTextView.selectedRange()
         let caretPosition = selection.location
+        let previousQueryRange = currentQueryRange
         currentQueryBeforeCaret = true
         currentQueryRange = queryRange(at: caretPosition, lookBehind: &currentQueryBeforeCaret)
         queryTextView.queryRange = currentQueryRange
-        queryTextView.setNeedsDisplay(queryTextView.bounds)
+        if previousQueryRange != currentQueryRange {
+            queryTextView.setNeedsDisplay(queryTextView.visibleRect)
+        }
         updateActionMenuState()
 
         if !historyItemWasJustInserted {
@@ -1897,6 +1826,7 @@ private extension SALightweightQueryViewController {
 
     @objc func clearQueryHistory(_ sender: Any?) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Clear History?", comment: "clear history message")
         alert.informativeText = NSLocalizedString("Are you sure you want to clear the lightweight query history? This action cannot be undone.", comment: "clear history confirmation message")
         alert.addButton(withTitle: NSLocalizedString("Clear", comment: "clear button"))
@@ -1923,6 +1853,7 @@ private extension SALightweightQueryViewController {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
             let alert = NSAlert()
+            alert.window.animationBehavior = .none
             alert.messageText = NSLocalizedString("Empty query", comment: "empty query message")
             alert.informativeText = NSLocalizedString("Cannot save an empty query.", comment: "empty query informative message")
             alert.runModal()
@@ -1944,6 +1875,7 @@ private extension SALightweightQueryViewController {
         accessoryView.addSubview(globalCheckbox)
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Save Query to Favorites", comment: "save query favorite alert title")
         alert.informativeText = NSLocalizedString("Enter a name for the query favorite.", comment: "save query favorite alert message")
         alert.accessoryView = accessoryView
@@ -2023,8 +1955,7 @@ private extension SALightweightQueryViewController {
         if columnSignature == displayedColumnSignature,
            tableView.tableColumns.count == columnDefinitions.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
-            tableView.reloadData()
-            autosizeResultColumns()
+            tableView.headerView?.needsDisplay = true
             return
         }
 
@@ -2137,7 +2068,7 @@ private extension SALightweightQueryViewController {
                 continue
             }
 
-            widthsByIdentifier[tableColumn.identifier.rawValue] = autodetectedResultWidth(for: tableColumn, columnIndex: columnIndex, maxRows: 160)
+            widthsByIdentifier[tableColumn.identifier.rawValue] = autodetectedResultWidth(for: tableColumn, columnIndex: columnIndex, maxRows: 64)
         }
 
         for tableColumn in tableView.tableColumns {
@@ -2147,10 +2078,7 @@ private extension SALightweightQueryViewController {
     }
 
     func reloadCell(row: Int, columnIndex: Int) {
-        guard row >= 0, row < tableView.numberOfRows,
-              columnIndex >= 0, columnIndex < tableView.tableColumns.count else { return }
-
-        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: columnIndex))
+        SALightweightResultGrid.reloadCell(in: tableView, row: row, columnIndex: columnIndex)
     }
 
     func autodetectedResultWidth(for tableColumn: NSTableColumn, columnIndex: Int, maxRows: Int) -> CGFloat {
@@ -2167,9 +2095,6 @@ private extension SALightweightQueryViewController {
 
     func visibleDisplayRowsForResultAutosizing(maxRows: Int) -> [[String]] {
         guard maxRows > 0, !displayRows.isEmpty else { return [] }
-        if maxRows > 160 {
-            return Array(displayRows.prefix(maxRows))
-        }
 
         let visibleRange = tableView.rows(in: tableView.visibleRect)
         let start = visibleRange.length > 0 ? visibleRange.location : 0
@@ -2322,28 +2247,23 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func copySelectedResultRows(_ sender: Any?) {
-        let includeHeaders = (sender as? NSMenuItem)?.tag == SALightweightCopyWithColumnsTag
+        let includeHeaders = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyWithColumnsTag
         guard let copyString = resultRowsAsTabString(includeHeaders: includeHeaders, rowIndexes: tableView.selectedRowIndexes) else {
             NSSound.beep()
             return
         }
 
-        let pasteboard = NSPasteboard.general
-        pasteboard.declareTypes([Self.tabularPasteboardType, .string], owner: nil)
-        pasteboard.setString(copyString, forType: Self.tabularPasteboardType)
-        pasteboard.setString(copyString, forType: .string)
+        SALightweightResultGrid.copyStringToPasteboard(copyString)
     }
 
     @objc func copySelectedResultRowsAsSQL(_ sender: Any?) {
-        let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightCopyAsSQLNoAutoIncTag
+        let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
         guard let copyString = resultRowsAsSQLInserts(rowIndexes: tableView.selectedRowIndexes, skipAutoIncrement: skipAutoIncrement) else {
             NSSound.beep()
             return
         }
 
-        let pasteboard = NSPasteboard.general
-        pasteboard.declareTypes([.string], owner: nil)
-        pasteboard.setString(copyString, forType: .string)
+        SALightweightResultGrid.copySQLStringToPasteboard(copyString)
     }
 
     func exportQueryResult(fileExtension: String, content: String) {
@@ -2352,60 +2272,21 @@ private extension SALightweightQueryViewController {
             return
         }
 
-        let panel = NSSavePanel()
-        panel.allowedFileTypes = [fileExtension]
-        panel.isExtensionHidden = false
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "query_result.\(fileExtension)"
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        do {
-            try content.write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            let alert = NSAlert(error: error)
-            alert.runModal()
-        }
+        SALightweightResultGrid.exportResult(fileExtension: fileExtension, content: content, defaultName: "query_result.\(fileExtension)")
     }
 
     func csvStringForCurrentResult() -> String {
-        var lines = [tableView.tableColumns.enumerated().map { csvEscaped(columnName(forVisibleColumn: $0.offset, tableColumn: $0.element)) }.joined(separator: ",")]
-        lines.append(contentsOf: rows.map { row in
-            tableView.tableColumns.map { tableColumn in
-                guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < row.count else { return csvEscaped("") }
-                return csvEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex)))
-            }.joined(separator: ",")
-        })
-        return lines.joined(separator: "\n")
+        return SALightweightResultGrid.csvString(rowCount: rows.count,
+                                                 tableColumns: tableView.tableColumns,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.resultDisplayValue(row: $0, tableColumn: $1) })
     }
 
     func xmlStringForCurrentResult() -> String {
-        var lines = ["<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "<resultset>"]
-        for row in rows {
-            lines.append("\t<row>")
-            for (visibleColumn, tableColumn) in tableView.tableColumns.enumerated() {
-                guard let columnIndex = Int(tableColumn.identifier.rawValue) else { continue }
-                let name = xmlEscaped(columnName(forVisibleColumn: visibleColumn, tableColumn: tableColumn))
-                let value = columnIndex < row.count ? xmlEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex))) : ""
-                lines.append("\t\t<field name=\"\(name)\">\(value)</field>")
-            }
-            lines.append("\t</row>")
-        }
-        lines.append("</resultset>")
-        return lines.joined(separator: "\n")
-    }
-
-    func csvEscaped(_ value: String) -> String {
-        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
-    }
-
-    func xmlEscaped(_ value: String) -> String {
-        return value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        return SALightweightResultGrid.xmlString(rowCount: rows.count,
+                                                 tableColumns: tableView.tableColumns,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.resultDisplayValue(row: $0, tableColumn: $1) })
     }
 
     func columnName(for index: Int, definition: NSDictionary) -> String {
@@ -2420,24 +2301,26 @@ private extension SALightweightQueryViewController {
         return columnName(for: columnIndex, definition: columnDefinitions[columnIndex])
     }
 
+    func columnName(for tableColumn: NSTableColumn) -> String {
+        let visibleColumn = tableView.tableColumns.firstIndex(of: tableColumn) ?? 0
+        return columnName(forVisibleColumn: visibleColumn, tableColumn: tableColumn)
+    }
+
+    func resultDisplayValue(row: Int, tableColumn: NSTableColumn) -> String? {
+        guard row < rows.count,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
+              columnIndex < rows[row].count else { return nil }
+
+        return displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex))
+    }
+
     func resultRowsAsTabString(includeHeaders: Bool, rowIndexes: IndexSet) -> String? {
-        guard !rowIndexes.isEmpty else { return nil }
-
-        var lines: [String] = []
-        if includeHeaders {
-            lines.append(tableView.tableColumns.enumerated().map { copyEscaped(columnName(forVisibleColumn: $0.offset, tableColumn: $0.element)) }.joined(separator: "\t"))
-        }
-
-        rowIndexes.forEach { rowIndex in
-            guard rowIndex < rows.count else { return }
-            let row = rows[rowIndex]
-            lines.append(tableView.tableColumns.map { tableColumn in
-                guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < row.count else { return "" }
-                return copyEscaped(displayString(for: row[columnIndex], columnDefinition: columnDefinition(at: columnIndex)))
-            }.joined(separator: "\t"))
-        }
-
-        return lines.joined(separator: "\n")
+        return SALightweightResultGrid.tabString(includeHeaders: includeHeaders,
+                                                 rowIndexes: rowIndexes,
+                                                 tableColumns: tableView.tableColumns,
+                                                 rowCount: rows.count,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.resultDisplayValue(row: $0, tableColumn: $1) })
     }
 
     func resultRowsAsSQLInserts(rowIndexes: IndexSet, skipAutoIncrement: Bool) -> String? {
@@ -2531,12 +2414,6 @@ private extension SALightweightQueryViewController {
         }
 
         return sqlValue(forStoredObject: value, columnDefinition: columnDefinition, connection: connection)
-    }
-
-    func copyEscaped(_ value: String) -> String {
-        return value
-            .replacingOccurrences(of: "\n", with: "\u{21B5}")
-            .replacingOccurrences(of: "\t", with: "\u{21E5}")
     }
 
     func updateActionMenuState() {
@@ -2801,46 +2678,23 @@ private extension SALightweightQueryViewController {
               columnIndex < columnDefinitions.count,
               columnIndex < rows[row].count else { return false }
 
-        if UserDefaults.standard.bool(forKey: SPEditInSheetEnabled) {
-            return true
-        }
-
         let columnDefinition = columnDefinitions[columnIndex]
         let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
         let value = rows[row][columnIndex]
-
-        if value is NSNull {
-            return false
-        }
-
-        if typeGrouping == "blobdata" || value is Data {
-            return true
-        }
-
-        let displayValue = displayString(for: value, columnDefinition: columnDefinition, truncate: false)
-
-        if UserDefaults.standard.bool(forKey: SPEditInSheetForLongText),
-           let threshold = UserDefaults.standard.object(forKey: SPEditInSheetForLongTextLengthThreshold) as? NSNumber,
-           displayValue.count > threshold.intValue {
-            return true
-        }
-
-        if UserDefaults.standard.bool(forKey: SPEditInSheetForMultiLineText),
-           displayValue.rangeOfCharacter(from: .newlines) != nil {
-            return true
-        }
-
-        return false
+        return SALightweightResultGrid.shouldUseFieldEditor(typeGrouping: typeGrouping, value: value, displayValue: displayString(for: value, columnDefinition: columnDefinition, truncate: false))
     }
 
     func openFieldEditor(row: Int, column columnIndex: Int) {
-        guard row >= 0,
+        guard !isFieldEditorPresented,
+              row >= 0,
               row < rows.count,
               columnIndex >= 0,
               columnIndex < columnDefinitions.count,
               columnIndex < rows[row].count,
-              let connection else { return }
+              let connection,
+              let window = view.window else { return }
 
+        isFieldEditorPresented = true
         let columnDefinition = columnDefinitions[columnIndex]
         let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
         let isBlob = typeGrouping == "textdata" || typeGrouping == "blobdata"
@@ -2889,23 +2743,19 @@ private extension SALightweightQueryViewController {
                     usingEncoding: connection.stringEncoding(),
                     isObjectBlob: isBlob,
                     isEditable: isEditable,
-                    with: view.window,
+                    with: window,
                     sender: self,
                     contextInfo: [
                         "rowIndex": NSNumber(value: row),
                         "columnIndex": NSNumber(value: columnIndex),
-                        "isFieldEditable": NSNumber(value: isEditable)
+                        "isFieldEditable": NSNumber(value: isEditable),
+                        "disableSheetAnimation": NSNumber(value: true),
+                        "deferTextLoading": NSNumber(value: true)
                     ])
     }
 
     func prepareResultContextMenu(for event: NSEvent) {
-        let point = tableView.convert(event.locationInWindow, from: nil)
-        let clickedRow = tableView.row(at: point)
-
-        if clickedRow >= 0 && !tableView.selectedRowIndexes.contains(clickedRow) {
-            tableView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
-        }
-
+        SALightweightResultGrid.selectContextRow(in: tableView, event: event)
         updateStatusSelectionSuffix()
     }
 
@@ -3071,24 +2921,12 @@ private extension SALightweightQueryViewController {
         return "ST_GeomFromText(\(Self.singleQuoted(textPart))\(sridPart))"
     }
 
-    func matchingRowCount(for query: String, connection: SPMySQLConnection) -> Int? {
-        guard let result = connection.queryString(query) else { return nil }
-
-        result.returnDataAsStrings = true
-        result.defaultRowReturnType = SPMySQLResultRowAsArray
-
-        guard let row = result.getRowAsArray(),
-              let value = row.first else { return nil }
-
-        return Int(String(describing: value))
-    }
-
     static func backtickQuoted(_ value: String) -> String {
-        "`\(value.replacingOccurrences(of: "`", with: "``"))`"
+        SALightweightResultGrid.backtickQuoted(value)
     }
 
     static func singleQuoted(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+        SALightweightResultGrid.singleQuoted(value)
     }
 
     static func dictionaryBool(_ dictionary: NSDictionary, key: String) -> Bool {
@@ -3112,7 +2950,7 @@ extension SALightweightQueryViewController {
     @objc(processFieldEditorResult:contextInfo:)
     func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
         defer {
-            view.window?.makeFirstResponder(tableView)
+            isFieldEditorPresented = false
         }
 
         guard let data,
@@ -3256,7 +3094,7 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
             return !isRunning && tableView.numberOfSelectedRows > 0
 
         case #selector(copySelectedResultRowsAsSQL(_:)):
-            return !isRunning && tableView.numberOfSelectedRows > 0 && !sqlInsertColumnIndexes(skipAutoIncrement: menuItem.tag == SALightweightCopyAsSQLNoAutoIncTag).isEmpty
+            return !isRunning && tableView.numberOfSelectedRows > 0 && !sqlInsertColumnIndexes(skipAutoIncrement: menuItem.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag).isEmpty
 
         case #selector(exportQueryResultAsCSV(_:)), #selector(exportQueryResultAsXML(_:)):
             return !isRunning && !rows.isEmpty
@@ -3286,6 +3124,24 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
     }
 }
 
+extension SALightweightQueryViewController: SALightweightResultGridTableViewDelegate {
+    func resultGridTableViewCopyRows(_ sender: Any?) {
+        copySelectedResultRows(sender)
+    }
+
+    func resultGridTableViewCopyRowsAsSQL(_ sender: Any?) {
+        copySelectedResultRowsAsSQL(sender)
+    }
+
+    func resultGridTableViewCanCopyRows(_ tableView: NSTableView) -> Bool {
+        return tableView.numberOfSelectedRows > 0
+    }
+
+    func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {
+        prepareResultContextMenu(for: event)
+    }
+}
+
 extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         rows.count
@@ -3312,10 +3168,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
         guard let copyString = resultRowsAsTabString(includeHeaders: false, rowIndexes: rowIndexes) else { return false }
 
-        pasteboard.declareTypes([Self.tabularPasteboardType, .string], owner: nil)
-        pasteboard.setString(copyString, forType: Self.tabularPasteboardType)
-        pasteboard.setString(copyString, forType: .string)
-        return true
+        return SALightweightResultGrid.writeRows(copyString, to: pasteboard)
     }
 
     func tableView(_ tableView: NSTableView,
@@ -3330,8 +3183,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].count else { return "" }
 
-        let value = displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: false)
-        return value.count > 1 ? value : ""
+        return ""
     }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
@@ -3378,7 +3230,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                 _ = connection.selectDatabase(self.database)
             }
 
-            let matchingRows = self.matchingRowCount(for: update.countQuery, connection: connection)
+            let matchingRows = SALightweightResultGrid.matchingRowCount(for: update.countQuery, connection: connection)
             var error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
             if error == nil, matchingRows == 1 {
@@ -3439,7 +3291,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               columnIndex < columnDefinitions.count else { return 0 }
 
         clearSavedResultColumnWidth(for: columnDefinitions[columnIndex], fallbackIndex: columnIndex)
-        return autodetectedResultWidth(for: tableView.tableColumns[column], columnIndex: columnIndex, maxRows: 500)
+        return autodetectedResultWidth(for: tableView.tableColumns[column], columnIndex: columnIndex, maxRows: 128)
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
@@ -3455,7 +3307,8 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
-        guard tableView === self.tableView,
+        guard !isFieldEditorPresented,
+              tableView === self.tableView,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier) else { return false }
 
@@ -3547,10 +3400,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
     static func displayString(_ value: String, truncate: Bool) -> String {
         guard truncate else { return value }
-        let value = value as NSString
-        guard value.length > tableCellDisplayMaximumCharacters else { return value as String }
-
-        return value.substring(to: tableCellDisplayMaximumCharacters) + "..."
+        return SALightweightResultGrid.tableCellPreviewString(value, maximumCharacters: tableCellDisplayMaximumCharacters)
     }
 
     func shouldDisplayDataAsHex(columnDefinition: NSDictionary?) -> Bool {
@@ -3563,6 +3413,6 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
             || type.hasSuffix("blob")
     }
 
-    private static let tableCellDisplayMaximumCharacters = 256
-    private static let tableCellDisplayMaximumBytes = 128
+    private static let tableCellDisplayMaximumCharacters = 96
+    private static let tableCellDisplayMaximumBytes = 48
 }

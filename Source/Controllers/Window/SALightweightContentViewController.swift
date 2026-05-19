@@ -125,6 +125,8 @@ final class SALightweightContentViewController: NSViewController {
     private var displayedColumnSignature: [String] = []
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
+    private var advancedFilterWhereClause: String?
+    private var isAdvancedFilterDistinct = false
     private var columnFilterTerms: [String]?
     private var tableObjectType: TableObjectType = .unknown
     private var ruleFilterColumnsKey = ""
@@ -142,6 +144,8 @@ final class SALightweightContentViewController: NSViewController {
     private var isRestoringCachedContent = false
     private lazy var fieldEditor = SPFieldEditorController()
     private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
+    private var isFieldEditorPresented = false
+    private var deferredFieldEditorRequestID = 0
     private lazy var paginationViewController = SALightweightContentPaginationViewController()
     private lazy var paginationPopover: NSPopover = {
         let popover = NSPopover()
@@ -153,25 +157,6 @@ final class SALightweightContentViewController: NSViewController {
     var tableContentDidChange: (() -> Void)?
     private var limitResults: Bool {
         UserDefaults.standard.bool(forKey: SPLimitResults)
-    }
-
-    private static var diagnosticsEnabled: Bool {
-        if let environmentValue = ProcessInfo.processInfo.environment["SA_ENABLE_UI_DIAGNOSTICS"],
-           NSString(string: environmentValue).boolValue {
-            return true
-        }
-
-        return UserDefaults.standard.bool(forKey: "SAEnableUIDiagnostics")
-    }
-
-    private static func diagnosticsTime() -> TimeInterval {
-        ProcessInfo.processInfo.systemUptime
-    }
-
-    private static func diagnosticsLog(_ message: String) {
-        guard diagnosticsEnabled else { return }
-
-        NSLog("[SA Content Diagnostics] %@", message)
     }
 
     private var pageSize: Int {
@@ -245,21 +230,15 @@ final class SALightweightContentViewController: NSViewController {
     }()
 
     private lazy var tableView: NSTableView = {
-        let tableView = SPCopyTable(frame: .zero)
+        let tableView = SALightweightResultGridTableView(frame: .zero)
+        tableView.resultGridDelegate = self
         tableView.identifier = NSUserInterfaceItemIdentifier("TableContentTableView")
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.allowsColumnReordering = true
-        tableView.allowsColumnResizing = true
-        tableView.allowsMultipleSelection = true
-        tableView.allowsExpansionToolTips = true
+        tableView.allowsExpansionToolTips = false
         tableView.focusRingType = .none
-        tableView.intercellSpacing = NSSize(width: 3, height: 2)
-        tableView.columnAutoresizingStyle = .noColumnAutoresizing
+        SALightweightResultGrid.configureTableView(tableView, rowHeight: Self.tableRowHeight(for: UserDefaults.getFont()), columnAutoresizingStyle: .noColumnAutoresizing)
         tableView.style = .plain
-        tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
         return tableView
     }()
 
@@ -369,6 +348,7 @@ final class SALightweightContentViewController: NSViewController {
         scrollView.verticalLineScroll = 18
         scrollView.horizontalLineScroll = 18
         scrollView.contentView.drawsBackground = false
+        SALightweightResultGrid.configureScrollView(scrollView)
         scrollView.documentView = tableView
 
         let toolbarView = NSView(frame: .zero)
@@ -513,6 +493,7 @@ final class SALightweightContentViewController: NSViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(contentFiltersHaveBeenUpdated(_:)), name: .SPContentFiltersHaveBeenUpdated, object: nil)
         registerPreferenceObserversIfNeeded()
         applyTablePreferences(rebuildColumns: false)
+        configureContentContextMenu()
         paginationViewController.onGo = { [weak self] page in
             self?.navigateToPage(page)
         }
@@ -542,10 +523,9 @@ final class SALightweightContentViewController: NSViewController {
         switch keyPath {
         case SPDisplayTableViewVerticalGridlines:
             tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-            tableView.reloadData()
-            autosizeContentColumns()
+            tableView.setNeedsDisplay(tableView.visibleRect)
         case SPGlobalFontSettings:
-            applyTablePreferences(rebuildColumns: UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes))
+            applyTablePreferences(rebuildColumns: UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes), rebuildDisplayValues: false)
         case SPDisplayTableViewColumnTypes:
             rebuildColumns()
         case SPDisplayBinaryDataAsHex, SPNullValue:
@@ -581,6 +561,8 @@ final class SALightweightContentViewController: NSViewController {
         if tableChanged {
             columnFilterTerms = nil
             columnFilterSearchField.stringValue = ""
+            advancedFilterWhereClause = nil
+            isAdvancedFilterDistinct = false
         }
 
         if let tableKey = tableKey, restoreCachedContent(for: tableKey) {
@@ -592,6 +574,24 @@ final class SALightweightContentViewController: NSViewController {
         sortAscending = restoredContentState?.sortAscending ?? true
         applySortDescriptorsFromCurrentState()
 
+        loadCurrentPage()
+    }
+
+    func legacyFilterColumns() -> NSArray {
+        return columnInfo.enumerated().map { index, column -> NSDictionary in
+            let definition = NSMutableDictionary(dictionary: column.legacyDefinition)
+            definition["datacolumnindex"] = "\(index)"
+            return definition
+        } as NSArray
+    }
+
+    func applyAdvancedFilter(whereClause: String?, distinct: Bool) {
+        let trimmedFilter = whereClause?.trimmingCharacters(in: .whitespacesAndNewlines)
+        advancedFilterWhereClause = trimmedFilter?.isEmpty == false ? trimmedFilter : nil
+        isAdvancedFilterDistinct = distinct
+        isRuleFilterActive = false
+        pageIndex = 0
+        invalidateCurrentContentCache()
         loadCurrentPage()
     }
 }
@@ -726,8 +726,6 @@ private extension SALightweightContentViewController {
     private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool, tableKey: SALightweightSessionState.TableKey?, cachedColumnInfo: [ColumnInfo]?) {
         guard let connection = connection else { return }
 
-        let diagnosticsStart = Self.diagnosticsTime()
-        Self.diagnosticsLog("load start database=\(database) table=\(table) pageSize=\(pageSize) offset=\(offset) limitResults=\(limitResults) hasCachedColumnInfo=\(cachedColumnInfo != nil)")
         isLoading = true
         columns = []
         columnInfo = []
@@ -744,16 +742,9 @@ private extension SALightweightContentViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            let logStage: (String) -> Void = { stage in
-                Self.diagnosticsLog("load stage=\(stage) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - diagnosticsStart))s")
-            }
-
             _ = connection.selectDatabase(self.database)
-            logStage("selectDatabase")
             let tableObjectType = self.loadTableObjectType(connection: connection)
-            logStage("loadTableObjectType")
             let columnInfo = cachedColumnInfo ?? self.loadColumnInfo(connection: connection)
-            logStage("loadColumnInfo count=\(columnInfo.count) cached=\(cachedColumnInfo != nil)")
             if cachedColumnInfo == nil, let tableKey = tableKey, !columnInfo.isEmpty {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self, self.loadToken == token else { return }
@@ -764,11 +755,9 @@ private extension SALightweightContentViewController {
             let firstLimit = shouldLoadFirstBatch ? self.initialRowLoadPublishSize : pageSize + 1
             let firstQuery = self.contentQuery(offset: offset, limit: firstLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
             let result = connection.streamingQueryString(firstQuery)
-            logStage("firstQuery returned")
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
 
             let fieldNames = result?.fieldNames() as? [String] ?? []
-            logStage("fieldNames count=\(fieldNames.count)")
             let orderedColumnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
             var pendingRows: [ContentRow] = []
             var loadedRowCount = 0
@@ -782,13 +771,9 @@ private extension SALightweightContentViewController {
                 rowCount: nil,
                 limitResults: limitResults
             )
-            logStage("publishInitialContentLoad")
 
             while let row = result?.getRowAsArray() {
                 loadedRowCount += 1
-                if loadedRowCount == 1 {
-                    logStage("firstRow")
-                }
                 if limitResults, loadedRowCount > pageSize {
                     hasNextPage = true
                     continue
@@ -805,14 +790,12 @@ private extension SALightweightContentViewController {
 
                 if pendingRows.count >= self.initialRowLoadPublishSize {
                     self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                    logStage("publishRows loaded=\(loadedRowCount)")
                     pendingRows.removeAll(keepingCapacity: true)
                 }
             }
 
             if !pendingRows.isEmpty {
                 self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                logStage("publishRows loaded=\(loadedRowCount)")
                 pendingRows.removeAll(keepingCapacity: true)
             }
 
@@ -823,7 +806,6 @@ private extension SALightweightContentViewController {
                 let remainingOffset = offset + loadedRowCount
                 let remainingQuery = self.contentQuery(offset: remainingOffset, limit: remainingLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
                 let remainingResult = connection.streamingQueryString(remainingQuery)
-                logStage("remainingQuery returned")
                 remainingResult?.defaultRowReturnType = SPMySQLResultRowAsArray
 
                 while let row = remainingResult?.getRowAsArray() {
@@ -844,7 +826,6 @@ private extension SALightweightContentViewController {
 
                     if pendingRows.count >= self.remainingRowLoadPublishSize {
                         self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                        logStage("publishRemainingRows loaded=\(loadedRowCount)")
                         pendingRows.removeAll(keepingCapacity: true)
                     }
                 }
@@ -853,16 +834,13 @@ private extension SALightweightContentViewController {
             }
 
             let rowCount = limitResults ? self.rowCount(whereClause: whereClause, connection: connection) : nil
-            logStage("rowCount result=\(rowCount?.count ?? -1) estimate=\(rowCount?.isEstimate ?? false)")
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else {
-                    Self.diagnosticsLog("main finalize dropped tokenMismatch")
                     return
                 }
 
                 self.isLoading = false
-                let start = Self.diagnosticsTime()
 
                 if let error = error, !error.isEmpty {
                     self.columns = []
@@ -882,7 +860,6 @@ private extension SALightweightContentViewController {
                 self.totalRowCount = rowCount?.count ?? (limitResults ? nil : self.rows.count)
                 self.hasNextPage = hasNextPage
                 self.finalizeContentLoad()
-                Self.diagnosticsLog("main finalize done total=\(self.rows.count) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
             }
         }
     }
@@ -896,11 +873,8 @@ private extension SALightweightContentViewController {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.loadToken == token else {
-                Self.diagnosticsLog("main publishInitialContentLoad dropped tokenMismatch")
                 return
             }
-
-            let start = Self.diagnosticsTime()
 
             self.columns = fieldNames
             self.columnInfo = columnInfo
@@ -915,7 +889,6 @@ private extension SALightweightContentViewController {
             self.applySortDescriptorsFromCurrentState()
             self.updateStatus()
             self.updateControls()
-            Self.diagnosticsLog("main publishInitialContentLoad done columns=\(fieldNames.count) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
         }
     }
 
@@ -923,19 +896,15 @@ private extension SALightweightContentViewController {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.loadToken == token else {
-                Self.diagnosticsLog("main publishContentRows dropped rows=\(rows.count) final=\(final) tokenMismatch")
                 return
             }
 
-            let start = Self.diagnosticsTime()
-
-            self.appendContentRows(rows, autosizeColumns: self.rows.count < self.initialRowLoadPublishSize)
+            self.appendContentRows(rows, autosizeColumns: self.rows.isEmpty)
 
             if final {
                 self.hasNextPage = hasNextPage
                 self.finalizeContentLoad()
             }
-            Self.diagnosticsLog("main publishContentRows done rows=\(rows.count) total=\(self.rows.count) final=\(final) elapsed=\(String(format: "%.3f", Self.diagnosticsTime() - start))s")
         }
     }
 
@@ -972,7 +941,7 @@ private extension SALightweightContentViewController {
             return Self.backtickQuoted(column.name)
         }.joined(separator: ", ")
 
-        var query = "SELECT \(fields) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        var query = "SELECT \(isAdvancedFilterDistinct ? "DISTINCT " : "")\(fields) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
 
         if let whereClause = whereClause {
             query += " WHERE \(whereClause)"
@@ -1196,6 +1165,7 @@ private extension SALightweightContentViewController {
         guard !selectedIndexes.isEmpty else { return }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.alertStyle = .critical
         alert.messageText = selectedIndexes.count == 1
             ? NSLocalizedString("Delete selected row?", comment: "delete selected row message")
@@ -1222,6 +1192,58 @@ private extension SALightweightContentViewController {
 
     @objc func removeRow(_ sender: Any?) {
         deleteRows(sender)
+    }
+
+    @objc func copySelectedContentRows(_ sender: Any?) {
+        let includeHeaders = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyWithColumnsTag
+        guard let copyString = contentRowsAsTabString(includeHeaders: includeHeaders, rowIndexes: tableView.selectedRowIndexes) else {
+            NSSound.beep()
+            return
+        }
+
+        SALightweightResultGrid.copyStringToPasteboard(copyString)
+    }
+
+    @objc func copySelectedContentRowsAsSQL(_ sender: Any?) {
+        let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
+        guard let copyString = contentRowsAsSQLInserts(rowIndexes: tableView.selectedRowIndexes, skipAutoIncrement: skipAutoIncrement) else {
+            NSSound.beep()
+            return
+        }
+
+        SALightweightResultGrid.copySQLStringToPasteboard(copyString)
+    }
+
+    @objc func exportContentResultAsCSV(_ sender: Any?) {
+        exportContentResult(fileExtension: "csv", content: csvStringForCurrentContent())
+    }
+
+    @objc func exportContentResultAsXML(_ sender: Any?) {
+        exportContentResult(fileExtension: "xml", content: xmlStringForCurrentContent())
+    }
+
+    func configureContentContextMenu() {
+        tableView.menu = SALightweightResultGrid.contextMenu(target: self,
+                                                             copyAction: #selector(copySelectedContentRows(_:)),
+                                                             copySQLAction: #selector(copySelectedContentRowsAsSQL(_:)),
+                                                             exportCSVAction: #selector(exportContentResultAsCSV(_:)),
+                                                             exportXMLAction: #selector(exportContentResultAsXML(_:)),
+                                                             copyCommentPrefix: "content",
+                                                             exportCommentPrefix: "content")
+    }
+
+    func prepareContentContextMenu(for event: NSEvent) {
+        SALightweightResultGrid.selectContextRow(in: tableView, event: event)
+        updateStatus()
+    }
+
+    func exportContentResult(fileExtension: String, content: String) {
+        guard !rows.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        SALightweightResultGrid.exportResult(fileExtension: fileExtension, content: content, defaultName: "\(table).\(fileExtension)")
     }
 
     func runMutation(status: String, mutation: @escaping (SPMySQLConnection) -> Void) {
@@ -1274,8 +1296,7 @@ private extension SALightweightContentViewController {
         if columnSignature == displayedColumnSignature,
            tableView.tableColumns.count == filteredColumns.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
-            tableView.reloadData()
-            autosizeContentColumns()
+            tableView.headerView?.needsDisplay = true
             return
         }
 
@@ -1345,10 +1366,7 @@ private extension SALightweightContentViewController {
     }
 
     func reloadCell(row: Int, columnIndex: Int) {
-        guard row >= 0, row < tableView.numberOfRows,
-              let displayColumnIndex = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == "\(columnIndex)" }) else { return }
-
-        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: displayColumnIndex))
+        SALightweightResultGrid.reloadCell(in: tableView, row: row, columnIndex: columnIndex)
     }
 
     func updateStatus() {
@@ -1493,7 +1511,6 @@ private extension SALightweightContentViewController {
         if filterRowsStackView.frame != frame {
             filterRowsStackView.frame = frame
             filterRowsStackView.needsLayout = true
-            filterRowsStackView.needsDisplay = true
         }
 
         if visibleBounds.origin != .zero {
@@ -1816,6 +1833,10 @@ private extension SALightweightContentViewController {
     }
 
     func ruleFilterStringForCurrentState(showError: Bool) -> (whereClause: String?, failed: Bool) {
+        if let advancedFilterWhereClause = advancedFilterWhereClause {
+            return (advancedFilterWhereClause, false)
+        }
+
         guard isRuleFilterActive, isRuleFilterVisible else { return (nil, false) }
 
         let caseSensitive = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
@@ -1947,6 +1968,7 @@ private extension SALightweightContentViewController {
 
     func showInvalidRuleFilterAlert(error: Error?) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.alertStyle = .warning
         alert.messageText = NSLocalizedString("Invalid Filter", comment: "table content apply filter invalid filter message title")
         alert.informativeText = error?.localizedDescription ?? NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback")
@@ -1981,7 +2003,7 @@ private extension SALightweightContentViewController {
         didRegisterPreferenceObservers = true
     }
 
-    func applyTablePreferences(rebuildColumns shouldRebuildColumns: Bool) {
+    func applyTablePreferences(rebuildColumns shouldRebuildColumns: Bool, rebuildDisplayValues shouldRebuildDisplayValues: Bool = true) {
         let tableFont = UserDefaults.getFont()
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
         tableView.rowHeight = Self.tableRowHeight(for: tableFont)
@@ -1994,7 +2016,9 @@ private extension SALightweightContentViewController {
         if shouldRebuildColumns {
             rebuildColumns()
         } else {
-            rebuildDisplayValues()
+            if shouldRebuildDisplayValues {
+                rebuildDisplayValues()
+            }
             tableView.headerView?.needsDisplay = true
             tableView.reloadData()
             autosizeContentColumns()
@@ -2038,7 +2062,7 @@ private extension SALightweightContentViewController {
             comboCell.addItems(withObjectValues: column.values)
             cell = comboCell
         } else {
-            cell = SPTextAndLinkCell(textCell: "")
+            cell = NSTextFieldCell(textCell: "")
         }
 
         cell.isEditable = tableObjectType == .table
@@ -2132,8 +2156,8 @@ private extension SALightweightContentViewController {
     }
 
     private static let automaticColumnMaximumWidth: CGFloat = 420
-    private static let tableCellDisplayMaximumCharacters = 256
-    private static let tableCellDisplayMaximumBytes = 128
+    private static let tableCellDisplayMaximumCharacters = 96
+    private static let tableCellDisplayMaximumBytes = 48
 
     static func headerFont(for font: NSFont) -> NSFont {
         return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
@@ -2150,37 +2174,30 @@ private extension SALightweightContentViewController {
               columnIndex < columnInfo.count,
               columnIndex < rows[row].values.count else { return false }
 
-        if UserDefaults.standard.bool(forKey: SPEditInSheetEnabled) {
-            return true
-        }
-
         let column = columnInfo[columnIndex]
-        if column.typeGrouping == "textdata" || column.typeGrouping == "blobdata" {
-            return true
+        let value: Any?
+        switch rows[row].values[columnIndex] {
+        case .null:
+            value = NSNull()
+        case .notLoaded:
+            value = nil
+        case .object(let object):
+            value = object
         }
-
-        let displayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
-        if UserDefaults.standard.bool(forKey: SPEditInSheetForLongText),
-           let threshold = UserDefaults.standard.object(forKey: SPEditInSheetForLongTextLengthThreshold) as? NSNumber,
-           displayValue.count > threshold.intValue {
-            return true
-        }
-
-        if UserDefaults.standard.bool(forKey: SPEditInSheetForMultiLineText),
-           displayValue.rangeOfCharacter(from: .newlines) != nil {
-            return true
-        }
-
-        return false
+        return SALightweightResultGrid.shouldUseFieldEditor(typeGrouping: column.typeGrouping, value: value, displayValue: displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false))
     }
 
     func openFieldEditor(row: Int, column columnIndex: Int) {
-        guard row >= 0,
+        guard !isFieldEditorPresented,
+              row >= 0,
               row < rows.count,
               columnIndex >= 0,
               columnIndex < columnInfo.count,
               columnIndex < rows[row].values.count,
-              let connection = connection else { return }
+              let connection = connection,
+              let window = view.window else { return }
+
+        isFieldEditorPresented = true
 
         let column = columnInfo[columnIndex]
         let editor = fieldEditor
@@ -2208,17 +2225,21 @@ private extension SALightweightContentViewController {
             originalData = object
         }
 
+        fieldEditorTextSelectedRange = NSMakeRange(0, 0)
+
         editor.edit(with: originalData,
                     fieldName: column.name,
                     usingEncoding: connection.stringEncoding(),
                     isObjectBlob: column.typeGrouping == "textdata" || column.typeGrouping == "blobdata",
                     isEditable: canModifyRows,
-                    with: view.window,
+                    with: window,
                     sender: self,
                     contextInfo: [
                         "rowIndex": NSNumber(value: row),
                         "columnIndex": NSNumber(value: columnIndex),
-                        "isFieldEditable": NSNumber(value: canModifyRows)
+                        "isFieldEditable": NSNumber(value: canModifyRows),
+                        "disableSheetAnimation": NSNumber(value: true),
+                        "deferTextLoading": NSNumber(value: true)
                     ])
     }
 
@@ -2259,10 +2280,7 @@ private extension SALightweightContentViewController {
 
     static func displayString(_ value: String, truncate: Bool) -> String {
         guard truncate else { return value }
-        let value = value as NSString
-        guard value.length > tableCellDisplayMaximumCharacters else { return value as String }
-
-        return value.substring(to: tableCellDisplayMaximumCharacters) + "..."
+        return SALightweightResultGrid.tableCellPreviewString(value, maximumCharacters: tableCellDisplayMaximumCharacters)
     }
 
     static func displayString(for value: Any) -> String {
@@ -2306,6 +2324,122 @@ private extension SALightweightContentViewController {
         }
     }
 
+    func csvStringForCurrentContent() -> String {
+        return SALightweightResultGrid.csvString(rowCount: rows.count,
+                                                 tableColumns: tableView.tableColumns,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.contentDisplayValue(row: $0, tableColumn: $1) })
+    }
+
+    func xmlStringForCurrentContent() -> String {
+        return SALightweightResultGrid.xmlString(rowCount: rows.count,
+                                                 tableColumns: tableView.tableColumns,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.contentDisplayValue(row: $0, tableColumn: $1) })
+    }
+
+    func contentRowsAsTabString(includeHeaders: Bool, rowIndexes: IndexSet) -> String? {
+        return SALightweightResultGrid.tabString(includeHeaders: includeHeaders,
+                                                 rowIndexes: rowIndexes,
+                                                 tableColumns: tableView.tableColumns,
+                                                 rowCount: rows.count,
+                                                 columnName: { self.columnName(for: $0) },
+                                                 value: { self.contentDisplayValue(row: $0, tableColumn: $1) })
+    }
+
+    func contentRowsAsSQLInserts(rowIndexes: IndexSet, skipAutoIncrement: Bool) -> String? {
+        guard !rowIndexes.isEmpty, let connection = connection else { return nil }
+
+        let includedColumns = sqlInsertColumnIndexes(rowIndexes: rowIndexes, skipAutoIncrement: skipAutoIncrement)
+        guard !includedColumns.isEmpty else { return nil }
+
+        let columnList = includedColumns.map { Self.backtickQuoted(columns[$0]) }.joined(separator: ", ")
+        var result = "INSERT INTO \(Self.backtickQuoted(table)) (\(columnList))\nVALUES\n"
+        var valueBuffer = ""
+        var copiedRows = 0
+
+        rowIndexes.forEach { rowIndex in
+            guard rowIndex < rows.count else { return }
+
+            let row = rows[rowIndex]
+            let values = includedColumns.map { columnIndex -> String in
+                guard columnIndex < row.values.count else { return "NULL" }
+                return sqlInsertValue(for: row.values[columnIndex], columnInfo: columnInfo[columnIndex], connection: connection)
+            }
+
+            if copiedRows > 0 {
+                valueBuffer += "),\n"
+            }
+            valueBuffer += "\t(\(values.joined(separator: ", "))"
+            copiedRows += 1
+        }
+
+        guard copiedRows > 0 else { return nil }
+
+        result += valueBuffer + ");\n"
+        return result
+    }
+
+    func sqlInsertColumnIndexes(rowIndexes: IndexSet, skipAutoIncrement: Bool) -> [Int] {
+        return tableView.tableColumns.compactMap { tableColumn -> Int? in
+            guard let columnIndex = Int(tableColumn.identifier.rawValue),
+                  columnIndex < columns.count,
+                  columnIndex < columnInfo.count else { return nil }
+
+            if skipAutoIncrement, columnInfo[columnIndex].isAutoIncrement {
+                return nil
+            }
+
+            let hasUnloadedValue = rowIndexes.contains { rowIndex in
+                guard rowIndex < rows.count, columnIndex < rows[rowIndex].values.count else { return true }
+                if case .notLoaded = rows[rowIndex].values[columnIndex] {
+                    return true
+                }
+                return false
+            }
+
+            return hasUnloadedValue ? nil : columnIndex
+        }
+    }
+
+    func sqlInsertValue(for value: ContentValue, columnInfo: ColumnInfo, connection: SPMySQLConnection) -> String {
+        switch value {
+        case .null, .notLoaded:
+            return "NULL"
+        case .object(let object):
+            if let data = object as? Data {
+                return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(data.map { String(format: "%02X", $0) }.joined())
+            }
+
+            let displayValue = Self.displayString(for: value, columnInfo: columnInfo, truncate: false)
+            if columnInfo.typeGrouping == "integer" || columnInfo.typeGrouping == "float" || columnInfo.type.uppercased() == "YEAR" {
+                return displayValue
+            }
+
+            if columnInfo.typeGrouping == "bit" {
+                return "b'\(displayValue)'"
+            }
+
+            return connection.escapeAndQuoteString(displayValue) ?? Self.singleQuoted(displayValue)
+        }
+    }
+
+    func columnName(for tableColumn: NSTableColumn) -> String {
+        guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < columns.count else {
+            return tableColumn.headerCell.stringValue
+        }
+
+        return columns[columnIndex]
+    }
+
+    func contentDisplayValue(row: Int, tableColumn: NSTableColumn) -> String? {
+        guard row < rows.count,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
+              columnIndex < rows[row].values.count else { return nil }
+
+        return displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
+    }
+
     static func quotedLikePattern(_ value: String, connection: SPMySQLConnection) -> String {
         let escapedValue = value
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -2338,7 +2472,11 @@ private extension SALightweightContentViewController {
     }
 
     static func backtickQuoted(_ value: String) -> String {
-        return "`\(value.replacingOccurrences(of: "`", with: "``"))`"
+        return SALightweightResultGrid.backtickQuoted(value)
+    }
+
+    static func singleQuoted(_ value: String) -> String {
+        return SALightweightResultGrid.singleQuoted(value)
     }
 
     func savedWidth(for columnName: String) -> CGFloat? {
@@ -2373,11 +2511,14 @@ private extension SALightweightContentViewController {
 
     func loadDeferredCellValue(row: Int, columnIndex: Int, whereClause: String) {
         guard !isLoading,
+              !isFieldEditorPresented,
               row >= 0,
               row < rows.count,
               columnIndex < columnInfo.count,
               let connection = connection else { return }
 
+        deferredFieldEditorRequestID += 1
+        let requestID = deferredFieldEditorRequestID
         isLoading = true
         updateControls()
         statusLabel.stringValue = NSLocalizedString("Loading cell...", comment: "lightweight content deferred cell loading")
@@ -2393,6 +2534,7 @@ private extension SALightweightContentViewController {
             let value: Any? = result?.getRowAsArray()?.first ?? nil
 
             DispatchQueue.main.async {
+                guard requestID == self.deferredFieldEditorRequestID else { return }
                 self.isLoading = false
 
                 if let error = error, !error.isEmpty {
@@ -2406,16 +2548,20 @@ private extension SALightweightContentViewController {
                     return
                 }
 
+                guard let currentWhereClause = Self.rowIdentityWhereClause(for: self.rows[row].originalValues, columnInfo: self.columnInfo, connection: connection),
+                      currentWhereClause == whereClause else {
+                    self.updateControls()
+                    return
+                }
+
                 let contentValue = Self.contentValue(for: value)
                 self.rows[row].values[columnIndex] = contentValue
                 self.rows[row].originalValues[columnIndex] = contentValue
                 self.rows[row].displayValues[columnIndex] = self.displayString(for: contentValue, columnIndex: columnIndex)
-                self.reloadCell(row: row, columnIndex: columnIndex)
-                self.autosizeContentColumns()
                 self.cacheCurrentContentState()
                 self.updateStatus()
                 self.updateControls()
-                self.tableView.editColumn(columnIndex, row: row, with: nil, select: true)
+                self.openFieldEditor(row: row, column: columnIndex)
             }
         }
     }
@@ -2481,7 +2627,7 @@ extension SALightweightContentViewController {
     @objc(processFieldEditorResult:contextInfo:)
     func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
         defer {
-            view.window?.makeFirstResponder(tableView)
+            isFieldEditorPresented = false
         }
 
         guard let data = data,
@@ -2520,7 +2666,30 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         return rows[row].displayValues[columnIndex]
     }
 
+    func tableView(_ tableView: NSTableView,
+                   toolTipFor cell: NSCell,
+                   rect: UnsafeMutablePointer<NSRect>,
+                   tableColumn: NSTableColumn?,
+                   row: Int,
+                   mouseLocation: NSPoint) -> String {
+        guard row >= 0,
+              row < rows.count,
+              let columnIdentifier = tableColumn?.identifier.rawValue,
+              let columnIndex = Int(columnIdentifier),
+              columnIndex < rows[row].values.count else { return "" }
+
+        return ""
+    }
+
+    func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
+        guard let copyString = contentRowsAsTabString(includeHeaders: false, rowIndexes: rowIndexes) else { return false }
+
+        return SALightweightResultGrid.writeRows(copyString, to: pasteboard)
+    }
+
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
+        guard !isFieldEditorPresented else { return false }
+
         guard row >= 0,
               row < rows.count,
               let connection = connection,
@@ -2572,8 +2741,10 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             ? .null
             : .object(newValue)
         guard let sqlValue = Self.sqlValue(updatedValue, columnInfo: columnInfo[columnIndex], connection: connection) else { return }
-        let limit = columnInfo.contains { $0.isPrimary } ? "" : " LIMIT 1"
-        let query = "UPDATE \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) SET \(Self.backtickQuoted(columnName)) = \(sqlValue) WHERE \(whereClause)\(limit)"
+        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let countQuery = "SELECT COUNT(1) FROM \(tableReference) WHERE \(whereClause)"
+        let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(sqlValue) WHERE \(whereClause)"
+        let reloadAfterEdit = UserDefaults.standard.bool(forKey: SPReloadAfterEditingRow)
 
         statusLabel.stringValue = NSLocalizedString("Saving cell...", comment: "lightweight content saving cell")
         isLoading = true
@@ -2583,17 +2754,27 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             guard let self = self, let connection = connection else { return }
 
             _ = connection.selectDatabase(self.database)
-            _ = connection.queryString(query)
+            let matchingRows = SALightweightResultGrid.matchingRowCount(for: countQuery, connection: connection)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            if error == nil, matchingRows == 1 {
+                _ = connection.queryString(updateQuery)
+            }
+            let updateError = connection.queryErrored() ? connection.lastErrorMessage() : error
 
             DispatchQueue.main.async {
                 self.isLoading = false
 
-                if let error = error, !error.isEmpty {
-                    self.statusLabel.stringValue = error
+                if let updateError = updateError, !updateError.isEmpty {
+                    self.statusLabel.stringValue = updateError
                     self.updateControls()
                     self.reloadCell(row: row, columnIndex: columnIndex)
-                    self.autosizeContentColumns()
+                    return
+                }
+
+                guard matchingRows == 1 else {
+                    self.statusLabel.stringValue = NSLocalizedString("Cannot edit row without identifying exactly one matching row", comment: "lightweight content edit no unique row")
+                    self.updateControls()
+                    self.reloadCell(row: row, columnIndex: columnIndex)
                     return
                 }
 
@@ -2601,10 +2782,16 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                 self.rows[row].originalValues[columnIndex] = updatedValue
                 self.rows[row].displayValues[columnIndex] = self.displayString(for: updatedValue, columnIndex: columnIndex)
                 self.tableContentDidChange?()
+
+                if reloadAfterEdit {
+                    self.invalidateCurrentContentCache()
+                    self.loadCurrentPage()
+                    return
+                }
+
                 self.updateStatus()
                 self.updateControls()
                 self.reloadCell(row: row, columnIndex: columnIndex)
-                self.autosizeContentColumns()
                 self.cacheCurrentContentState()
             }
         }
@@ -2660,6 +2847,17 @@ extension SALightweightContentViewController: NSMenuItemValidation {
         guard let action = menuItem.action else { return true }
 
         switch action {
+        case #selector(copySelectedContentRows(_:)):
+            return !isLoading && tableView.numberOfSelectedRows > 0
+
+        case #selector(copySelectedContentRowsAsSQL(_:)):
+            return !isLoading
+                && tableView.numberOfSelectedRows > 0
+                && !sqlInsertColumnIndexes(rowIndexes: tableView.selectedRowIndexes, skipAutoIncrement: menuItem.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag).isEmpty
+
+        case #selector(exportContentResultAsCSV(_:)), #selector(exportContentResultAsXML(_:)):
+            return !isLoading && !rows.isEmpty
+
         case #selector(removeRow(_:)), #selector(deleteRows(_:)), #selector(deleteBackward(_:)), #selector(deleteForward(_:)):
             menuItem.title = tableView.numberOfSelectedRows > 1
                 ? NSLocalizedString("Delete Rows", comment: "delete rows menu item plural")
@@ -2678,6 +2876,24 @@ extension SALightweightContentViewController: NSMenuItemValidation {
         default:
             return true
         }
+    }
+}
+
+extension SALightweightContentViewController: SALightweightResultGridTableViewDelegate {
+    func resultGridTableViewCopyRows(_ sender: Any?) {
+        copySelectedContentRows(sender)
+    }
+
+    func resultGridTableViewCopyRowsAsSQL(_ sender: Any?) {
+        copySelectedContentRowsAsSQL(sender)
+    }
+
+    func resultGridTableViewCanCopyRows(_ tableView: NSTableView) -> Bool {
+        return tableView.numberOfSelectedRows > 0
+    }
+
+    func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {
+        prepareContentContextMenu(for: event)
     }
 }
 

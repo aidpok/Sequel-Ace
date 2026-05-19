@@ -57,6 +57,7 @@
 @property (readwrite, copy) NSString *lastBundleBlobFilesDirectory;
 @property (nonatomic, strong) NSMutableArray <NSNumber *> *sshProcessIDs;
 @property (nonatomic, strong, readonly) TabManager *tabManager;
+@property (nonatomic, assign) BOOL fastQuitConfirmationApproved;
 
 @property (weak) IBOutlet NSView *staleBookmarkHelpView;
 @property (weak) IBOutlet HyperlinkTextField *staleBookmarkTextField;

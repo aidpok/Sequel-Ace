@@ -183,6 +183,8 @@
 	NSInteger editSheetReturnCode;
 	BOOL _isGeometry;
 	BOOL _isJSON;
+	BOOL restoresUsedSheetAnimationBehavior;
+	NSWindowAnimationBehavior usedSheetAnimationBehavior;
 	NSUndoManager *esUndoManager;
 
 	NSDictionary *editedFieldInfo;

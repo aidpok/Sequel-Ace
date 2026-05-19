@@ -56,8 +56,6 @@
 
 #import "sequel-ace-Swift.h"
 
-#import <os/log.h>
-
 @import FirebaseCore;
 @import FirebaseAnalytics;
 @import FirebaseCrashlytics;
@@ -66,48 +64,6 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 static NSString *SALightweightResumeFileName = @"LightweightResume.plist";
 static NSString *SALightweightResumeStateDidChangeNotification = @"SALightweightResumeStateDidChangeNotification";
 static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
-
-#ifdef DEBUG
-#define SAUIDiagnosticLog(fmt, ...) SAUIDiagnosticLogMessage((@"[SA UI Diagnostics] " fmt), ##__VA_ARGS__)
-#else
-#define SAUIDiagnosticLog(...)
-#endif
-
-static BOOL SAUIDiagnosticsEnabled(void)
-{
-#ifdef DEBUG
-    static BOOL enabled;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *environmentValue = [[[NSProcessInfo processInfo] environment] objectForKey:@"SA_ENABLE_UI_DIAGNOSTICS"];
-        enabled = [environmentValue boolValue] || [[NSUserDefaults standardUserDefaults] boolForKey:@"SAEnableUIDiagnostics"];
-    });
-
-    return enabled;
-#else
-    return NO;
-#endif
-}
-
-static void SAUIDiagnosticLogMessage(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
-static void SAUIDiagnosticLogMessage(NSString *format, ...)
-{
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    va_list args;
-    va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-
-    os_log(OS_LOG_DEFAULT, "%{public}@", message);
-}
-
-static NSTimeInterval SAUIMonotonicTime(void)
-{
-    return [[NSProcessInfo processInfo] systemUptime];
-}
 
 @interface SPAppController ()
 @property (strong) IBOutlet NSMenu *mainMenu;
@@ -138,12 +94,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
 @property (nonatomic, assign) BOOL lightweightResumeStateDirty;
 @property (nonatomic, assign) BOOL lightweightResumeSaveScheduled;
 @property (nonatomic, strong) NSData *lastLightweightResumeStateData;
-@property (nonatomic, strong) dispatch_source_t uiDiagnosticsWatchdogTimer;
-@property (atomic, assign) BOOL uiDiagnosticsBeatPending;
-@property (atomic, assign) NSUInteger uiDiagnosticsLastReportedStallSecond;
-@property (atomic, assign) NSTimeInterval uiDiagnosticsLastBeatTime;
-@property (atomic, assign) NSTimeInterval uiDiagnosticsPendingBeatTime;
-@property (atomic, assign) NSTimeInterval uiDiagnosticsActivationStartTime;
 
 @end
 
@@ -262,150 +212,9 @@ static NSTimeInterval SAUIMonotonicTime(void)
     [[NSScriptExecutionContext sharedScriptExecutionContext] setTopLevelObject:self];
 }
 
-#pragma mark -
-#pragma mark UI Diagnostics
-
-- (void)_startUIDiagnosticsWatchdog
-{
-#ifdef DEBUG
-    if (!SAUIDiagnosticsEnabled() || self.uiDiagnosticsWatchdogTimer) {
-        return;
-    }
-
-    self.uiDiagnosticsLastBeatTime = SAUIMonotonicTime();
-
-    dispatch_queue_t watchdogQueue = dispatch_queue_create("com.sequel-ace.ui-diagnostics.watchdog", DISPATCH_QUEUE_SERIAL);
-    self.uiDiagnosticsWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, watchdogQueue);
-    dispatch_source_set_timer(self.uiDiagnosticsWatchdogTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_MSEC * 100);
-
-    __weak SPAppController *weakSelf = self;
-    dispatch_source_set_event_handler(self.uiDiagnosticsWatchdogTimer, ^{
-        [weakSelf _uiDiagnosticsWatchdogTick];
-    });
-
-    dispatch_resume(self.uiDiagnosticsWatchdogTimer);
-    SAUIDiagnosticLog(@"watchdog started interval=1.0s threshold=2.0s");
-#endif
-}
-
-- (void)_uiDiagnosticsWatchdogTick
-{
-#ifdef DEBUG
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    NSTimeInterval now = SAUIMonotonicTime();
-
-    if (self.uiDiagnosticsBeatPending) {
-        NSTimeInterval stallDuration = now - self.uiDiagnosticsPendingBeatTime;
-        if (stallDuration >= 2.0) {
-            NSUInteger stallSecond = (NSUInteger)floor(stallDuration);
-            if (stallSecond != self.uiDiagnosticsLastReportedStallSecond) {
-                self.uiDiagnosticsLastReportedStallSecond = stallSecond;
-                SAUIDiagnosticLog(@"main thread has not serviced watchdog for %.3fs lastBeatAge=%.3fs", stallDuration, now - self.uiDiagnosticsLastBeatTime);
-            }
-        }
-        return;
-    }
-
-    self.uiDiagnosticsBeatPending = YES;
-    self.uiDiagnosticsPendingBeatTime = now;
-
-    __weak SPAppController *weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        SPAppController *strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-
-        NSTimeInterval resumedAt = SAUIMonotonicTime();
-        NSTimeInterval delay = resumedAt - strongSelf.uiDiagnosticsPendingBeatTime;
-        if (delay >= 0.5) {
-            SAUIDiagnosticLog(@"main thread serviced watchdog after %.3fs context=%@", delay, [strongSelf _uiDiagnosticsContext]);
-        }
-
-        strongSelf.uiDiagnosticsBeatPending = NO;
-        strongSelf.uiDiagnosticsLastReportedStallSecond = 0;
-        strongSelf.uiDiagnosticsLastBeatTime = resumedAt;
-    });
-#endif
-}
-
-- (NSString *)_uiDiagnosticsContext
-{
-#ifdef DEBUG
-    if (!SAUIDiagnosticsEnabled()) {
-        return @"disabled";
-    }
-
-    if (![NSThread isMainThread]) {
-        return @"non-main-thread";
-    }
-
-    NSWindow *keyWindow = [NSApp keyWindow];
-    NSWindow *mainWindow = [NSApp mainWindow];
-    id firstResponder = keyWindow.firstResponder;
-    NSUInteger managedWindows = self.tabManager.windowControllers.count;
-    NSUInteger appWindows = NSApp.windows.count;
-
-    return [NSString stringWithFormat:@"active=%d keyWindow=%@ mainWindow=%@ firstResponder=%@ managedWindows=%lu appWindows=%lu",
-            NSApp.isActive,
-            keyWindow ? NSStringFromClass([keyWindow class]) : @"nil",
-            mainWindow ? NSStringFromClass([mainWindow class]) : @"nil",
-            firstResponder ? NSStringFromClass([firstResponder class]) : @"nil",
-            (unsigned long)managedWindows,
-            (unsigned long)appWindows];
-#else
-    return @"";
-#endif
-}
-
-- (void)applicationWillBecomeActive:(NSNotification *)notification
-{
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    self.uiDiagnosticsActivationStartTime = SAUIMonotonicTime();
-    SAUIDiagnosticLog(@"applicationWillBecomeActive context=%@", [self _uiDiagnosticsContext]);
-}
-
-- (void)applicationDidBecomeActive:(NSNotification *)notification
-{
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    NSTimeInterval now = SAUIMonotonicTime();
-    NSTimeInterval activationElapsed = self.uiDiagnosticsActivationStartTime > 0 ? now - self.uiDiagnosticsActivationStartTime : 0;
-    SAUIDiagnosticLog(@"applicationDidBecomeActive elapsedSinceWill=%.3fs context=%@", activationElapsed, [self _uiDiagnosticsContext]);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (SAUIDiagnosticsEnabled()) {
-            SAUIDiagnosticLog(@"applicationDidBecomeActive next-runloop context=%@", [self _uiDiagnosticsContext]);
-        }
-    });
-}
-
-- (void)applicationWillResignActive:(NSNotification *)notification
-{
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    SAUIDiagnosticLog(@"applicationWillResignActive context=%@", [self _uiDiagnosticsContext]);
-}
-
 - (void)applicationDidResignActive:(NSNotification *)notification
 {
     [self savePendingLightweightResumeStateIfNeeded];
-
-    if (!SAUIDiagnosticsEnabled()) {
-        return;
-    }
-
-    SAUIDiagnosticLog(@"applicationDidResignActive context=%@", [self _uiDiagnosticsContext]);
 }
 
 /**
@@ -414,10 +223,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 
     [FIRApp configure];
-    [self _startUIDiagnosticsWatchdog];
-    if (SAUIDiagnosticsEnabled()) {
-        SAUIDiagnosticLog(@"applicationDidFinishLaunching context=%@", [self _uiDiagnosticsContext]);
-    }
 
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
     BOOL analyticsEnabled = [prefs boolForKey:SPSaveApplicationUsageAnalytics];
@@ -491,6 +296,8 @@ static NSTimeInterval SAUIMonotonicTime(void)
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(saveConnectionsToSPF:) name:SPDocumentSaveToSPFNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lightweightResumeStateDidChange:) name:SALightweightResumeStateDidChangeNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowWillClose:) name:NSWindowWillCloseNotification object:nil];
+
+    [self installFastQuitMenuAction];
 
     [SPBundleManager.shared reloadBundles:self];
     [self _copyDefaultThemes];
@@ -604,13 +411,11 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
 - (NSDictionary *)lightweightResumeStateDictionary
 {
-    NSMutableArray *windows = [NSMutableArray array];
+    NSMutableArray *tabs = [NSMutableArray array];
+    NSMutableDictionary *win = [NSMutableDictionary dictionary];
     NSMutableArray *processedWindows = [NSMutableArray array];
 
     for (NSWindow *window in [self.tabManager windows]) {
-        NSMutableArray *tabs = [NSMutableArray array];
-        NSMutableDictionary *win = [NSMutableDictionary dictionary];
-
         NSArray *tabGroupWindows = [[window tabGroup] windows];
         NSArray *windowsToProcess = [tabGroupWindows count] > 0 ? tabGroupWindows : ([[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window]);
         for (NSWindow *processedWindow in windowsToProcess) {
@@ -628,26 +433,23 @@ static NSTimeInterval SAUIMonotonicTime(void)
             [tabData setObject:@YES forKey:@"isLightweight"];
             [tabData setObject:lightweightState forKey:@"lightweightState"];
             [tabs addObject:tabData];
-            [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
+            if (![win objectForKey:@"frame"]) {
+                [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
+            }
 
             [processedWindows addObject:windowController.uniqueID];
         }
-
-        if ([tabs count] > 0) {
-            [win setObject:tabs forKey:@"tabs"];
-        }
-        if ([[win allValues] count] > 0) {
-            [windows addObject:win];
-        }
     }
 
-    if (![windows count]) {
+    if (![tabs count]) {
         return nil;
     }
 
+    [win setObject:tabs forKey:@"tabs"];
+
     return @{
         @"version": @1,
-        @"windows": windows
+        @"windows": @[win]
     };
 }
 
@@ -676,12 +478,13 @@ static NSTimeInterval SAUIMonotonicTime(void)
     }
 
     BOOL restoredAnyWindow = NO;
+    NSWindow *window = nil;
+    NSString *restoredFrame = nil;
     for (NSDictionary *windowDictionary in [windowDictionaries reverseObjectEnumerator]) {
         if (![windowDictionary isKindOfClass:[NSDictionary class]]) {
             continue;
         }
 
-        NSWindow *window = nil;
         NSArray *tabs = [windowDictionary objectForKey:@"tabs"];
         if (![tabs isKindOfClass:[NSArray class]]) {
             continue;
@@ -692,18 +495,25 @@ static NSTimeInterval SAUIMonotonicTime(void)
                 continue;
             }
 
-            SPWindowController *newWindowController = window == nil ? [self.tabManager newWindowForWindow] : [self.tabManager newWindowForTabInWindow:window];
+            BOOL isFirstRestoredWindow = window == nil;
+            SPWindowController *newWindowController = isFirstRestoredWindow ? [self.tabManager replaceTabServiceWithInitialWindow] : [self.tabManager newWindowForTabInWindow:window];
             if (window == nil) {
                 window = newWindowController.window;
             }
 
             NSString *frame = [windowDictionary objectForKey:@"frame"];
-            if ([frame isKindOfClass:[NSString class]]) {
+            if (!restoredFrame && [frame isKindOfClass:[NSString class]]) {
+                restoredFrame = frame;
                 [newWindowController.window setFrameFromString:frame];
             }
 
             if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
                 restoredAnyWindow = YES;
+            }
+            else if (isFirstRestoredWindow) {
+                [newWindowController close];
+                window = nil;
+                restoredFrame = nil;
             }
         }
     }
@@ -713,7 +523,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
 
 - (void)saveLightweightResumeState
 {
-    NSTimeInterval startTime = SAUIMonotonicTime();
     NSString *filePath = [self lightweightResumeFilePath];
     if (![filePath length]) {
         return;
@@ -723,7 +532,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
     if (![resumeState count]) {
         [fileManager removeItemAtPath:filePath error:nil];
         self.lastLightweightResumeStateData = nil;
-        SAUIDiagnosticLog(@"lightweight resume state removed elapsed=%.3fs", SAUIMonotonicTime() - startTime);
         return;
     }
 
@@ -740,8 +548,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
     if (error) {
         SPLog(@"Could not save lightweight resume state: %@", error);
     }
-
-    SAUIDiagnosticLog(@"lightweight resume state saved elapsed=%.3fs bytes=%lu changed=%d", SAUIMonotonicTime() - startTime, (unsigned long)[plist length], didWrite && !error);
 }
 
 - (void)lightweightResumeStateDidChange:(NSNotification *)notification
@@ -798,6 +604,13 @@ static NSTimeInterval SAUIMonotonicTime(void)
     NSDictionary *userInfo = [notification userInfo];
     if (userInfo) {
         SPWindowController *newWindowController = [self.tabManager newWindowForTab];
+        if ([[userInfo objectForKey:@"isLightweight"] boolValue]) {
+            if (![newWindowController restoreLightweightConnectionStateDictionary:[userInfo objectForKey:@"lightweightState"]]) {
+                [newWindowController close];
+            }
+            return;
+        }
+
         [newWindowController.databaseDocument setState:userInfo];
     }
 }
@@ -957,8 +770,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
  * Menu item validation.
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
-    BOOL uiDiagnosticsEnabled = SAUIDiagnosticsEnabled();
-    NSTimeInterval validationStartTime = uiDiagnosticsEnabled ? SAUIMonotonicTime() : 0;
     BOOL isValid = YES;
     SEL action = [menuItem action];
     SPDatabaseDocument *activeDocument = nil;
@@ -991,16 +802,6 @@ static NSTimeInterval SAUIMonotonicTime(void)
     }
 
 validateMenuItemDone:
-    if (uiDiagnosticsEnabled) {
-        NSTimeInterval validationElapsed = SAUIMonotonicTime() - validationStartTime;
-        if (validationElapsed >= 0.1) {
-            SAUIDiagnosticLog(@"slow validateMenuItem action=%@ elapsed=%.3fs result=%d context=%@",
-                    NSStringFromSelector(action),
-                    validationElapsed,
-                    isValid,
-                    [self _uiDiagnosticsContext]);
-        }
-    }
     return isValid;
 }
 
@@ -1953,7 +1754,10 @@ validateMenuItemDone:
  */
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
-    if ([sender keyWindow] != nil && [[NSUserDefaults standardUserDefaults] boolForKey:SPApplicationPromptOnQuit]) {
+    BOOL fastQuitConfirmationApproved = self.fastQuitConfirmationApproved;
+    self.fastQuitConfirmationApproved = NO;
+
+    if ([sender keyWindow] != nil && [[NSUserDefaults standardUserDefaults] boolForKey:SPApplicationPromptOnQuit] && !fastQuitConfirmationApproved) {
         BOOL answer = [self dialogOKCancelWithQuestion:NSLocalizedString(@"Close the app?", @"quitting app informal alert title") text:NSLocalizedString(@"Are you sure you want to quit the app?", @"quitting app informal alert body")];
         if (answer == NO) {
             return NSTerminateCancel;
@@ -2078,7 +1882,10 @@ validateMenuItemDone:
 
     for (NSWindow *aWindow in [self orderedWindows]) {
         if ([[aWindow windowController] isMemberOfClass:[SPWindowController class]]) {
-            [orderedDocuments addObject:[(SPWindowController *)[aWindow windowController] databaseDocument]];
+            SPDatabaseDocument *databaseDocument = [(SPWindowController *)[aWindow windowController] loadedDatabaseDocumentIfAvailable];
+            if (databaseDocument) {
+                [orderedDocuments addObject:databaseDocument];
+            }
         }
     }
     return orderedDocuments;
@@ -2142,6 +1949,21 @@ validateMenuItemDone:
 - (IBAction)duplicateTab:(id)sender {
 
     // Get the state of the previously-frontmost document
+    SPWindowController *activeWindowController = self.tabManager.activeWindowController;
+    NSDictionary *lightweightState = [activeWindowController lightweightConnectionStateDictionaryWithIncludePasswords:YES includeSession:YES includeQuery:YES];
+    if ([lightweightState count]) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:SPDocumentDuplicateTabNotification object:nil userInfo:@{
+            @"isLightweight"    : @YES,
+            @"lightweightState" : lightweightState
+        }];
+        return;
+    }
+
+    SPDatabaseDocument *databaseDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
+    if (!databaseDocument) {
+        return;
+    }
+
     NSDictionary *allStateDetails = @{
         @"connection" : @YES,
         @"history"    : @YES,
@@ -2150,7 +1972,7 @@ validateMenuItemDone:
         @"password"   : @YES
     };
 
-    NSMutableDictionary *frontState = [NSMutableDictionary dictionaryWithDictionary:[self.tabManager.activeWindowController.databaseDocument stateIncludingDetails:allStateDetails]];
+    NSMutableDictionary *frontState = [NSMutableDictionary dictionaryWithDictionary:[databaseDocument stateIncludingDetails:allStateDetails]];
 
     // Ensure it's set to autoconnect
     [frontState setObject:@YES forKey:@"auto_connect"];

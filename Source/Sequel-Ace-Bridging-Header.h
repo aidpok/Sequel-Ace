@@ -65,5 +65,7 @@
 #import "SPQueryFavoriteManager.h"
 #import "SPSQLParser.h"
 #import "SPQueryController.h"
+#import "SPGotoDatabaseController.h"
+#import "SPFilterTableController.h"
 #import <SPMySQL/SPMySQL.h>
 #import "SPSSHTunnel.h"

@@ -156,7 +156,13 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
                                of object: Any?,
                                change: [NSKeyValueChangeKey: Any]?,
                                context: UnsafeMutableRawPointer?) {
-        if keyPath == SPDisplayTableViewVerticalGridlines || keyPath == SPGlobalFontSettings {
+        if keyPath == SPDisplayTableViewVerticalGridlines {
+            tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
+            tableView.setNeedsDisplay(tableView.visibleRect)
+            return
+        }
+
+        if keyPath == SPGlobalFontSettings {
             applyTablePreferences()
             return
         }
@@ -388,6 +394,7 @@ final class SALightweightRelationsViewController: NSViewController {
         guard !selectedRows.isEmpty, let connection = connection, !database.isEmpty, !table.isEmpty else { return }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Delete relation", comment: "delete relation message")
         alert.informativeText = NSLocalizedString("Are you sure you want to delete the selected relations? This action cannot be undone.", comment: "delete selected relation informative message")
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
@@ -431,8 +438,11 @@ final class SALightweightRelationsViewController: NSViewController {
             sheetController.window?.makeKeyAndOrderFront(self)
             return
         }
+        sheet.isRestorable = false
+        sheet.animationBehavior = .none
 
         parentWindow.beginSheet(sheet) { [weak self] _ in
+            sheet.orderOut(nil)
             self?.relationSheetController = nil
         }
     }
@@ -484,6 +494,7 @@ final class SALightweightRelationsViewController: NSViewController {
 
     private func showError(title: String, message: String) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
@@ -899,6 +910,7 @@ final class SALightweightTriggersViewController: NSViewController {
         guard !selectedRows.isEmpty, let connection = connection, !database.isEmpty else { return }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Delete trigger", comment: "delete trigger message")
         alert.informativeText = NSLocalizedString("Are you sure you want to delete the selected triggers? This action cannot be undone.", comment: "delete selected trigger informative message")
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
@@ -947,8 +959,11 @@ final class SALightweightTriggersViewController: NSViewController {
             sheetController.window?.makeKeyAndOrderFront(self)
             return
         }
+        sheet.isRestorable = false
+        sheet.animationBehavior = .none
 
         parentWindow.beginSheet(sheet) { [weak self] _ in
+            sheet.orderOut(nil)
             self?.triggerSheetController = nil
         }
     }
@@ -1006,6 +1021,7 @@ final class SALightweightTriggersViewController: NSViewController {
 
     private func showError(title: String, message: String) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning

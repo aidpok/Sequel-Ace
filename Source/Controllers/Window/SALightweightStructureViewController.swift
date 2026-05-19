@@ -160,7 +160,7 @@ final class SALightweightStructureViewController: NSViewController {
     }()
 
     private lazy var structureTableView: NSTableView = {
-        let tableView = SPTableView(frame: .zero)
+        let tableView = SALightweightDenseTableView(frame: .zero)
         tableView.identifier = NSUserInterfaceItemIdentifier("TableStructureColumnsTableView")
         tableView.dataSource = self
         tableView.delegate = self
@@ -175,6 +175,7 @@ final class SALightweightStructureViewController: NSViewController {
         tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
         tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
+        SALightweightResultGrid.configureDenseGridAccessibility(tableView, label: NSLocalizedString("Structure fields", comment: "lightweight structure fields grid accessibility label"))
 
         for column in structureColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
@@ -228,7 +229,7 @@ final class SALightweightStructureViewController: NSViewController {
     }()
 
     private lazy var indexesTableView: NSTableView = {
-        let tableView = SPTableView(frame: .zero)
+        let tableView = SALightweightDenseTableView(frame: .zero)
         tableView.identifier = NSUserInterfaceItemIdentifier("TableStructureIndexesTableView")
         tableView.dataSource = self
         tableView.delegate = self
@@ -243,6 +244,7 @@ final class SALightweightStructureViewController: NSViewController {
         tableView.focusRingType = .none
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
         tableView.rowHeight = Self.tableRowHeight(for: UserDefaults.getFont())
+        SALightweightResultGrid.configureDenseGridAccessibility(tableView, label: NSLocalizedString("Structure indexes", comment: "lightweight structure indexes grid accessibility label"))
 
         for column in indexColumns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.key))
@@ -514,14 +516,6 @@ final class SALightweightStructureViewController: NSViewController {
                 self.resetScrollPositionsAfterLayout()
                 self.updateButtonState()
                 self.cacheCurrentStructureState()
-
-                DispatchQueue.main.async {
-                    guard self.loadToken == token else { return }
-
-                    self.autosizeStructureColumns()
-                    self.autosizeIndexColumns()
-                    self.resetScrollPositionsAfterLayout()
-                }
             }
         }
     }
@@ -794,7 +788,7 @@ final class SALightweightStructureViewController: NSViewController {
         guard !row.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showError(title: NSLocalizedString("Field name required", comment: "field name required title"), message: NSLocalizedString("The field name cannot be empty.", comment: "field name required message"))
             rows[index] = oldRow
-            reloadVisibleRows()
+            reloadVisibleRow(withID: oldRow.id)
             return
         }
 
@@ -824,7 +818,7 @@ final class SALightweightStructureViewController: NSViewController {
                 self.isSaving = false
                 if let error = error, !error.isEmpty {
                     self.rows[index] = oldRow
-                    self.reloadVisibleRows()
+                    self.reloadVisibleRow(withID: oldRow.id)
                     self.showError(title: row.isNew ? NSLocalizedString("Error adding field", comment: "add field error title") : NSLocalizedString("Error changing field", comment: "change field error title"), message: "\(query)\n\n\(error)")
                     return
                 }
@@ -955,6 +949,17 @@ final class SALightweightStructureViewController: NSViewController {
         resetScrollPositionsAfterLayout()
     }
 
+    private func reloadVisibleRow(withID rowID: UUID) {
+        applyFilter()
+        guard let displayedIndex = displayedIndex(forRowID: rowID) else {
+            reloadVisibleRows()
+            return
+        }
+
+        structureTableView.reloadData(forRowIndexes: IndexSet(integer: displayedIndex),
+                                      columnIndexes: IndexSet(integersIn: 0..<structureTableView.numberOfColumns))
+    }
+
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == SPGlobalFontSettings {
             applyTableFont()
@@ -969,6 +974,8 @@ final class SALightweightStructureViewController: NSViewController {
             let gridStyle: NSTableView.GridLineStyle = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
             structureTableView.gridStyleMask = gridStyle
             indexesTableView.gridStyleMask = gridStyle
+            structureTableView.setNeedsDisplay(structureTableView.visibleRect)
+            indexesTableView.setNeedsDisplay(indexesTableView.visibleRect)
             return
         }
 
@@ -1163,6 +1170,7 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func promptForAutoIncrementIndex(completion: @escaping (String?) -> Void) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Field must be indexed to support auto_increment.", comment: "auto increment index title")
         alert.informativeText = NSLocalizedString("Choose the index to add for this auto_increment field.", comment: "auto increment index message")
 
@@ -1423,6 +1431,7 @@ private extension SALightweightStructureViewController {
         let fieldConstraints = foreignKeyConstraints.filter { $0.columns.contains(row.name) }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = String(format: NSLocalizedString("Delete field '%@'?", comment: "delete field title"), row.name)
         if let constraint = fieldConstraints.first {
             alert.informativeText = String(format: NSLocalizedString("This field is part of a foreign key relationship with the table '%@'. This relationship must be removed before the field can be deleted.\n\nAre you sure you want to continue to delete the relationship and the field? This action cannot be undone.", comment: "delete field and foreign key informative message"), constraint.referencedTable)
@@ -1480,6 +1489,7 @@ private extension SALightweightStructureViewController {
         guard let connection = connection else { return }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Reset AUTO_INCREMENT", comment: "reset auto increment title")
         alert.informativeText = String(format: NSLocalizedString("Reset AUTO_INCREMENT for table '%@'.", comment: "reset auto increment informative text"), table)
         let valueField = NSTextField(frame: NSRect(x: 0, y: 0, width: 180, height: 24))
@@ -1676,10 +1686,15 @@ private extension SALightweightStructureViewController {
                                                                         supportsFullTextOnInnoDB: supportsFullTextOnInnoDB(connection: connection))
         guard let parentWindow = view.window else { return }
         indexSheetController = sheetController
+        sheetController.window?.isRestorable = false
+        sheetController.window?.animationBehavior = .none
 
         parentWindow.beginSheet(sheetController.window!) { [weak self, weak connection] response in
             guard let self = self else { return }
-            defer { self.indexSheetController = nil }
+            defer {
+                sheetController.window?.orderOut(nil)
+                self.indexSheetController = nil
+            }
             guard response == .OK, let connection = connection else { return }
             let query = sheetController.indexQuery(tableReference: self.tableReference(), quoteIdentifier: Self.backtickQuoted)
             self.runIndexQuery(query, connection: connection, errorTitle: NSLocalizedString("Unable to add index", comment: "add index error title"))
@@ -1726,6 +1741,7 @@ private extension SALightweightStructureViewController {
         guard !indexName.isEmpty else { return }
 
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = String(format: NSLocalizedString("Delete index '%@'?", comment: "delete index title"), indexName)
         alert.informativeText = NSLocalizedString("This action cannot be undone.", comment: "delete index message")
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
@@ -1771,6 +1787,7 @@ private extension SALightweightStructureViewController {
 
     private func confirmRemoveIndex(_ indexName: String, foreignKey: ForeignKeyConstraint, connection: SPMySQLConnection, originalError: String) {
         let alert = NSAlert()
+        alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("A foreign key needs this index", comment: "foreign key needs index title")
         alert.informativeText = String(format: NSLocalizedString("The foreign key relationship '%@' has a dependency on index '%@'. This relationship must be removed before the index can be deleted.\n\nAre you sure you want to continue to delete the relationship and the index? This action cannot be undone.", comment: "foreign key needs index message"), foreignKey.name, indexName)
         alert.addButton(withTitle: NSLocalizedString("Delete Both", comment: "delete both button"))
@@ -2174,7 +2191,7 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
         if key == "type" {
             let uppercasedType = newValue.uppercased()
             guard !uppercasedType.hasPrefix("--") else {
-                reloadVisibleRows()
+                reloadVisibleRow(withID: oldRow.id)
                 return
             }
             rows[sourceIndex].values[key] = uppercasedType
@@ -2192,8 +2209,8 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
                     guard let self = self else { return }
                     self.pendingAutoIncrementIndex = indexType
                     if indexType == nil {
-                        self.rows[sourceIndex].values["Extra"] = "None"
-                        self.reloadVisibleRows()
+                        self.rows[sourceIndex] = oldRow
+                        self.reloadVisibleRow(withID: oldRow.id)
                         return
                     }
                     self.saveRow(at: sourceIndex, oldRow: oldRow)
