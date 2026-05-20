@@ -56,7 +56,6 @@ final class SALightweightQueryViewController: NSViewController {
     struct QueryResult {
         let columnDefinitions: [NSDictionary]
         let rows: [[Any]]
-        let displayRows: [[String]]
         let affectedRows: UInt64
         let executionTime: TimeInterval
         let fatalError: String?
@@ -93,7 +92,8 @@ final class SALightweightQueryViewController: NSViewController {
     private var table: String?
     private var columnDefinitions: [NSDictionary] = []
     private var rows: [[Any]] = []
-    private var displayRows: [[String]] = []
+    private let displayCache = SALightweightResultGridDisplayCache()
+    private let columnWidthCache = SALightweightResultGridColumnWidthCache()
     private var lastExecutedQuery = ""
     private var lastResultQuery = ""
     private var queryToken = UUID()
@@ -103,6 +103,7 @@ final class SALightweightQueryViewController: NSViewController {
     private var editorWasConfigured = false
     private var didInstallObservers = false
     private var isApplyingProgrammaticColumnWidths = false
+    private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
     private var isApplyingQuerySort = false
     private var bracketHighlighter: SPBracketHighlighter?
@@ -113,6 +114,8 @@ final class SALightweightQueryViewController: NSViewController {
     private var isFieldEditorPresented = false
     private lazy var favoriteDocumentProxy = SALightweightQueryFavoriteDocumentProxy(queryController: self)
     private let maxDisplayedRows = 10_000
+    private let initialQueryRowPublishSize = 40
+    private let remainingQueryRowPublishSize = 1_000
     private var baseStatusText = NSLocalizedString("Ready", comment: "lightweight query ready status")
     private var resultColumnWidths: [String: CGFloat] = [:]
     private static let observedPreferenceKeys = [
@@ -222,7 +225,7 @@ final class SALightweightQueryViewController: NSViewController {
         tableView.allowsEmptySelection = true
         tableView.allowsExpansionToolTips = false
         SALightweightResultGrid.configureTableView(tableView,
-                                                   rowHeight: 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: UserDefaults.getFont()]).height,
+                                                   rowHeight: SALightweightResultGrid.rowHeight(for: UserDefaults.getFont()),
                                                    columnAutoresizingStyle: .lastColumnOnlyAutoresizingStyle)
         return tableView
     }()
@@ -334,13 +337,12 @@ final class SALightweightQueryViewController: NSViewController {
         queryScrollView.contentView.drawsBackground = false
         queryScrollView.documentView = queryTextView
 
-        resultScrollView.borderType = .noBorder
-        resultScrollView.focusRingType = .none
-        resultScrollView.hasVerticalScroller = true
-        resultScrollView.hasHorizontalScroller = true
-        resultScrollView.autohidesScrollers = true
-        SALightweightResultGrid.configureScrollView(resultScrollView)
+        SALightweightResultGrid.configureResultScrollView(resultScrollView)
         resultScrollView.documentView = tableView
+        resultScrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridBoundsDidChange(_:)), name: NSView.boundsDidChangeNotification, object: resultScrollView.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridWillStartLiveScroll(_:)), name: NSScrollView.willStartLiveScrollNotification, object: resultScrollView)
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridDidEndLiveScroll(_:)), name: NSScrollView.didEndLiveScrollNotification, object: resultScrollView)
 
         infoTextScrollView.borderType = .noBorder
         infoTextScrollView.hasVerticalScroller = true
@@ -486,6 +488,7 @@ final class SALightweightQueryViewController: NSViewController {
     }
 
     deinit {
+        autosizeCoordinator.cancel()
         NotificationCenter.default.removeObserver(self)
         if didInstallObservers {
             for key in Self.observedPreferenceKeys {
@@ -512,7 +515,7 @@ final class SALightweightQueryViewController: NSViewController {
         case SPDisplayBinaryDataAsHex,
              SPNullValue:
             rebuildDisplayRows()
-            tableView.reloadData()
+            SALightweightResultGrid.reloadVisibleCells(in: tableView, columnBuffer: SALightweightResultGrid.autosizeColumnBuffer)
             autosizeResultColumns()
         case SPCustomQueryAutoIndent,
              SPCustomQueryAutoPairCharacters,
@@ -637,11 +640,10 @@ private extension SALightweightQueryViewController {
     func updateAppearanceFromPreferences() {
         let tableFont = UserDefaults.getFont()
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: tableFont]).height
+        tableView.rowHeight = SALightweightResultGrid.rowHeight(for: tableFont)
         for column in tableView.tableColumns {
-            if let cell = column.dataCell as? NSTextFieldCell {
-                cell.font = tableFont
-            }
+            (column.dataCell as? NSCell)?.font = tableFont
+            column.headerCell.font = SALightweightResultGrid.headerFont(for: tableFont)
         }
         updateQueryInteractionInterface()
         rebuildColumns()
@@ -1109,7 +1111,8 @@ private extension SALightweightQueryViewController {
         isRunning = true
         columnDefinitions = []
         rows = []
-        displayRows = []
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
         lastExecutedQuery = ""
         lastResultQuery = ""
         rebuildColumns()
@@ -1139,11 +1142,12 @@ private extension SALightweightQueryViewController {
             var errors: [String] = []
             var firstErrorQueryNumber: Int?
             var suppressErrorSheet = false
-            var finalResult = QueryResult(columnDefinitions: [], rows: [], displayRows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", resultQuery: "", lastErrorID: 0, queriesRun: 0, truncated: false)
+            var didPublishRows = false
+            var finalResult = QueryResult(columnDefinitions: [], rows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", resultQuery: "", lastErrorID: 0, queriesRun: 0, truncated: false)
 
             for (index, query) in runnableQueries.enumerated() {
                 if token != self.queryToken || self.isCancellationRequested {
-                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, displayRows: finalResult.displayRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
+                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
                     break
                 }
 
@@ -1154,8 +1158,10 @@ private extension SALightweightQueryViewController {
                     }
                 }
 
+                let executionQuery = self.queryByApplyingDisplayLimit(to: query)
                 executedQueries.append(query)
-                guard let result = connection.queryString(query) else {
+                let queryStart = CFAbsoluteTimeGetCurrent()
+                guard let result = connection.streamingQueryString(executionQuery) else {
                     queriesRun += 1
                     let error = self.displayErrorMessage(for: connection)
                     finalResult = self.queryResultAfterError(error,
@@ -1178,6 +1184,7 @@ private extension SALightweightQueryViewController {
                     }
                     continue
                 }
+                SALightweightResultGrid.logPerformance("Query execute", start: queryStart, details: "queryNumber=\(index + 1)", minimumMilliseconds: 1)
 
                 queriesRun += 1
 
@@ -1216,26 +1223,79 @@ private extension SALightweightQueryViewController {
 
                 let definitions = result.fieldDefinitions() as? [NSDictionary] ?? []
                 var loadedRows: [[Any]] = []
+                var pendingPublishedRows: [[Any]] = []
+                var didPublishRowsForCurrentResult = false
                 var truncated = false
-                resultQuery = definitions.isEmpty ? resultQuery : query
+                resultQuery = definitions.isEmpty ? resultQuery : executionQuery
 
-                while let row = result.getRowAsArray() {
-                    if loadedRows.count < self.maxDisplayedRows {
-                        loadedRows.append(row)
-                    } else {
-                        truncated = true
+                if !definitions.isEmpty {
+                    didPublishRows = true
+                    DispatchQueue.main.sync {
+                        self.publishQueryColumns(definitions, token: token)
                     }
                 }
 
-                let displayRows = self.displayRows(for: loadedRows, columnDefinitions: definitions)
-                finalResult = QueryResult(columnDefinitions: definitions, rows: loadedRows, displayRows: displayRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.isEmpty ? nil : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: truncated)
+                let fetchStart = CFAbsoluteTimeGetCurrent()
+                while let row = result.getRowAsArray() {
+                    if loadedRows.count < self.maxDisplayedRows {
+                        loadedRows.append(row)
+                        pendingPublishedRows.append(row)
+
+                        if !definitions.isEmpty {
+                            let publishLimit = didPublishRowsForCurrentResult ? self.remainingQueryRowPublishSize : self.initialQueryRowPublishSize
+                            if pendingPublishedRows.count >= publishLimit {
+                                let rowsToPublish = pendingPublishedRows
+                                pendingPublishedRows.removeAll(keepingCapacity: true)
+                                let shouldPublishSynchronously = !didPublishRowsForCurrentResult
+                                didPublishRowsForCurrentResult = true
+                                let publish = {
+                                    self.publishQueryRows(rowsToPublish,
+                                                          token: token,
+                                                          forceDisplay: shouldPublishSynchronously)
+                                }
+                                if shouldPublishSynchronously {
+                                    DispatchQueue.main.sync(execute: publish)
+                                } else {
+                                    DispatchQueue.main.async(execute: publish)
+                                }
+                            }
+                        }
+                    } else {
+                        truncated = true
+                        break
+                    }
+                }
+                if !pendingPublishedRows.isEmpty, !definitions.isEmpty {
+                    let rowsToPublish = pendingPublishedRows
+                    pendingPublishedRows.removeAll(keepingCapacity: true)
+                    let shouldPublishSynchronously = !didPublishRowsForCurrentResult
+                    didPublishRowsForCurrentResult = true
+                    let publish = {
+                        self.publishQueryRows(rowsToPublish,
+                                              token: token,
+                                              forceDisplay: shouldPublishSynchronously)
+                    }
+                    if shouldPublishSynchronously {
+                        DispatchQueue.main.sync(execute: publish)
+                    } else {
+                        DispatchQueue.main.async(execute: publish)
+                    }
+                }
+                SALightweightResultGrid.logPerformance("Query fetch displayed rows", start: fetchStart, details: "rows=\(loadedRows.count) truncated=\(truncated)", minimumMilliseconds: 1)
+
+                finalResult = QueryResult(columnDefinitions: definitions, rows: loadedRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.isEmpty ? nil : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: truncated)
             }
 
             if finalResult.executedQuery.isEmpty, !executedQueries.isEmpty {
-                finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, displayRows: finalResult.displayRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: finalResult.fatalError, errorText: errors.isEmpty ? finalResult.errorText : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: finalResult.lastErrorID, queriesRun: queriesRun, truncated: finalResult.truncated)
+                finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: finalResult.fatalError, errorText: errors.isEmpty ? finalResult.errorText : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: finalResult.lastErrorID, queriesRun: queriesRun, truncated: finalResult.truncated)
             }
 
             DispatchQueue.main.async {
+                let publishStart = CFAbsoluteTimeGetCurrent()
+                defer {
+                    SALightweightResultGrid.logPerformance("Query publish result", start: publishStart, details: "columns=\(finalResult.columnDefinitions.count) rows=\(finalResult.rows.count)", minimumMilliseconds: 1)
+                }
+
                 guard self.queryToken == token else { return }
 
                 self.isRunning = false
@@ -1250,7 +1310,8 @@ private extension SALightweightQueryViewController {
                 if let error = finalResult.fatalError, !error.isEmpty {
                     self.columnDefinitions = []
                     self.rows = []
-                    self.displayRows = []
+                    self.displayCache.invalidateAll()
+                    self.columnWidthCache.invalidateAll()
                     self.rebuildColumns()
                     self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: finalResult.errorText ?? error, errorID: finalResult.lastErrorID)
                     self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: finalResult.errorText ?? error, isError: true)
@@ -1260,10 +1321,15 @@ private extension SALightweightQueryViewController {
                     return
                 }
 
-                self.columnDefinitions = finalResult.columnDefinitions
-                self.rows = finalResult.rows
-                self.displayRows = finalResult.displayRows
-                self.rebuildColumns()
+                if didPublishRows, self.columnDefinitions.count == finalResult.columnDefinitions.count, self.rows.count == finalResult.rows.count {
+                    SALightweightResultGrid.reloadVisibleCells(in: self.tableView, columnBuffer: SALightweightResultGrid.autosizeColumnBuffer)
+                } else {
+                    self.columnDefinitions = finalResult.columnDefinitions
+                    self.rows = finalResult.rows
+                    self.displayCache.invalidateAll()
+                    self.columnWidthCache.invalidateAll()
+                    self.rebuildColumns()
+                }
                 self.updateStatus(for: finalResult, queryCount: max(finalResult.queriesRun, runnableQueries.count))
                 self.prewarmFieldEditor()
                 if let errorText = finalResult.errorText, !errorText.isEmpty {
@@ -1296,7 +1362,7 @@ private extension SALightweightQueryViewController {
 
         guard queryCount > 1 else {
             firstErrorQueryNumber = queryNumber
-            return QueryResult(columnDefinitions: [], rows: [], displayRows: [], affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: errorString, errorText: errorString, firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: false)
+            return QueryResult(columnDefinitions: [], rows: [], affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: errorString, errorText: errorString, firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: false)
         }
 
         if firstErrorQueryNumber == nil {
@@ -1322,7 +1388,7 @@ private extension SALightweightQueryViewController {
             }
         }
 
-        return QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, displayRows: finalResult.displayRows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: finalResult.truncated)
+        return QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: finalResult.resultQuery, lastErrorID: errorID, queriesRun: queriesRun, truncated: finalResult.truncated)
     }
 
     func displayErrorMessage(for connection: SPMySQLConnection) -> String {
@@ -1946,7 +2012,44 @@ private extension SALightweightQueryViewController {
         updateCurrentQueryRange()
     }
 
+    func publishQueryColumns(_ definitions: [NSDictionary], token: UUID) {
+        guard queryToken == token, !definitions.isEmpty else { return }
+
+        columnDefinitions = definitions
+        rows = []
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
+        rebuildColumns()
+        setStatusText(NSLocalizedString("Loading rows...", comment: "lightweight query loading rows status"))
+    }
+
+    func publishQueryRows(_ newRows: [[Any]], token: UUID, forceDisplay: Bool = false) {
+        let publishStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Query publish rows", start: publishStart, details: "newRows=\(newRows.count) totalRows=\(rows.count) columns=\(columnDefinitions.count)", minimumMilliseconds: 1)
+        }
+
+        guard queryToken == token, !newRows.isEmpty else { return }
+
+        rows.append(contentsOf: newRows)
+        tableView.noteNumberOfRowsChanged()
+        scheduleVisibleColumnAutosize(delay: 0.05)
+
+        if forceDisplay {
+            tableView.layoutSubtreeIfNeeded()
+            tableView.enclosingScrollView?.displayIfNeeded()
+            tableView.displayIfNeeded()
+        }
+
+        setStatusText(String(format: NSLocalizedString("Loading rows... %ld loaded", comment: "lightweight query loading rows status"), rows.count))
+    }
+
     func rebuildColumns() {
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Query rebuild columns", start: benchmarkStart, details: "columns=\(columnDefinitions.count) rows=\(rows.count)", minimumMilliseconds: 4)
+        }
+
         let showColumnTypes = UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes)
         let tableFont = UserDefaults.getFont()
         preserveResultColumnWidths()
@@ -1956,6 +2059,7 @@ private extension SALightweightQueryViewController {
            tableView.tableColumns.count == columnDefinitions.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
             tableView.headerView?.needsDisplay = true
+            scheduleVisibleColumnAutosize(delay: 0.01)
             return
         }
 
@@ -1965,55 +2069,43 @@ private extension SALightweightQueryViewController {
         }
 
         for (index, columnDefinition) in columnDefinitions.enumerated() {
-            let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(index)"))
-            tableColumn.resizingMask = .userResizingMask
-            tableColumn.isEditable = canEditResultColumn(columnDefinition)
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(index)", ascending: true)
-
-            let dataCell = NSTextFieldCell(textCell: "")
-            dataCell.isEditable = tableColumn.isEditable
-            dataCell.isSelectable = true
-            dataCell.font = tableFont
-            dataCell.lineBreakMode = .byTruncatingTail
-
-            if let typeGrouping = columnDefinition["typegrouping"] as? String,
-               typeGrouping == "integer" || typeGrouping == "float" {
-                dataCell.alignment = .right
-            }
-
-            let formatter = SPDataCellFormatter()
-            formatter.fieldType = (columnDefinition["type"] as? String) ?? ""
-            if let typeGrouping = columnDefinition["typegrouping"] as? String,
-               typeGrouping == "string" || typeGrouping == "bit",
-               let charLength = columnDefinition["char_length"] as? NSNumber {
-                formatter.textLimit = charLength.intValue
-            }
-            dataCell.formatter = formatter
-
-            tableColumn.dataCell = dataCell
-            tableColumn.headerCell.font = NSFontManager.shared.convert(tableFont, toSize: max(tableFont.pointSize * 0.75, 11))
-            tableColumn.headerCell.attributedStringValue = columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes)
-            if let name = columnDefinition["name"] as? String, let type = columnDefinition["type"] as? String {
-                let lengthSuffix: String
-                if let charLength = columnDefinition["char_length"] {
-                    lengthSuffix = "(\(charLength))"
-                } else {
-                    lengthSuffix = ""
-                }
-                tableColumn.headerToolTip = "\(name) - \(type)\(lengthSuffix)"
-            }
-
             let columnName = (columnDefinition["name"] as? String) ?? ""
-            tableColumn.width = savedResultColumnWidth(for: columnDefinition)
-                ?? resultColumnWidths[resultColumnWidthKey(for: columnDefinition, fallbackIndex: index)]
-                ?? max(90, min(260, CGFloat(columnName.count * 9 + 32)))
-            tableColumn.minWidth = 40
+            let tableColumn = SALightweightResultGrid.configuredColumn(
+                identifier: index,
+                title: columnName,
+                descriptor: Self.gridColumnDescriptor(columnDefinition, fallbackName: columnName),
+                font: tableFont,
+                editable: canEditResultColumn(columnDefinition),
+                headerToolTip: headerToolTip(for: columnDefinition),
+                headerAttributedString: columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes),
+                savedWidth: savedResultColumnWidth(for: columnDefinition) ?? resultColumnWidths[resultColumnWidthKey(for: columnDefinition, fallbackIndex: index)],
+                minWidth: 40,
+                resizingMask: .userResizingMask
+            )
             tableView.addTableColumn(tableColumn)
         }
 
         displayedColumnSignature = columnSignature
         tableView.reloadData()
-        autosizeResultColumns()
+        scheduleVisibleColumnAutosize(delay: 0.01)
+    }
+
+    @objc func resultGridBoundsDidChange(_ notification: Notification) {
+        // Keep horizontal scrolling smooth; column widths are stabilized at load time.
+    }
+
+    @objc func resultGridWillStartLiveScroll(_ notification: Notification) {
+        autosizeCoordinator.willStartLiveScroll()
+    }
+
+    @objc func resultGridDidEndLiveScroll(_ notification: Notification) {
+        autosizeCoordinator.didEndLiveScroll()
+    }
+
+    func scheduleVisibleColumnAutosize(delay: TimeInterval = 0.05) {
+        autosizeCoordinator.schedule(delay: delay) { [weak self] in
+            self?.autosizeResultColumns()
+        }
     }
 
     func currentColumnSignature() -> [String] {
@@ -2037,96 +2129,102 @@ private extension SALightweightQueryViewController {
             guard index < tableView.tableColumns.count else { continue }
 
             let tableColumn = tableView.tableColumns[index]
-            tableColumn.identifier = NSUserInterfaceItemIdentifier("\(index)")
-            tableColumn.isEditable = canEditResultColumn(columnDefinition)
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(index)", ascending: true)
-            tableColumn.headerCell.font = NSFontManager.shared.convert(tableFont, toSize: max(tableFont.pointSize * 0.75, 11))
-            tableColumn.headerCell.attributedStringValue = columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes)
-            if let name = columnDefinition["name"] as? String, let type = columnDefinition["type"] as? String {
-                let lengthSuffix = columnDefinition["char_length"].map { "(\($0))" } ?? ""
-                tableColumn.headerToolTip = "\(name) - \(type)\(lengthSuffix)"
-            }
-            if let dataCell = tableColumn.dataCell as? NSCell {
-                dataCell.isEditable = tableColumn.isEditable
-                dataCell.font = tableFont
-            }
+            let columnName = (columnDefinition["name"] as? String) ?? ""
+            SALightweightResultGrid.updateColumn(tableColumn,
+                                                 identifier: index,
+                                                 title: columnName,
+                                                 descriptor: Self.gridColumnDescriptor(columnDefinition, fallbackName: columnName),
+                                                 font: tableFont,
+                                                 editable: canEditResultColumn(columnDefinition),
+                                                 headerToolTip: headerToolTip(for: columnDefinition),
+                                                 headerAttributedString: columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes))
         }
         tableView.headerView?.needsDisplay = true
     }
 
-    func autosizeResultColumns() {
+    func autosizeResultColumns(onlyVisibleColumns: Bool = true) {
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Query autosize columns", start: benchmarkStart, details: "columns=\(tableView.tableColumns.count) rows=\(rows.count) visibleOnly=\(onlyVisibleColumns)", minimumMilliseconds: 4)
+        }
+
         isApplyingProgrammaticColumnWidths = true
         defer { isApplyingProgrammaticColumnWidths = false }
 
-        var widthsByIdentifier: [String: CGFloat] = [:]
+        let displayColumnIndexes = onlyVisibleColumns
+            ? SALightweightResultGrid.visibleColumnIndexes(in: tableView, buffer: SALightweightResultGrid.autosizeColumnBuffer)
+            : IndexSet(integersIn: 0..<tableView.tableColumns.count)
+        let visibleRows = visibleDisplayRowsForResultAutosizing(maxRows: 64)
 
-        for tableColumn in tableView.tableColumns {
-            guard let columnIndex = Int(tableColumn.identifier.rawValue),
-                  columnIndex < columnDefinitions.count else { continue }
-
-            if savedResultColumnWidth(for: columnDefinitions[columnIndex]) != nil {
-                continue
-            }
-
-            widthsByIdentifier[tableColumn.identifier.rawValue] = autodetectedResultWidth(for: tableColumn, columnIndex: columnIndex, maxRows: 64)
-        }
-
-        for tableColumn in tableView.tableColumns {
-            guard let targetWidth = widthsByIdentifier[tableColumn.identifier.rawValue] else { continue }
-            tableColumn.width = min(ceil(max(targetWidth, tableColumn.minWidth)), Self.automaticColumnMaximumWidth)
-        }
+        SALightweightResultGrid.autosizeColumns(in: tableView,
+                                                displayColumnIndexes: displayColumnIndexes,
+                                                visibleRows: visibleRows,
+                                                columnWidthCache: columnWidthCache,
+                                                shouldSkipColumn: { [weak self] columnIndex, _ in
+                                                    guard let self = self, columnIndex < self.columnDefinitions.count else { return true }
+                                                    let typeGrouping = (self.columnDefinitions[columnIndex]["typegrouping"] as? String) ?? ""
+                                                    return SALightweightResultGrid.isWideTextColumn(typeGrouping: typeGrouping)
+                                                        || self.savedResultColumnWidth(for: self.columnDefinitions[columnIndex]) != nil
+                                                },
+                                                cacheKey: { [weak self] columnIndex, tableColumn, visibleRows in
+                                                    self?.resultColumnWidthCacheKey(for: tableColumn, columnIndex: columnIndex, visibleRows: visibleRows) ?? tableColumn.identifier.rawValue
+                                                },
+                                                isEnumColumn: { _ in false },
+                                                displayValue: { [weak self] row, columnIndex in
+                                                    guard let self = self,
+                                                          row < self.rows.count,
+                                                          columnIndex < self.rows[row].count else { return "" }
+                                                    return self.displayValue(row: row, column: columnIndex)
+                                                })
     }
 
     func reloadCell(row: Int, columnIndex: Int) {
         SALightweightResultGrid.reloadCell(in: tableView, row: row, columnIndex: columnIndex)
     }
 
-    func autodetectedResultWidth(for tableColumn: NSTableColumn, columnIndex: Int, maxRows: Int) -> CGFloat {
-        var maxCellWidth: CGFloat = 0
-        for row in visibleDisplayRowsForResultAutosizing(maxRows: maxRows) {
-            guard columnIndex < row.count else { continue }
-            let cellWidth = measuredResultCellWidth(row[columnIndex], in: tableColumn)
-            maxCellWidth = max(maxCellWidth, cellWidth)
-        }
-
-        let headerWidth = measuredResultHeaderWidth(for: tableColumn) + 10
-        return ceil(max(maxCellWidth + 24, headerWidth, tableColumn.minWidth))
+    func resultColumnWidthCacheKey(for tableColumn: NSTableColumn, columnIndex: Int, visibleRows: Range<Int>) -> String {
+        let tableFont = UserDefaults.getFont()
+        let definition = columnIndex < columnDefinitions.count ? columnDefinitions[columnIndex] : nil
+        return [
+            tableColumn.identifier.rawValue,
+            (definition?["name"] as? String) ?? "",
+            (definition?["org_name"] as? String) ?? "",
+            (definition?["org_table"] as? String) ?? "",
+            (definition?["type"] as? String) ?? "",
+            (definition?["typegrouping"] as? String) ?? "",
+            UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes) ? "types" : "names",
+            tableFont.fontName,
+            "\(tableFont.pointSize)",
+            "\(rows.count)",
+            "\(visibleRows.lowerBound)-\(visibleRows.upperBound)"
+        ].joined(separator: "\u{1e}")
     }
 
-    func visibleDisplayRowsForResultAutosizing(maxRows: Int) -> [[String]] {
-        guard maxRows > 0, !displayRows.isEmpty else { return [] }
+    func visibleDisplayRowsForResultAutosizing(maxRows: Int) -> Range<Int> {
+        guard maxRows > 0, !rows.isEmpty else { return 0..<0 }
 
         let visibleRange = tableView.rows(in: tableView.visibleRect)
         let start = visibleRange.length > 0 ? visibleRange.location : 0
-        let end = visibleRange.length > 0 ? min(displayRows.count, visibleRange.location + visibleRange.length) : min(displayRows.count, maxRows)
-        guard start < end else { return Array(displayRows.prefix(maxRows)) }
+        let end = visibleRange.length > 0 ? min(rows.count, visibleRange.location + visibleRange.length) : min(rows.count, maxRows)
+        guard start < end else { return 0..<min(rows.count, maxRows) }
 
-        return Array(displayRows[start..<min(end, start + maxRows)])
+        return start..<min(end, start + maxRows)
     }
 
-    func measuredResultHeaderWidth(for tableColumn: NSTableColumn) -> CGFloat {
-        let headerCell = tableColumn.headerCell
-
-        if headerCell.attributedStringValue.length > 0 {
-            return max(headerCell.cellSize.width, headerCell.attributedStringValue.size().width)
-        }
-
-        let title = headerCell.stringValue as NSString
-        let font = headerCell.font ?? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
-        return max(headerCell.cellSize.width, title.size(withAttributes: [.font: font]).width)
+    static func gridColumnDescriptor(_ columnDefinition: NSDictionary, fallbackName: String) -> SALightweightResultGrid.ColumnDescriptor {
+        return SALightweightResultGrid.ColumnDescriptor(name: (columnDefinition["name"] as? String) ?? fallbackName,
+                                                        type: (columnDefinition["type"] as? String) ?? "",
+                                                        typeGrouping: (columnDefinition["typegrouping"] as? String) ?? "",
+                                                        length: String(describing: columnDefinition["char_length"] ?? ""))
     }
 
-    func measuredResultCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
-        guard let cell = (tableColumn.dataCell as? NSCell)?.copy() as? NSCell else {
-            return (value as NSString).size(withAttributes: [.font: UserDefaults.getFont()]).width
-        }
+    func headerToolTip(for columnDefinition: NSDictionary) -> String? {
+        guard let name = columnDefinition["name"] as? String,
+              let type = columnDefinition["type"] as? String else { return nil }
 
-        cell.stringValue = value
-        let font = cell.font ?? UserDefaults.getFont()
-        return max(cell.cellSize.width, (value as NSString).size(withAttributes: [.font: font]).width)
+        let lengthSuffix = columnDefinition["char_length"].map { "(\($0))" } ?? ""
+        return "\(name) - \(type)\(lengthSuffix)"
     }
-
-    private static let automaticColumnMaximumWidth: CGFloat = 420
 
     func updateStatus(for result: QueryResult, queryCount: Int) {
         let time = String(format: "%.3fs", result.executionTime)
@@ -2144,6 +2242,29 @@ private extension SALightweightQueryViewController {
                 : ""
             setStatusText(String(format: NSLocalizedString("%@; %ld rows loaded%@, first row available after %@", comment: "lightweight query rows loaded status"), statusTitle, result.rows.count, suffix, time))
         }
+    }
+
+    func queryByApplyingDisplayLimit(to query: String) -> String {
+        let maskedQuery = queryMaskedForClauseSearch(query)
+        guard firstRegexRange(in: maskedQuery, pattern: #"(?is)^\s*\(?\s*SELECT\b"#) != nil,
+              firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+LIMIT\b"#) == nil else {
+            return query
+        }
+
+        let limitClause = " LIMIT \(maxDisplayedRows + 1)"
+        let queryNSString = query as NSString
+        let mutableQuery = NSMutableString(string: query)
+        let trailingSemicolonRange = firstRegexRange(in: maskedQuery, pattern: #"(?s);\s*$"#)
+        let insertionLimit = trailingSemicolonRange?.location ?? queryNSString.length
+        let prefix = (maskedQuery as NSString).substring(to: insertionLimit)
+
+        if let suffixRange = firstRegexRange(in: prefix, pattern: #"(?is)\s+(?:PROCEDURE|INTO|FOR|LOCK)\b"#) {
+            mutableQuery.insert(limitClause, at: suffixRange.location)
+        } else {
+            mutableQuery.insert(limitClause, at: insertionLimit)
+        }
+
+        return mutableQuery as String
     }
 
     func queryByApplyingSort(to query: String, columnIndex: Int, descending: Bool) -> String {
@@ -3177,23 +3298,18 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                    tableColumn: NSTableColumn?,
                    row: Int,
                    mouseLocation: NSPoint) -> String {
-        guard row >= 0,
-              row < rows.count,
-              let columnIdentifier = tableColumn?.identifier.rawValue,
-              let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].count else { return "" }
-
-        return ""
+        return SALightweightResultGrid.emptyToolTip(row: row,
+                                                    rowCount: rows.count,
+                                                    tableColumn: tableColumn,
+                                                    columnCount: { self.rows[$0].count })
     }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
-        guard row >= 0,
-              row < rows.count,
-              let columnIdentifier = tableColumn?.identifier.rawValue,
-              let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].count else { return nil }
-
-        return displayValue(row: row, column: columnIndex)
+        return SALightweightResultGrid.objectValue(row: row,
+                                                   rowCount: rows.count,
+                                                   tableColumn: tableColumn,
+                                                   columnCount: { self.rows[$0].count },
+                                                   displayValue: { self.displayValue(row: $0, column: $1) })
     }
 
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
@@ -3258,15 +3374,13 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                 }
 
                 guard row < self.rows.count,
-                      row < self.displayRows.count,
-                      columnIndex < self.rows[row].count,
-                      columnIndex < self.displayRows[row].count else {
+                      columnIndex < self.rows[row].count else {
                     self.tableView.reloadData()
                     return
                 }
 
                 self.rows[row][columnIndex] = update.localValue
-                self.displayRows[row][columnIndex] = self.displayString(for: update.localValue, columnDefinition: self.columnDefinition(at: columnIndex), truncate: true)
+                self.displayCache.invalidate(row: row, column: columnIndex)
                 self.setStatusText(NSLocalizedString("Cell updated.", comment: "lightweight query cell updated status"))
                 self.reloadCell(row: row, columnIndex: columnIndex)
             }
@@ -3291,7 +3405,14 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               columnIndex < columnDefinitions.count else { return 0 }
 
         clearSavedResultColumnWidth(for: columnDefinitions[columnIndex], fallbackIndex: columnIndex)
-        return autodetectedResultWidth(for: tableView.tableColumns[column], columnIndex: columnIndex, maxRows: 128)
+        return SALightweightResultGrid.sizeToFitWidthOfColumn(in: tableView,
+                                                              displayColumn: column,
+                                                              visibleRows: visibleDisplayRowsForResultAutosizing(maxRows: 128)) { [weak self] row, columnIndex in
+            guard let self = self,
+                  row < self.rows.count,
+                  columnIndex < self.rows[row].count else { return "" }
+            return self.displayValue(row: row, column: columnIndex)
+        }
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
@@ -3300,10 +3421,9 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               row < rows.count,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].count,
-              let textCell = cell as? NSTextFieldCell else { return }
+              columnIndex < rows[row].count else { return }
 
-        textCell.textColor = rows[row][columnIndex] is NSNull ? .secondaryLabelColor : .labelColor
+        SALightweightResultGrid.configureDisplayCell(cell, isNullOrPlaceholder: rows[row][columnIndex] is NSNull)
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
@@ -3322,11 +3442,13 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
     func displayValue(row: Int, column columnIndex: Int) -> String {
         guard row >= 0,
-              row < displayRows.count,
+              row < rows.count,
               columnIndex >= 0,
-              columnIndex < displayRows[row].count else { return "" }
+              columnIndex < rows[row].count else { return "" }
 
-        return displayRows[row][columnIndex]
+        return displayCache.value(row: row, column: columnIndex) {
+            displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: true)
+        }
     }
 
     func compareResultValue(_ lhs: Any, _ rhs: Any, columnDefinition: NSDictionary) -> ComparisonResult {
@@ -3367,52 +3489,14 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
     }
 
     func displayString(for value: Any, columnDefinition: NSDictionary? = nil, truncate: Bool = false) -> String {
-        if value is NSNull {
-            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
-        }
-
-        if let data = value as? Data {
-            if UserDefaults.standard.bool(forKey: SPDisplayBinaryDataAsHex),
-               shouldDisplayDataAsHex(columnDefinition: columnDefinition) {
-                if truncate && data.count > Self.tableCellDisplayMaximumBytes {
-                    return "0x" + data.prefix(Self.tableCellDisplayMaximumBytes).map { String(format: "%02X", $0) }.joined() + "..."
-                }
-                return "0x" + data.map { String(format: "%02X", $0) }.joined()
-            }
-
-            return Self.displayString(String(data: data, encoding: .utf8) ?? "", truncate: truncate)
-        }
-
-        return Self.displayString(String(describing: value), truncate: truncate)
+        return SALightweightResultGrid.displayString(for: value,
+                                                     descriptor: columnDefinition.map { Self.gridColumnDescriptor($0, fallbackName: "") },
+                                                     truncate: truncate)
     }
 
     func rebuildDisplayRows() {
-        displayRows = displayRows(for: rows, columnDefinitions: columnDefinitions)
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
     }
 
-    func displayRows(for rows: [[Any]], columnDefinitions: [NSDictionary]) -> [[String]] {
-        return rows.map { row in
-            row.enumerated().map { index, value in
-                displayString(for: value, columnDefinition: index < columnDefinitions.count ? columnDefinitions[index] : nil, truncate: true)
-            }
-        }
-    }
-
-    static func displayString(_ value: String, truncate: Bool) -> String {
-        guard truncate else { return value }
-        return SALightweightResultGrid.tableCellPreviewString(value, maximumCharacters: tableCellDisplayMaximumCharacters)
-    }
-
-    func shouldDisplayDataAsHex(columnDefinition: NSDictionary?) -> Bool {
-        let typeGrouping = ((columnDefinition?["typegrouping"] as? String) ?? "").lowercased()
-        let type = ((columnDefinition?["type"] as? String) ?? "").lowercased()
-
-        return typeGrouping == "binary"
-            || typeGrouping == "blobdata"
-            || type.contains("binary")
-            || type.hasSuffix("blob")
-    }
-
-    private static let tableCellDisplayMaximumCharacters = 96
-    private static let tableCellDisplayMaximumBytes = 48
 }

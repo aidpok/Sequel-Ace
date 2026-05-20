@@ -118,10 +118,124 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
     }
 }
 
+final class SALightweightResultGridDisplayCache {
+    private struct Key: Hashable {
+        let row: Int
+        let column: Int
+    }
+
+    private var values: [Key: String] = [:]
+
+    func value(row: Int, column: Int, builder: () -> String) -> String {
+        let key = Key(row: row, column: column)
+        if let value = values[key] {
+            return value
+        }
+
+        let value = builder()
+        values[key] = value
+        return value
+    }
+
+    func invalidate(row: Int, column: Int) {
+        values.removeValue(forKey: Key(row: row, column: column))
+    }
+
+    func invalidate(row: Int) {
+        values = values.filter { $0.key.row != row }
+    }
+
+    func invalidateAll() {
+        values.removeAll(keepingCapacity: true)
+    }
+}
+
+final class SALightweightResultGridColumnWidthCache {
+    private var values: [String: CGFloat] = [:]
+
+    func value(key: String, builder: () -> CGFloat) -> CGFloat {
+        if let value = values[key] {
+            return value
+        }
+
+        let value = builder()
+        values[key] = value
+        return value
+    }
+
+    func invalidateAll() {
+        values.removeAll(keepingCapacity: true)
+    }
+}
+
+final class SALightweightResultGridAutosizeCoordinator {
+    private var isLiveScrolling = false
+    private var pendingAutosize: DispatchWorkItem?
+
+    deinit {
+        cancel()
+    }
+
+    func cancel() {
+        pendingAutosize?.cancel()
+        pendingAutosize = nil
+    }
+
+    func willStartLiveScroll() {
+        isLiveScrolling = true
+        cancel()
+    }
+
+    func didEndLiveScroll() {
+        isLiveScrolling = false
+    }
+
+    func schedule(delay: TimeInterval = 0.05, _ block: @escaping () -> Void) {
+        guard !isLiveScrolling else { return }
+
+        cancel()
+        let workItem = DispatchWorkItem(block: block)
+        pendingAutosize = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+}
+
 enum SALightweightResultGrid {
     static let tabularPasteboardType = NSPasteboard.PasteboardType("public.utf8-tab-separated-values-text")
+    static let automaticColumnMaximumWidth: CGFloat = 420
+    static let wideTextColumnWidth: CGFloat = 500
+    static let tableCellDisplayMaximumCharacters = 96
+    static let tableCellDisplayMaximumBytes = 48
+    static let autosizeColumnBuffer = 6
+
+    struct ColumnDescriptor {
+        let name: String
+        let type: String
+        let typeGrouping: String
+        let length: String
+        let values: [String]
+        let isNullable: Bool
+
+        init(name: String, type: String, typeGrouping: String, length: String, values: [String] = [], isNullable: Bool = false) {
+            self.name = name
+            self.type = type
+            self.typeGrouping = typeGrouping
+            self.length = length
+            self.values = values
+            self.isNullable = isNullable
+        }
+    }
+
+    static func rowHeight(for font: NSFont) -> CGFloat {
+        return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
+    }
+
+    static func headerFont(for font: NSFont) -> NSFont {
+        return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
+    }
 
     static func configureTableView(_ tableView: NSTableView, rowHeight: CGFloat, columnAutoresizingStyle: NSTableView.ColumnAutoresizingStyle) {
+        tableView.focusRingType = .none
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
@@ -152,10 +266,116 @@ enum SALightweightResultGrid {
     }
 
     static func configureScrollView(_ scrollView: NSScrollView) {
+        scrollView.focusRingType = .none
         scrollView.wantsLayer = true
         scrollView.layerContentsRedrawPolicy = .onSetNeedsDisplay
         scrollView.contentView.wantsLayer = true
         scrollView.contentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    static func configureResultScrollView(_ scrollView: NSScrollView, lineScroll: CGFloat = 18) {
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.verticalLineScroll = lineScroll
+        scrollView.horizontalLineScroll = lineScroll
+        scrollView.contentView.drawsBackground = false
+        configureScrollView(scrollView)
+    }
+
+    static func dataCell(for descriptor: ColumnDescriptor, font: NSFont, editable: Bool) -> NSCell {
+        let cell: NSCell
+        let typeGrouping = descriptor.typeGrouping.lowercased()
+
+        if typeGrouping == "enum" {
+            let comboCell = SPComboBoxCell(textCell: "")
+            comboCell.isButtonBordered = false
+            comboCell.isBezeled = false
+            comboCell.drawsBackground = false
+            comboCell.completes = true
+            comboCell.controlSize = .small
+            comboCell.usesSingleLineMode = true
+            if descriptor.isNullable {
+                comboCell.addItem(withObjectValue: UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL")
+            }
+            comboCell.addItems(withObjectValues: descriptor.values)
+            cell = comboCell
+        } else {
+            cell = NSTextFieldCell(textCell: "")
+        }
+
+        cell.isEditable = editable
+        cell.isSelectable = true
+        cell.lineBreakMode = .byTruncatingTail
+        cell.font = font
+
+        if typeGrouping == "integer" || typeGrouping == "float" {
+            cell.alignment = .right
+        }
+
+        let formatter = SPDataCellFormatter()
+        formatter.fieldType = descriptor.type
+        if (typeGrouping == "string" || typeGrouping == "bit"),
+           let limit = Int(descriptor.length) {
+            formatter.textLimit = limit
+        }
+        cell.formatter = formatter
+
+        return cell
+    }
+
+    static func configuredColumn(identifier: Int,
+                                 title: String,
+                                 descriptor: ColumnDescriptor,
+                                 font: NSFont,
+                                 editable: Bool,
+                                 headerToolTip: String?,
+                                 headerAttributedString: NSAttributedString,
+                                 savedWidth: CGFloat?,
+                                 minWidth: CGFloat,
+                                 maxWidth: CGFloat = 20_000,
+                                 resizingMask: NSTableColumn.ResizingOptions = [.autoresizingMask, .userResizingMask]) -> NSTableColumn {
+        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(identifier)"))
+        tableColumn.title = title
+        tableColumn.isEditable = editable
+        tableColumn.width = isWideTextColumn(typeGrouping: descriptor.typeGrouping)
+            ? wideTextColumnWidth
+            : savedWidth ?? defaultColumnWidth(for: descriptor)
+        tableColumn.minWidth = minWidth
+        tableColumn.maxWidth = maxWidth
+        tableColumn.resizingMask = resizingMask
+        tableColumn.headerToolTip = headerToolTip
+        tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(identifier)", ascending: true)
+        tableColumn.headerCell.font = headerFont(for: font)
+        tableColumn.headerCell.attributedStringValue = headerAttributedString
+        tableColumn.dataCell = dataCell(for: descriptor, font: font, editable: editable)
+        return tableColumn
+    }
+
+    static func updateColumn(_ tableColumn: NSTableColumn,
+                             identifier: Int,
+                             title: String,
+                             descriptor: ColumnDescriptor,
+                             font: NSFont,
+                             editable: Bool,
+                             headerToolTip: String?,
+                             headerAttributedString: NSAttributedString) {
+        tableColumn.identifier = NSUserInterfaceItemIdentifier("\(identifier)")
+        tableColumn.title = title
+        tableColumn.isEditable = editable
+        tableColumn.headerToolTip = headerToolTip
+        tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(identifier)", ascending: true)
+        tableColumn.headerCell.font = headerFont(for: font)
+        tableColumn.headerCell.attributedStringValue = headerAttributedString
+
+        if let cell = tableColumn.dataCell as? NSCell,
+           !(descriptor.typeGrouping.lowercased() == "enum" && !(cell is SPComboBoxCell)) {
+            cell.isEditable = editable
+            cell.font = font
+        } else {
+            tableColumn.dataCell = dataCell(for: descriptor, font: font, editable: editable)
+        }
     }
 
     static func contextMenu(target: AnyObject,
@@ -229,6 +449,151 @@ enum SALightweightResultGrid {
         tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: displayColumnIndex))
     }
 
+    static func reloadVisibleCells(in tableView: NSTableView, columnBuffer: Int = 2) {
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        guard visibleRows.length > 0 else {
+            tableView.setNeedsDisplay(tableView.visibleRect)
+            return
+        }
+
+        let rowIndexes = IndexSet(integersIn: visibleRows.location..<min(tableView.numberOfRows, visibleRows.location + visibleRows.length))
+        let columnIndexes = visibleColumnIndexes(in: tableView, buffer: columnBuffer)
+        guard !rowIndexes.isEmpty, !columnIndexes.isEmpty else {
+            tableView.setNeedsDisplay(tableView.visibleRect)
+            return
+        }
+
+        tableView.reloadData(forRowIndexes: rowIndexes, columnIndexes: columnIndexes)
+    }
+
+    static func visibleColumnIndexes(in tableView: NSTableView, buffer: Int = 2) -> IndexSet {
+        let columnCount = tableView.tableColumns.count
+        guard columnCount > 0 else { return IndexSet() }
+
+        let visibleColumns = tableView.columnIndexes(in: tableView.visibleRect)
+        guard !visibleColumns.isEmpty else {
+            return IndexSet(integersIn: 0..<min(columnCount, max(1, buffer * 2 + 1)))
+        }
+
+        let lowerBound = max(0, visibleColumns.first! - buffer)
+        let upperBound = min(columnCount, visibleColumns.last! + buffer + 1)
+        return IndexSet(integersIn: lowerBound..<upperBound)
+    }
+
+    static func isWideTextColumn(typeGrouping: String) -> Bool {
+        let typeGrouping = typeGrouping.lowercased()
+        return typeGrouping == "textdata" || typeGrouping == "blobdata"
+    }
+
+    static func defaultColumnWidth(for descriptor: ColumnDescriptor) -> CGFloat {
+        if isWideTextColumn(typeGrouping: descriptor.typeGrouping) {
+            return wideTextColumnWidth
+        }
+
+        let headerWidth = CGFloat(descriptor.name.count * 9 + 32)
+
+        switch descriptor.typeGrouping {
+        case "integer", "float", "date", "time", "bit":
+            return max(70, min(150, headerWidth))
+        case "string":
+            if let length = Int(descriptor.length), length > 0 {
+                return max(90, min(260, max(headerWidth, CGFloat(length * 7 + 28))))
+            }
+            return max(100, min(220, headerWidth))
+        default:
+            return max(90, min(220, headerWidth))
+        }
+    }
+
+    static func fittedColumnWidth(_ targetWidth: CGFloat, minimumWidth: CGFloat) -> CGFloat {
+        min(ceil(max(targetWidth, minimumWidth)), automaticColumnMaximumWidth)
+    }
+
+    static func measuredHeaderWidth(for tableColumn: NSTableColumn) -> CGFloat {
+        let headerCell = tableColumn.headerCell
+
+        if headerCell.attributedStringValue.length > 0 {
+            return max(headerCell.cellSize.width, headerCell.attributedStringValue.size().width)
+        }
+
+        let title = headerCell.stringValue as NSString
+        let font = headerCell.font ?? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+        return max(headerCell.cellSize.width, title.size(withAttributes: [.font: font]).width)
+    }
+
+    static func measuredCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
+        guard let cell = (tableColumn.dataCell as? NSCell)?.copy() as? NSCell else {
+            return (value as NSString).size(withAttributes: [.font: UserDefaults.getFont()]).width
+        }
+
+        cell.stringValue = value
+        let font = cell.font ?? UserDefaults.getFont()
+        return max(cell.cellSize.width, (value as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    static func autodetectedColumnWidth(for tableColumn: NSTableColumn,
+                                        columnIndex: Int,
+                                        visibleRows: Range<Int>,
+                                        isEnumColumn: Bool,
+                                        displayValue: (Int, Int) -> String) -> CGFloat {
+        var maxCellWidth: CGFloat = 0
+        for row in visibleRows {
+            let cellWidth = measuredCellWidth(displayValue(row, columnIndex), in: tableColumn)
+            maxCellWidth = max(maxCellWidth, cellWidth)
+        }
+
+        if isEnumColumn {
+            maxCellWidth += 8
+        }
+
+        let headerWidth = measuredHeaderWidth(for: tableColumn) + 10
+        return ceil(max(maxCellWidth + 24, headerWidth, tableColumn.minWidth))
+    }
+
+    static func autosizeColumns(in tableView: NSTableView,
+                                displayColumnIndexes: IndexSet,
+                                visibleRows: Range<Int>,
+                                columnWidthCache: SALightweightResultGridColumnWidthCache,
+                                shouldSkipColumn: (Int, NSTableColumn) -> Bool,
+                                cacheKey: (Int, NSTableColumn, Range<Int>) -> String,
+                                isEnumColumn: (Int) -> Bool,
+                                displayValue: (Int, Int) -> String) {
+        var widthsByIdentifier: [String: CGFloat] = [:]
+
+        for displayColumnIndex in displayColumnIndexes {
+            guard displayColumnIndex < tableView.tableColumns.count else { continue }
+            let tableColumn = tableView.tableColumns[displayColumnIndex]
+            guard let columnIndex = Int(tableColumn.identifier.rawValue) else { continue }
+
+            if shouldSkipColumn(columnIndex, tableColumn) {
+                continue
+            }
+
+            let cacheKey = cacheKey(columnIndex, tableColumn, visibleRows)
+            widthsByIdentifier[tableColumn.identifier.rawValue] = columnWidthCache.value(key: cacheKey) {
+                autodetectedColumnWidth(for: tableColumn,
+                                        columnIndex: columnIndex,
+                                        visibleRows: visibleRows,
+                                        isEnumColumn: isEnumColumn(columnIndex),
+                                        displayValue: displayValue)
+            }
+        }
+
+        for tableColumn in tableView.tableColumns {
+            guard let targetWidth = widthsByIdentifier[tableColumn.identifier.rawValue] else { continue }
+            let width = fittedColumnWidth(targetWidth, minimumWidth: tableColumn.minWidth)
+            guard abs(tableColumn.width - width) > 0.5 else { continue }
+            tableColumn.width = width
+        }
+    }
+
+    static func logPerformance(_ action: String, start: CFAbsoluteTime, details: String = "", minimumMilliseconds: Double = 8) {
+        let milliseconds = (CFAbsoluteTimeGetCurrent() - start) * 1_000
+        guard milliseconds >= minimumMilliseconds else { return }
+
+        NSLog("SA LightweightGridPerformance %@ %.2f ms %@", action, milliseconds, details)
+    }
+
     static func matchingRowCount(for query: String, connection: SPMySQLConnection) -> Int? {
         guard let result = connection.queryString(query) else { return nil }
 
@@ -266,6 +631,92 @@ enum SALightweightResultGrid {
         }
 
         return false
+    }
+
+    static func displayString(for value: Any?, descriptor: ColumnDescriptor? = nil, truncate: Bool = false) -> String {
+        guard let value = value, !(value is NSNull) else {
+            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        }
+
+        if let data = value as? Data {
+            if UserDefaults.standard.bool(forKey: SPDisplayBinaryDataAsHex),
+               shouldDisplayDataAsHex(descriptor: descriptor) {
+                if truncate && data.count > tableCellDisplayMaximumBytes {
+                    return "0x" + data.prefix(tableCellDisplayMaximumBytes).map { String(format: "%02X", $0) }.joined() + "..."
+                }
+                return "0x" + data.map { String(format: "%02X", $0) }.joined()
+            }
+
+            return displayString(String(data: data, encoding: .utf8) ?? "", truncate: truncate)
+        }
+
+        return displayString(String(describing: value), truncate: truncate)
+    }
+
+    static func displayString(_ value: String, truncate: Bool) -> String {
+        guard truncate else { return value }
+        return tableCellPreviewString(value, maximumCharacters: tableCellDisplayMaximumCharacters)
+    }
+
+    static func shouldDisplayDataAsHex(descriptor: ColumnDescriptor?) -> Bool {
+        let typeGrouping = descriptor?.typeGrouping.lowercased() ?? ""
+        let type = descriptor?.type.lowercased() ?? ""
+
+        return typeGrouping == "binary"
+            || typeGrouping == "blobdata"
+            || type.contains("binary")
+            || type.hasSuffix("blob")
+    }
+
+    static func columnIndex(for tableColumn: NSTableColumn?) -> Int? {
+        guard let columnIdentifier = tableColumn?.identifier.rawValue else { return nil }
+        return Int(columnIdentifier)
+    }
+
+    static func objectValue(row: Int,
+                            rowCount: Int,
+                            tableColumn: NSTableColumn?,
+                            columnCount: (Int) -> Int,
+                            displayValue: (Int, Int) -> String) -> Any? {
+        guard row >= 0,
+              row < rowCount,
+              let columnIndex = columnIndex(for: tableColumn),
+              columnIndex < columnCount(row) else { return nil }
+
+        return displayValue(row, columnIndex)
+    }
+
+    static func emptyToolTip(row: Int,
+                             rowCount: Int,
+                             tableColumn: NSTableColumn?,
+                             columnCount: (Int) -> Int) -> String {
+        guard row >= 0,
+              row < rowCount,
+              let columnIndex = columnIndex(for: tableColumn),
+              columnIndex < columnCount(row) else { return "" }
+
+        return ""
+    }
+
+    static func configureDisplayCell(_ cell: Any, isNullOrPlaceholder: Bool) {
+        guard let textCell = cell as? NSTextFieldCell else { return }
+        textCell.textColor = isNullOrPlaceholder ? .secondaryLabelColor : .labelColor
+    }
+
+    static func sizeToFitWidthOfColumn(in tableView: NSTableView,
+                                       displayColumn: Int,
+                                       visibleRows: Range<Int>,
+                                       isEnumColumn: Bool = false,
+                                       displayValue: (Int, Int) -> String) -> CGFloat {
+        guard displayColumn >= 0,
+              displayColumn < tableView.tableColumns.count,
+              let columnIndex = Int(tableView.tableColumns[displayColumn].identifier.rawValue) else { return 0 }
+
+        return autodetectedColumnWidth(for: tableView.tableColumns[displayColumn],
+                                       columnIndex: columnIndex,
+                                       visibleRows: visibleRows,
+                                       isEnumColumn: isEnumColumn,
+                                       displayValue: displayValue)
     }
 
     static func tableCellPreviewString(_ value: String, maximumCharacters: Int) -> String {

@@ -46,7 +46,6 @@ final class SALightweightContentViewController: NSViewController {
     fileprivate struct ContentRow {
         var values: [ContentValue]
         var originalValues: [ContentValue]
-        var displayValues: [String]
     }
 
     private struct ContentCacheEntry {
@@ -110,6 +109,8 @@ final class SALightweightContentViewController: NSViewController {
     private var columns: [String] = []
     private var columnInfo: [ColumnInfo] = []
     private var rows: [ContentRow] = []
+    private let displayCache = SALightweightResultGridDisplayCache()
+    private let columnWidthCache = SALightweightResultGridColumnWidthCache()
     private var filteredColumns: [Int] = []
     private var loadToken = UUID()
     private var pageIndex = 0
@@ -122,6 +123,7 @@ final class SALightweightContentViewController: NSViewController {
     private var didRegisterPreferenceObservers = false
     private var isApplyingProgrammaticColumnWidths = false
     private var isApplyingProgrammaticSortDescriptors = false
+    private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
     private var isRuleFilterVisible = true
     private var isRuleFilterActive = false
@@ -236,8 +238,7 @@ final class SALightweightContentViewController: NSViewController {
         tableView.dataSource = self
         tableView.delegate = self
         tableView.allowsExpansionToolTips = false
-        tableView.focusRingType = .none
-        SALightweightResultGrid.configureTableView(tableView, rowHeight: Self.tableRowHeight(for: UserDefaults.getFont()), columnAutoresizingStyle: .noColumnAutoresizing)
+        SALightweightResultGrid.configureTableView(tableView, rowHeight: SALightweightResultGrid.rowHeight(for: UserDefaults.getFont()), columnAutoresizingStyle: .noColumnAutoresizing)
         tableView.style = .plain
         return tableView
     }()
@@ -304,6 +305,8 @@ final class SALightweightContentViewController: NSViewController {
         contentCache.removeAll()
         contentCacheOrder.removeAll()
         columnInfoCache.removeAll()
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
     }
 
     func cacheColumnInfo(fromStructureRows structureRows: [[String: String]], for table: String, database: String, connection: SPMySQLConnection) {
@@ -340,16 +343,12 @@ final class SALightweightContentViewController: NSViewController {
         let rootView = NSView(frame: .zero)
 
         let scrollView = NSScrollView(frame: .zero)
-        scrollView.borderType = .noBorder
-        scrollView.focusRingType = .none
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.verticalLineScroll = 18
-        scrollView.horizontalLineScroll = 18
-        scrollView.contentView.drawsBackground = false
-        SALightweightResultGrid.configureScrollView(scrollView)
+        SALightweightResultGrid.configureResultScrollView(scrollView)
         scrollView.documentView = tableView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridBoundsDidChange(_:)), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridWillStartLiveScroll(_:)), name: NSScrollView.willStartLiveScrollNotification, object: scrollView)
+        NotificationCenter.default.addObserver(self, selector: #selector(resultGridDidEndLiveScroll(_:)), name: NSScrollView.didEndLiveScrollNotification, object: scrollView)
 
         let toolbarView = NSView(frame: .zero)
 
@@ -508,6 +507,7 @@ final class SALightweightContentViewController: NSViewController {
     }
 
     deinit {
+        autosizeCoordinator.cancel()
         NotificationCenter.default.removeObserver(self)
         if didRegisterPreferenceObservers {
             UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines)
@@ -530,7 +530,7 @@ final class SALightweightContentViewController: NSViewController {
             rebuildColumns()
         case SPDisplayBinaryDataAsHex, SPNullValue:
             rebuildDisplayValues()
-            tableView.reloadData()
+            SALightweightResultGrid.reloadVisibleCells(in: tableView, columnBuffer: SALightweightResultGrid.autosizeColumnBuffer)
             autosizeContentColumns()
             cacheCurrentContentState()
         case SPLoadBlobsAsNeeded:
@@ -730,6 +730,8 @@ private extension SALightweightContentViewController {
         columns = []
         columnInfo = []
         rows = []
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
         filteredColumns = []
         tableObjectType = .unknown
         totalRowCount = nil
@@ -786,7 +788,7 @@ private extension SALightweightContentViewController {
 
                     return Self.contentValue(for: value)
                 }
-                pendingRows.append(ContentRow(values: values, originalValues: values, displayValues: Self.displayValues(for: values, columnInfo: orderedColumnInfo)))
+                pendingRows.append(ContentRow(values: values, originalValues: values))
 
                 if pendingRows.count >= self.initialRowLoadPublishSize {
                     self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
@@ -822,7 +824,7 @@ private extension SALightweightContentViewController {
 
                         return Self.contentValue(for: value)
                     }
-                    pendingRows.append(ContentRow(values: values, originalValues: values, displayValues: Self.displayValues(for: values, columnInfo: orderedColumnInfo)))
+                    pendingRows.append(ContentRow(values: values, originalValues: values))
 
                     if pendingRows.count >= self.remainingRowLoadPublishSize {
                         self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
@@ -846,6 +848,8 @@ private extension SALightweightContentViewController {
                     self.columns = []
                     self.columnInfo = []
                     self.rows = []
+                    self.displayCache.invalidateAll()
+                    self.columnWidthCache.invalidateAll()
                     self.filteredColumns = []
                     self.totalRowCount = nil
                     self.totalRowCountIsEstimate = false
@@ -879,6 +883,8 @@ private extension SALightweightContentViewController {
             self.columns = fieldNames
             self.columnInfo = columnInfo
             self.rows = []
+            self.displayCache.invalidateAll()
+            self.columnWidthCache.invalidateAll()
             self.tableObjectType = tableObjectType
             self.totalRowCount = rowCount?.count
             self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
@@ -909,6 +915,11 @@ private extension SALightweightContentViewController {
     }
 
     private func appendContentRows(_ newRows: [ContentRow], autosizeColumns shouldAutosizeColumns: Bool) {
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Content append rows", start: benchmarkStart, details: "newRows=\(newRows.count) totalRows=\(rows.count) columns=\(filteredColumns.count)", minimumMilliseconds: 4)
+        }
+
         guard !newRows.isEmpty else { return }
 
         rows.append(contentsOf: newRows)
@@ -916,7 +927,7 @@ private extension SALightweightContentViewController {
         updateStatus()
 
         if shouldAutosizeColumns {
-            autosizeContentColumns()
+            scheduleVisibleColumnAutosize(delay: 0.01)
         }
     }
 
@@ -1289,6 +1300,11 @@ private extension SALightweightContentViewController {
     }
 
     func rebuildColumns() {
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Content rebuild columns", start: benchmarkStart, details: "columns=\(filteredColumns.count) rows=\(rows.count) table=\(table)", minimumMilliseconds: 4)
+        }
+
         let tableFont = UserDefaults.getFont()
         let showColumnTypes = UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes)
         let columnSignature = currentColumnSignature()
@@ -1297,6 +1313,7 @@ private extension SALightweightContentViewController {
            tableView.tableColumns.count == filteredColumns.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
             tableView.headerView?.needsDisplay = true
+            scheduleVisibleColumnAutosize(delay: 0.01)
             return
         }
 
@@ -1307,23 +1324,41 @@ private extension SALightweightContentViewController {
             let column = columnIndex < columnInfo.count
                 ? columnInfo[columnIndex]
                 : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
-            let identifier = NSUserInterfaceItemIdentifier("\(columnIndex)")
-            let tableColumn = NSTableColumn(identifier: identifier)
-            tableColumn.title = columnName
-            tableColumn.width = savedWidth(for: columnName) ?? 90
-            tableColumn.minWidth = 8
-            tableColumn.maxWidth = 20_000
-            tableColumn.resizingMask = [.autoresizingMask, .userResizingMask]
-            tableColumn.headerToolTip = legacyHeaderToolTip(for: column)
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(columnIndex)", ascending: true)
-            tableColumn.headerCell.attributedStringValue = contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes)
-            tableColumn.dataCell = dataCell(for: column, font: tableFont)
+            let tableColumn = SALightweightResultGrid.configuredColumn(
+                identifier: columnIndex,
+                title: columnName,
+                descriptor: Self.gridColumnDescriptor(columnName: columnName, column: column),
+                font: tableFont,
+                editable: tableObjectType == .table,
+                headerToolTip: legacyHeaderToolTip(for: column),
+                headerAttributedString: contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes),
+                savedWidth: savedWidth(for: columnName),
+                minWidth: 8
+            )
             tableView.addTableColumn(tableColumn)
         }
 
         displayedColumnSignature = columnSignature
         tableView.reloadData()
-        autosizeContentColumns()
+        scheduleVisibleColumnAutosize(delay: 0.01)
+    }
+
+    @objc func resultGridBoundsDidChange(_ notification: Notification) {
+        // Keep horizontal scrolling smooth; column widths are stabilized at load time.
+    }
+
+    @objc func resultGridWillStartLiveScroll(_ notification: Notification) {
+        autosizeCoordinator.willStartLiveScroll()
+    }
+
+    @objc func resultGridDidEndLiveScroll(_ notification: Notification) {
+        autosizeCoordinator.didEndLiveScroll()
+    }
+
+    func scheduleVisibleColumnAutosize(delay: TimeInterval = 0.05) {
+        autosizeCoordinator.schedule(delay: delay) { [weak self] in
+            self?.autosizeContentColumns()
+        }
     }
 
     func currentColumnSignature() -> [String] {
@@ -1353,14 +1388,14 @@ private extension SALightweightContentViewController {
                 ? columnInfo[columnIndex]
                 : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
             let tableColumn = tableView.tableColumns[displayIndex]
-            tableColumn.identifier = NSUserInterfaceItemIdentifier("\(columnIndex)")
-            tableColumn.title = columnName
-            tableColumn.headerToolTip = legacyHeaderToolTip(for: column)
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(columnIndex)", ascending: true)
-            tableColumn.headerCell.font = Self.headerFont(for: tableFont)
-            tableColumn.headerCell.attributedStringValue = contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes)
-            (tableColumn.dataCell as? NSCell)?.font = tableFont
-            (tableColumn.dataCell as? NSCell)?.isEditable = tableObjectType == .table
+            SALightweightResultGrid.updateColumn(tableColumn,
+                                                 identifier: columnIndex,
+                                                 title: columnName,
+                                                 descriptor: Self.gridColumnDescriptor(columnName: columnName, column: column),
+                                                 font: tableFont,
+                                                 editable: tableObjectType == .table,
+                                                 headerToolTip: legacyHeaderToolTip(for: column),
+                                                 headerAttributedString: contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes))
         }
         tableView.headerView?.needsDisplay = true
     }
@@ -1884,6 +1919,8 @@ private extension SALightweightContentViewController {
         columns = cached.columns
         columnInfo = cached.columnInfo
         rows = cached.rows
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
         pageIndex = cached.pageIndex
         tableObjectType = cached.tableObjectType
         totalRowCount = cached.totalRowCount
@@ -2006,11 +2043,11 @@ private extension SALightweightContentViewController {
     func applyTablePreferences(rebuildColumns shouldRebuildColumns: Bool, rebuildDisplayValues shouldRebuildDisplayValues: Bool = true) {
         let tableFont = UserDefaults.getFont()
         tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
-        tableView.rowHeight = Self.tableRowHeight(for: tableFont)
+        tableView.rowHeight = SALightweightResultGrid.rowHeight(for: tableFont)
 
         for column in tableView.tableColumns {
             (column.dataCell as? NSCell)?.font = tableFont
-            column.headerCell.font = Self.headerFont(for: tableFont)
+            column.headerCell.font = SALightweightResultGrid.headerFont(for: tableFont)
         }
 
         if shouldRebuildColumns {
@@ -2020,7 +2057,7 @@ private extension SALightweightContentViewController {
                 rebuildDisplayValues()
             }
             tableView.headerView?.needsDisplay = true
-            tableView.reloadData()
+            SALightweightResultGrid.reloadVisibleCells(in: tableView, columnBuffer: SALightweightResultGrid.autosizeColumnBuffer)
             autosizeContentColumns()
         }
     }
@@ -2046,121 +2083,83 @@ private extension SALightweightContentViewController {
         return tooltip
     }
 
-    func dataCell(for column: ColumnInfo, font: NSFont) -> NSCell {
-        let cell: NSCell
-        if column.typeGrouping == "enum" {
-            let comboCell = SPComboBoxCell(textCell: "")
-            comboCell.isButtonBordered = false
-            comboCell.isBezeled = false
-            comboCell.drawsBackground = false
-            comboCell.completes = true
-            comboCell.controlSize = .small
-            comboCell.usesSingleLineMode = true
-            if column.isNullable {
-                comboCell.addItem(withObjectValue: UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL")
-            }
-            comboCell.addItems(withObjectValues: column.values)
-            cell = comboCell
-        } else {
-            cell = NSTextFieldCell(textCell: "")
+    func autosizeContentColumns(onlyVisibleColumns: Bool = true) {
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            SALightweightResultGrid.logPerformance("Content autosize columns", start: benchmarkStart, details: "columns=\(tableView.tableColumns.count) rows=\(rows.count) visibleOnly=\(onlyVisibleColumns)", minimumMilliseconds: 4)
         }
 
-        cell.isEditable = tableObjectType == .table
-        cell.isSelectable = true
-        cell.lineBreakMode = .byTruncatingTail
-        cell.font = font
-
-        if column.typeGrouping == "integer" || column.typeGrouping == "float" {
-            cell.alignment = .right
-        }
-
-        let formatter = SPDataCellFormatter()
-        formatter.fieldType = column.type
-        if (column.typeGrouping == "string" || column.typeGrouping == "bit"),
-           let limit = Int(column.length) {
-            formatter.textLimit = limit
-        }
-        cell.formatter = formatter
-
-        return cell
-    }
-
-    func autosizeContentColumns() {
         isApplyingProgrammaticColumnWidths = true
         defer { isApplyingProgrammaticColumnWidths = false }
 
-        var widthsByIdentifier: [String: CGFloat] = [:]
+        let displayColumnIndexes = onlyVisibleColumns
+            ? SALightweightResultGrid.visibleColumnIndexes(in: tableView, buffer: SALightweightResultGrid.autosizeColumnBuffer)
+            : IndexSet(integersIn: 0..<tableView.tableColumns.count)
+        let visibleRows = visibleRowsForAutosizing(maxRows: 64)
 
-        for tableColumn in tableView.tableColumns {
-            guard let columnIndex = Int(tableColumn.identifier.rawValue) else { continue }
-            if columnIndex < columns.count, savedWidth(for: columns[columnIndex]) != nil {
-                continue
-            }
-
-            let width = autodetectedWidth(for: tableColumn, columnIndex: columnIndex)
-            widthsByIdentifier[tableColumn.identifier.rawValue] = width
-        }
-
-        for tableColumn in tableView.tableColumns {
-            guard let targetWidth = widthsByIdentifier[tableColumn.identifier.rawValue] else { continue }
-            tableColumn.width = min(ceil(max(targetWidth, tableColumn.minWidth)), Self.automaticColumnMaximumWidth)
-        }
+        SALightweightResultGrid.autosizeColumns(in: tableView,
+                                                displayColumnIndexes: displayColumnIndexes,
+                                                visibleRows: visibleRows,
+                                                columnWidthCache: columnWidthCache,
+                                                shouldSkipColumn: { [weak self] columnIndex, _ in
+                                                    guard let self = self else { return true }
+                                                    if columnIndex < self.columnInfo.count,
+                                                       SALightweightResultGrid.isWideTextColumn(typeGrouping: self.columnInfo[columnIndex].typeGrouping) {
+                                                        return true
+                                                    }
+                                                    return columnIndex < self.columns.count && self.savedWidth(for: self.columns[columnIndex]) != nil
+                                                },
+                                                cacheKey: { [weak self] columnIndex, tableColumn, visibleRows in
+                                                    self?.contentColumnWidthCacheKey(for: tableColumn, columnIndex: columnIndex, visibleRows: visibleRows) ?? tableColumn.identifier.rawValue
+                                                },
+                                                isEnumColumn: { [weak self] columnIndex in
+                                                    guard let self = self, columnIndex < self.columnInfo.count else { return false }
+                                                    return self.columnInfo[columnIndex].typeGrouping == "enum"
+                                                },
+                                                displayValue: { [weak self] row, columnIndex in
+                                                    guard let self = self,
+                                                          row < self.rows.count,
+                                                          columnIndex < self.rows[row].values.count else { return "" }
+                                                    return self.displayValue(row: row, column: columnIndex)
+                                                })
     }
 
-    func autodetectedWidth(for tableColumn: NSTableColumn, columnIndex: Int) -> CGFloat {
-        var maxCellWidth: CGFloat = 0
-        for row in visibleRowsForAutosizing(maxRows: 64) {
-            guard columnIndex < row.displayValues.count else { continue }
-            let cellWidth = measuredCellWidth(row.displayValues[columnIndex], in: tableColumn)
-            maxCellWidth = max(maxCellWidth, cellWidth)
-        }
-
-        if columnIndex < columnInfo.count, columnInfo[columnIndex].typeGrouping == "enum" {
-            maxCellWidth += 8
-        }
-
-        let headerWidth = measuredHeaderWidth(for: tableColumn) + 10
-        return ceil(max(maxCellWidth + 24, headerWidth, tableColumn.minWidth))
+    func contentColumnWidthCacheKey(for tableColumn: NSTableColumn, columnIndex: Int, visibleRows: Range<Int>) -> String {
+        let tableFont = UserDefaults.getFont()
+        let columnName = columnIndex < columns.count ? columns[columnIndex] : tableColumn.identifier.rawValue
+        let column = columnIndex < columnInfo.count ? columnInfo[columnIndex] : nil
+        return [
+            tableColumn.identifier.rawValue,
+            columnName,
+            column?.type ?? "",
+            column?.typeGrouping ?? "",
+            column?.length ?? "",
+            UserDefaults.standard.bool(forKey: SPDisplayTableViewColumnTypes) ? "types" : "names",
+            tableFont.fontName,
+            "\(tableFont.pointSize)",
+            "\(rows.count)",
+            "\(visibleRows.lowerBound)-\(visibleRows.upperBound)"
+        ].joined(separator: "\u{1e}")
     }
 
-    func visibleRowsForAutosizing(maxRows: Int) -> [ContentRow] {
-        guard maxRows > 0, !rows.isEmpty else { return [] }
+    func visibleRowsForAutosizing(maxRows: Int) -> Range<Int> {
+        guard maxRows > 0, !rows.isEmpty else { return 0..<0 }
 
         let visibleRange = tableView.rows(in: tableView.visibleRect)
         let start = visibleRange.length > 0 ? visibleRange.location : 0
         let end = visibleRange.length > 0 ? min(rows.count, visibleRange.location + visibleRange.length) : min(rows.count, maxRows)
-        guard start < end else { return Array(rows.prefix(maxRows)) }
+        guard start < end else { return 0..<min(rows.count, maxRows) }
 
-        return Array(rows[start..<min(end, start + maxRows)])
+        return start..<min(end, start + maxRows)
     }
 
-    func measuredHeaderWidth(for tableColumn: NSTableColumn) -> CGFloat {
-        let headerCell = tableColumn.headerCell
-
-        if headerCell.attributedStringValue.length > 0 {
-            return max(headerCell.cellSize.width, headerCell.attributedStringValue.size().width)
-        }
-
-        let title = headerCell.stringValue as NSString
-        let font = headerCell.font ?? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
-        return max(headerCell.cellSize.width, title.size(withAttributes: [.font: font]).width)
-    }
-
-    func measuredCellWidth(_ value: String, in tableColumn: NSTableColumn) -> CGFloat {
-        let font = (tableColumn.dataCell as? NSCell)?.font ?? UserDefaults.getFont()
-        return (value as NSString).size(withAttributes: [.font: font]).width
-    }
-
-    static func tableRowHeight(for font: NSFont) -> CGFloat {
-        return 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: font]).height
-    }
-
-    private static let automaticColumnMaximumWidth: CGFloat = 420
-    private static let tableCellDisplayMaximumCharacters = 96
-    private static let tableCellDisplayMaximumBytes = 48
-
-    static func headerFont(for font: NSFont) -> NSFont {
-        return NSFontManager.shared.convert(font, toSize: max(font.pointSize * 0.75, 11.0))
+    static func gridColumnDescriptor(columnName: String, column: ColumnInfo) -> SALightweightResultGrid.ColumnDescriptor {
+        return SALightweightResultGrid.ColumnDescriptor(name: columnName,
+                                                        type: column.type,
+                                                        typeGrouping: column.typeGrouping,
+                                                        length: column.length,
+                                                        values: column.values,
+                                                        isNullable: column.isNullable)
     }
 
     static func formattedCount(_ value: Int) -> String {
@@ -2248,6 +2247,17 @@ private extension SALightweightContentViewController {
         return Self.displayString(for: value, columnInfo: column, truncate: truncate)
     }
 
+    func displayValue(row: Int, column columnIndex: Int) -> String {
+        guard row >= 0,
+              row < rows.count,
+              columnIndex >= 0,
+              columnIndex < rows[row].values.count else { return "" }
+
+        return displayCache.value(row: row, column: columnIndex) {
+            displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex)
+        }
+    }
+
     static func displayString(for value: ContentValue, columnInfo: ColumnInfo?, truncate: Bool = true) -> String {
         switch value {
         case .null:
@@ -2255,48 +2265,18 @@ private extension SALightweightContentViewController {
         case .notLoaded:
             return NSLocalizedString("(not loaded)", comment: "value shown for hidden blob and text fields")
         case .object(let object):
-            guard let data = object as? Data else {
-                return displayString(String(describing: object), truncate: truncate)
-            }
-
-            if let definition = columnInfo,
-               UserDefaults.standard.bool(forKey: SPDisplayBinaryDataAsHex),
-               definition.displaysBinaryAsHex {
-                if truncate && data.count > Self.tableCellDisplayMaximumBytes {
-                    return "0x" + data.prefix(Self.tableCellDisplayMaximumBytes).map { String(format: "%02X", $0) }.joined() + "..."
-                }
-                return "0x" + data.map { String(format: "%02X", $0) }.joined()
-            }
-
-            return displayString(String(data: data, encoding: .utf8) ?? "", truncate: truncate)
+            return SALightweightResultGrid.displayString(for: object,
+                                                         descriptor: columnInfo.map { gridColumnDescriptor(columnName: $0.name, column: $0) },
+                                                         truncate: truncate)
         }
-    }
-
-    static func displayValues(for values: [ContentValue], columnInfo: [ColumnInfo]) -> [String] {
-        return values.enumerated().map { index, value in
-            displayString(for: value, columnInfo: index < columnInfo.count ? columnInfo[index] : nil)
-        }
-    }
-
-    static func displayString(_ value: String, truncate: Bool) -> String {
-        guard truncate else { return value }
-        return SALightweightResultGrid.tableCellPreviewString(value, maximumCharacters: tableCellDisplayMaximumCharacters)
     }
 
     static func displayString(for value: Any) -> String {
-        if value is NSNull {
-            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
-        }
-
-        return String(describing: value)
+        return SALightweightResultGrid.displayString(for: value)
     }
 
     static func displayString(for value: Any?) -> String {
-        guard let value = value else {
-            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
-        }
-
-        return displayString(for: value)
+        return SALightweightResultGrid.displayString(for: value)
     }
 
     static func contentValue(for value: Any?) -> ContentValue {
@@ -2509,6 +2489,32 @@ private extension SALightweightContentViewController {
         UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
     }
 
+    func clearSavedWidth(for columnName: String) {
+        guard let host = connection?.host,
+              !host.isEmpty else { return }
+
+        let databaseKey = "\(database)@\(host)"
+        var savedWidths = UserDefaults.standard.dictionary(forKey: SPTableColumnWidths) ?? [:]
+        var databaseWidths = savedWidths[databaseKey] as? [String: Any] ?? [:]
+        var tableWidths = databaseWidths[table] as? [String: Any] ?? [:]
+
+        tableWidths.removeValue(forKey: columnName)
+
+        if tableWidths.isEmpty {
+            databaseWidths.removeValue(forKey: table)
+        } else {
+            databaseWidths[table] = tableWidths
+        }
+
+        if databaseWidths.isEmpty {
+            savedWidths.removeValue(forKey: databaseKey)
+        } else {
+            savedWidths[databaseKey] = databaseWidths
+        }
+
+        UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
+    }
+
     func loadDeferredCellValue(row: Int, columnIndex: Int, whereClause: String) {
         guard !isLoading,
               !isFieldEditorPresented,
@@ -2557,7 +2563,7 @@ private extension SALightweightContentViewController {
                 let contentValue = Self.contentValue(for: value)
                 self.rows[row].values[columnIndex] = contentValue
                 self.rows[row].originalValues[columnIndex] = contentValue
-                self.rows[row].displayValues[columnIndex] = self.displayString(for: contentValue, columnIndex: columnIndex)
+                self.displayCache.invalidate(row: row, column: columnIndex)
                 self.cacheCurrentContentState()
                 self.updateStatus()
                 self.updateControls()
@@ -2657,13 +2663,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
-        guard row >= 0,
-              row < rows.count,
-              let columnIdentifier = tableColumn?.identifier.rawValue,
-              let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].displayValues.count else { return nil }
-
-        return rows[row].displayValues[columnIndex]
+        return SALightweightResultGrid.objectValue(row: row,
+                                                   rowCount: rows.count,
+                                                   tableColumn: tableColumn,
+                                                   columnCount: { self.rows[$0].values.count },
+                                                   displayValue: { self.displayValue(row: $0, column: $1) })
     }
 
     func tableView(_ tableView: NSTableView,
@@ -2672,13 +2676,10 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                    tableColumn: NSTableColumn?,
                    row: Int,
                    mouseLocation: NSPoint) -> String {
-        guard row >= 0,
-              row < rows.count,
-              let columnIdentifier = tableColumn?.identifier.rawValue,
-              let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].values.count else { return "" }
-
-        return ""
+        return SALightweightResultGrid.emptyToolTip(row: row,
+                                                    rowCount: rows.count,
+                                                    tableColumn: tableColumn,
+                                                    columnCount: { self.rows[$0].values.count })
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
@@ -2780,7 +2781,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
 
                 self.rows[row].values[columnIndex] = updatedValue
                 self.rows[row].originalValues[columnIndex] = updatedValue
-                self.rows[row].displayValues[columnIndex] = self.displayString(for: updatedValue, columnIndex: columnIndex)
+                self.displayCache.invalidate(row: row, column: columnIndex)
                 self.tableContentDidChange?()
 
                 if reloadAfterEdit {
@@ -2807,19 +2808,37 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         saveWidth(for: tableColumn)
     }
 
+    func tableView(_ tableView: NSTableView, sizeToFitWidthOfColumn column: Int) -> CGFloat {
+        guard tableView === self.tableView,
+              column >= 0,
+              column < tableView.tableColumns.count,
+              let columnIndex = Int(tableView.tableColumns[column].identifier.rawValue),
+              columnIndex < columnInfo.count else { return 0 }
+
+        clearSavedWidth(for: columnInfo[columnIndex].name)
+        return SALightweightResultGrid.sizeToFitWidthOfColumn(in: tableView,
+                                                              displayColumn: column,
+                                                              visibleRows: visibleRowsForAutosizing(maxRows: 128),
+                                                              isEnumColumn: columnInfo[columnIndex].typeGrouping == "enum") { [weak self] row, columnIndex in
+            guard let self = self,
+                  row < self.rows.count,
+                  columnIndex < self.rows[row].values.count else { return "" }
+            return self.displayValue(row: row, column: columnIndex)
+        }
+    }
+
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
         guard row >= 0,
               row < rows.count,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier),
-              columnIndex < rows[row].values.count,
-              let textCell = cell as? NSTextFieldCell else { return }
+              columnIndex < rows[row].values.count else { return }
 
         switch rows[row].values[columnIndex] {
         case .null, .notLoaded:
-            textCell.textColor = .secondaryLabelColor
+            SALightweightResultGrid.configureDisplayCell(cell, isNullOrPlaceholder: true)
         case .object:
-            textCell.textColor = .labelColor
+            SALightweightResultGrid.configureDisplayCell(cell, isNullOrPlaceholder: false)
         }
     }
 
@@ -2836,9 +2855,8 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func rebuildDisplayValues() {
-        for index in rows.indices {
-            rows[index].displayValues = Self.displayValues(for: rows[index].values, columnInfo: columnInfo)
-        }
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
     }
 }
 
