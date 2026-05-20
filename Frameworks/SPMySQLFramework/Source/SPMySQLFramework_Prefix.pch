@@ -6,7 +6,7 @@
     #import <Cocoa/Cocoa.h>
 #endif
 
-#import "mysql.h"
+#import "SPMySQLClientCompatibility.h"
 #import "SPMySQL.h"
 #import "SPMySQLUtilities.h"
 

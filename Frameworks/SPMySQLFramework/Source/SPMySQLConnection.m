@@ -854,6 +854,7 @@ asm(".desc ___crashreporter_info__, 0x10");
 	// options, encodings and connection state.
 	bool falseMyBool = FALSE;
 	mysql_options(theConnection, MYSQL_OPT_RECONNECT, &falseMyBool);
+	SPMySQLApplyRestrictedAuthenticationPlugins(theConnection);
     
     // Set the connection protocol properly (needed so localhost can be used for TCP/IP)
     if (useSocket) {
@@ -955,11 +956,7 @@ asm(".desc ___crashreporter_info__, 0x10");
 		//   mysql 5.7.11+ (5.7.3 - 5.7.10 with a different name)
 		//   mysql 8.0+
 		mysql_ssl_set(theConnection, theSSLKeyFilePath, theSSLCertificatePath, theCACertificatePath, NULL, theSSLCiphers);
-		if (mysql_options(theConnection, MYSQL_OPT_TLS_CIPHERSUITES, (const void *)theTLSCipherSuites)) {
-			SPLog(@"Failed to set default TLS 1.3 cipher suites; continuing with libmysqlclient defaults.");
-		}
-		enum mysql_ssl_mode opt_ssl_mode = SSL_MODE_REQUIRED;
-		if(mysql_options(theConnection, MYSQL_OPT_SSL_MODE, (void *)&opt_ssl_mode)) {
+		if(SPMySQLRequireSSL(theConnection, theTLSCipherSuites)) {
 			if(isMaster) {
 				[self _updateLastErrorMessage:@"libmysqlclient is missing support for MYSQL_OPT_SSL_MODE"];
 				[self _updateLastSqlstate:@"HY000"];
@@ -968,16 +965,13 @@ asm(".desc ___crashreporter_info__, 0x10");
 			return NULL;
 		}
     } else {
-        enum mysql_ssl_mode opt_ssl_mode = SSL_MODE_PREFERRED;
-        mysql_options(theConnection, MYSQL_OPT_SSL_MODE, (void *)&opt_ssl_mode);
+        SPMySQLPreferSSL(theConnection);
     }
 
     MYSQL *connectionStatus = mysql_real_connect(theConnection, theHost, theUsername, thePassword, NULL, (unsigned int)port, theSocket, [self clientFlags]);
 
     //If we attempted SSL and failed, try one more time non-ssl if the user isn't requiring SSL
-    if(!useSSL && theConnection != connectionStatus) {
-        enum mysql_ssl_mode opt_ssl_mode = SSL_MODE_DISABLED;
-        mysql_options(theConnection, MYSQL_OPT_SSL_MODE, (void *)&opt_ssl_mode);
+    if(!useSSL && theConnection != connectionStatus && SPMySQLDisableSSL(theConnection)) {
         connectionStatus = mysql_real_connect(theConnection, theHost, theUsername, thePassword, NULL, (unsigned int)port, theSocket, [self clientFlags]);
     }
 
@@ -1015,7 +1009,7 @@ asm(".desc ___crashreporter_info__, 0x10");
 	}
 
 	// Ensure automatic reconnection is disabled for older versions
-	theConnection->reconnect = 0;
+	SPMySQLDisableAutomaticReconnect(theConnection);
 
 	// Successful connection - return the handle
 	return theConnection;
@@ -1345,7 +1339,7 @@ asm(".desc ___crashreporter_info__, 0x10");
 	// Close the underlying MySQL connection if it still appears to be active, and not reading
 	// or writing.  While this may result in a leak of the MySQL object, it prevents crashes
 	// due to attempts to close a blocked/stuck connection.
-	if (mySQLConnection && !mySQLConnection->net.reading_or_writing && mySQLConnection->net.vio && mySQLConnection->net.buff) {
+	if (mySQLConnection && !mySQLConnection->net.reading_or_writing && SPMySQLConnectionHasNetworkBuffer(mySQLConnection)) {
         SPLog(@"calling mysql_close(mySQLConnection)");
 
 		mysql_close(mySQLConnection);

@@ -30,6 +30,10 @@
 
 @class SPMySQLKeepAliveTimer;
 
+#ifndef _mysql_h
+typedef struct st_mysql MYSQL;
+#endif
+
 @interface SPMySQLConnection : NSObject {
 
 	// Delegate
@@ -60,7 +64,7 @@
 	NSString *sslCipherList;
 
 	// MySQL connection details and state
-	struct MYSQL *mySQLConnection;
+	MYSQL *mySQLConnection;
 	SPMySQLConnectionState state;
 	BOOL connectedWithSSL;
 	BOOL userTriggeredDisconnect;
