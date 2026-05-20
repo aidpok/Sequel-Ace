@@ -85,9 +85,7 @@
 	// This is still a bit of a dirty hack
 	if (
 		state == SPMySQLConnected &&
-		mySQLConnection &&
-		mySQLConnection->net.vio &&
-		mySQLConnection->net.buff &&
+		SPMySQLConnectionHasNetworkBuffer(mySQLConnection) &&
 		mysql_more_results(mySQLConnection)
 	) {
 		SPLog(@"SPMySQLConnection: Discarding unretrieved results. This is currently normal when using CALL.");

@@ -29,6 +29,11 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 
+#ifndef _mysql_h
+typedef struct st_mysql_res MYSQL_RES;
+typedef struct st_mysql_field MYSQL_FIELD;
+#endif
+
 typedef enum {
 	SPMySQLResultFieldAsUnhandled    = 0,
 	SPMySQLResultFieldAsString       = 1,
@@ -42,12 +47,12 @@ typedef enum {
 @interface SPMySQLResult : NSObject <NSFastEnumeration> {
 
 	// Wrapped MySQL result set and its encoding
-	struct MYSQL_RES *resultSet;
+	MYSQL_RES *resultSet;
 	NSStringEncoding stringEncoding;
 
 	// Number of fields in the result set, and the field names and information
 	NSUInteger numberOfFields;
-	struct MYSQL_FIELD *fieldDefinitions;
+	MYSQL_FIELD *fieldDefinitions;
     NSArray<NSString *> *fieldNames;
 	
 	// Number of rows in the result set and an internal data position counter
