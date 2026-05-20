@@ -2245,8 +2245,13 @@ private extension SPWindowController {
             _ = activeConnection.selectDatabase(database)
             let loadedObjects = self.loadLightweightTableObjects(for: database, connection: activeConnection)
             let pinnedTables = self.loadLightweightPinnedTables(for: database, connection: activeConnection)
-            let tables = self.orderLightweightTables(loadedObjects.map { $0.name }, pinnedTables: pinnedTables)
-            let types = Dictionary(uniqueKeysWithValues: loadedObjects.map { ($0.name, $0.type) })
+            var uniqueTables: [String] = []
+            var types: [String: SALightweightTableObjectType] = [:]
+            for object in loadedObjects where types[object.name] == nil {
+                uniqueTables.append(object.name)
+                types[object.name] = object.type
+            }
+            let tables = self.orderLightweightTables(uniqueTables, pinnedTables: pinnedTables)
 
             DispatchQueue.main.async {
                 self.selectedDatabase = database
