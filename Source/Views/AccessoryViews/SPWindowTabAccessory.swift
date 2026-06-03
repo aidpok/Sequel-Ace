@@ -31,6 +31,8 @@
 import Cocoa
 
 final class SPWindowTabAccessory: NSView {
+    private var activationNotificationObservers = [NSObjectProtocol]()
+
     // MARK: Initializers
     required init?(coder: NSCoder) {
         super.init(coder: coder)
@@ -57,6 +59,10 @@ final class SPWindowTabAccessory: NSView {
             $0.centerY.equalToSuperview()
         }
     }
+
+    deinit {
+        removeActivationObservers()
+    }
     
     // MARK: Subviews
     
@@ -75,7 +81,7 @@ final class SPWindowTabAccessory: NSView {
         text.isHidden = false
         text.alignment = .center
         text.isBordered = false
-        text.textColor = .labelColor
+        text.textColor = tabTitleTextColor
         return text
     }()
 
@@ -95,8 +101,8 @@ final class SPWindowTabAccessory: NSView {
     func update(color: NSColor?, isSSL: Bool) {
         var tabColor = color
         if #available(macOS 10.13, *) {
-            if(tabColor != nil && tabColor?.colorNameComponent.starts(with: "favorite") == true) {
-                tabColor = NSColor(named: tabColor!.colorNameComponent + "-tab") ?? tabColor
+            if let tabColorName = favoriteTabColorName(for: tabColor) {
+                tabColor = NSColor(named: NSColor.Name(tabColorName), bundle: .main) ?? tabColor
             }
         }
 
@@ -106,6 +112,7 @@ final class SPWindowTabAccessory: NSView {
 
     func setTitle(title: String) {
         tabText.stringValue = title
+        refreshTitleAppearance()
     }
     
     // MARK: Callbacks
@@ -120,5 +127,66 @@ final class SPWindowTabAccessory: NSView {
                 $0.bottom.equalToSuperview()
             }
         }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshActivationObservers()
+        refreshTitleAppearance()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshTitleAppearance()
+    }
+
+    private var tabTitleTextColor: NSColor {
+        if NSApp.isActive {
+            return .labelColor
+        }
+
+        if effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(calibratedWhite: 0.68, alpha: 1)
+        }
+
+        return NSColor(calibratedWhite: 0.38, alpha: 1)
+    }
+
+    private func favoriteTabColorName(for color: NSColor?) -> String? {
+        guard let colorName = color?.colorNameComponent else { return nil }
+
+        for favoriteColorName in ["favoriteRed", "favoriteOrange", "favoriteYellow", "favoriteGreen", "favoriteBlue", "favoritePurple", "favoriteGraphite"] {
+            if colorName == favoriteColorName || colorName.contains(favoriteColorName) {
+                return favoriteColorName + "-tab"
+            }
+        }
+
+        return nil
+    }
+
+    private func refreshActivationObservers() {
+        removeActivationObservers()
+
+        let notificationCenter = NotificationCenter.default
+        let refreshTitleAppearance: (Notification) -> Void = { [weak self] _ in
+            self?.refreshTitleAppearance()
+        }
+
+        activationNotificationObservers.append(notificationCenter.addObserver(forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main, using: refreshTitleAppearance))
+        activationNotificationObservers.append(notificationCenter.addObserver(forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main, using: refreshTitleAppearance))
+
+        guard let window = window else { return }
+        activationNotificationObservers.append(notificationCenter.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main, using: refreshTitleAppearance))
+        activationNotificationObservers.append(notificationCenter.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main, using: refreshTitleAppearance))
+    }
+
+    private func removeActivationObservers() {
+        activationNotificationObservers.forEach(NotificationCenter.default.removeObserver)
+        activationNotificationObservers.removeAll()
+    }
+
+    private func refreshTitleAppearance() {
+        tabText.textColor = tabTitleTextColor
+        tabText.needsDisplay = true
     }
 }

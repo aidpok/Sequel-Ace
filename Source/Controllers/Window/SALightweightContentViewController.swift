@@ -41,6 +41,7 @@ final class SALightweightContentViewController: NSViewController {
         let isNullable: Bool
         let isPrimary: Bool
         let isAutoIncrement: Bool
+        let defaultExpression: String?
     }
 
     fileprivate struct ContentRow {
@@ -63,6 +64,7 @@ final class SALightweightContentViewController: NSViewController {
         let sortAscending: Bool
         let isRuleFilterActive: Bool
         let serializedRuleFilter: NSDictionary?
+        let columnFilter: String?
     }
 
     fileprivate struct ContentFilterDefinition {
@@ -97,6 +99,12 @@ final class SALightweightContentViewController: NSViewController {
         case object(Any)
     }
 
+    private struct EditedContentSQLValue {
+        let sql: String
+        let localValue: ContentValue
+        let requiresReload: Bool
+    }
+
     private enum TableObjectType {
         case table
         case view
@@ -118,11 +126,11 @@ final class SALightweightContentViewController: NSViewController {
     private var totalRowCountIsEstimate = false
     private var hasNextPage = false
     private var isLoading = false
+    private var isLoadingSortPreservingColumns = false
     private var sortColumn: String?
     private var sortAscending = true
     private var didRegisterPreferenceObservers = false
     private var isApplyingProgrammaticColumnWidths = false
-    private var isApplyingProgrammaticSortDescriptors = false
     private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
     private var isRuleFilterVisible = true
@@ -320,6 +328,7 @@ final class SALightweightContentViewController: NSViewController {
             let parsedType = Self.parseColumnType(rawType)
             let key = (structureRow["Key"] ?? "").uppercased()
             let extra = (structureRow["Extra"] ?? "").lowercased()
+            let defaultExpression = Self.defaultExpression(from: structureRow["default"])
             return ColumnInfo(
                 name: name,
                 type: parsedType.type,
@@ -329,7 +338,8 @@ final class SALightweightContentViewController: NSViewController {
                 comment: structureRow["comment"] ?? "",
                 isNullable: structureRow["null"] == "1",
                 isPrimary: key == "PRI",
-                isAutoIncrement: extra.contains("auto_increment")
+                isAutoIncrement: extra.contains("auto_increment"),
+                defaultExpression: defaultExpression
             )
         }
     }
@@ -559,11 +569,10 @@ final class SALightweightContentViewController: NSViewController {
         ruleFilterColumnsKey = ""
         filterRules = []
         if tableChanged {
-            columnFilterTerms = nil
-            columnFilterSearchField.stringValue = ""
             advancedFilterWhereClause = nil
             isAdvancedFilterDistinct = false
         }
+        restoreColumnFilter(restoredContentState?.columnFilter)
 
         if let tableKey = tableKey, restoreCachedContent(for: tableKey) {
             return
@@ -706,7 +715,7 @@ private extension SALightweightContentViewController.ContentValue {
 }
 
 private extension SALightweightContentViewController {
-    func loadCurrentPage() {
+    func loadCurrentPage(preservingColumns: Bool = false) {
         guard connection != nil else { return }
 
         loadToken = UUID()
@@ -720,24 +729,30 @@ private extension SALightweightContentViewController {
         let cachedColumnInfo = tableKey.flatMap { columnInfoCache[$0] }
 
         invalidateCurrentContentCache()
-        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults, tableKey: tableKey, cachedColumnInfo: cachedColumnInfo)
+        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults, tableKey: tableKey, cachedColumnInfo: cachedColumnInfo, preservingColumns: preservingColumns)
     }
 
-    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool, tableKey: SALightweightSessionState.TableKey?, cachedColumnInfo: [ColumnInfo]?) {
+    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool, tableKey: SALightweightSessionState.TableKey?, cachedColumnInfo: [ColumnInfo]?, preservingColumns: Bool) {
         guard let connection = connection else { return }
 
         isLoading = true
-        columns = []
-        columnInfo = []
+        isLoadingSortPreservingColumns = preservingColumns
         rows = []
         displayCache.invalidateAll()
-        columnWidthCache.invalidateAll()
-        filteredColumns = []
-        tableObjectType = .unknown
+        if !preservingColumns {
+            columns = []
+            columnInfo = []
+            columnWidthCache.invalidateAll()
+            filteredColumns = []
+            tableObjectType = .unknown
+            rebuildColumns()
+        } else {
+            tableView.noteNumberOfRowsChanged()
+            applySortDescriptorsFromCurrentState()
+        }
         totalRowCount = nil
         totalRowCountIsEstimate = false
         hasNextPage = false
-        rebuildColumns()
         statusLabel.stringValue = NSLocalizedString("Loading rows...", comment: "lightweight content loading rows")
         updateControls()
 
@@ -771,7 +786,8 @@ private extension SALightweightContentViewController {
                 columnInfo: orderedColumnInfo,
                 tableObjectType: tableObjectType,
                 rowCount: nil,
-                limitResults: limitResults
+                limitResults: limitResults,
+                preservingColumns: preservingColumns
             )
 
             while let row = result?.getRowAsArray() {
@@ -845,6 +861,7 @@ private extension SALightweightContentViewController {
                 self.isLoading = false
 
                 if let error = error, !error.isEmpty {
+                    self.isLoadingSortPreservingColumns = false
                     self.columns = []
                     self.columnInfo = []
                     self.rows = []
@@ -873,25 +890,33 @@ private extension SALightweightContentViewController {
                                            columnInfo: [ColumnInfo],
                                            tableObjectType: TableObjectType,
                                            rowCount: (count: Int, isEstimate: Bool)?,
-                                           limitResults: Bool) {
+                                           limitResults: Bool,
+                                           preservingColumns: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.loadToken == token else {
                 return
             }
 
+            let canPreserveColumns = preservingColumns && fieldNames == self.columns
             self.columns = fieldNames
             self.columnInfo = columnInfo
             self.rows = []
             self.displayCache.invalidateAll()
-            self.columnWidthCache.invalidateAll()
+            if !canPreserveColumns {
+                self.columnWidthCache.invalidateAll()
+            }
             self.tableObjectType = tableObjectType
             self.totalRowCount = rowCount?.count
             self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
             self.hasNextPage = false
             self.configureRuleFilterColumnsIfNeeded()
             self.applyColumnFilter()
-            self.rebuildColumns()
+            if canPreserveColumns {
+                self.tableView.noteNumberOfRowsChanged()
+            } else {
+                self.rebuildColumns()
+            }
             self.applySortDescriptorsFromCurrentState()
             self.updateStatus()
             self.updateControls()
@@ -905,7 +930,7 @@ private extension SALightweightContentViewController {
                 return
             }
 
-            self.appendContentRows(rows, autosizeColumns: self.rows.isEmpty)
+            self.appendContentRows(rows, autosizeColumns: self.rows.isEmpty && !self.isLoadingSortPreservingColumns)
 
             if final {
                 self.hasNextPage = hasNextPage
@@ -932,6 +957,7 @@ private extension SALightweightContentViewController {
     }
 
     private func finalizeContentLoad() {
+        isLoadingSortPreservingColumns = false
         if totalRowCount == nil, !limitResults {
             totalRowCount = rows.count
         }
@@ -1026,6 +1052,7 @@ private extension SALightweightContentViewController {
             let parsedType = Self.parseColumnType(type)
             let key = Self.displayString(for: row["Key"]).uppercased()
             let extra = Self.displayString(for: row["Extra"]).lowercased()
+            let defaultExpression = Self.defaultExpression(from: row["Default"])
             loadedColumns.append(ColumnInfo(
                 name: name,
                 type: parsedType.type,
@@ -1035,16 +1062,46 @@ private extension SALightweightContentViewController {
                 comment: Self.displayString(for: row["Comment"]),
                 isNullable: Self.displayString(for: row["Null"]).uppercased() == "YES",
                 isPrimary: key == "PRI",
-                isAutoIncrement: extra.contains("auto_increment")
+                isAutoIncrement: extra.contains("auto_increment"),
+                defaultExpression: defaultExpression
             ))
         }
 
         return loadedColumns
     }
 
+    private static func defaultExpression(from value: Any?) -> String? {
+        guard let value = value, !(value is NSNull) else { return nil }
+
+        let trimmed = displayString(for: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let uppercased = trimmed.uppercased()
+        let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        guard uppercased != "NULL", trimmed != nullValue else { return nil }
+
+        if SALightweightResultGrid.currentTimestampSQLExpression(from: trimmed) != nil {
+            return trimmed
+        }
+
+        if uppercased == "CURRENT_DATE" || uppercased == "CURRENT_TIME" {
+            return trimmed
+        }
+
+        if trimmed.hasPrefix("'") || trimmed.hasPrefix("\"") {
+            return nil
+        }
+
+        if (trimmed.hasPrefix("(") && trimmed.hasSuffix(")")) || trimmed.hasSuffix(")") {
+            return trimmed
+        }
+
+        return nil
+    }
+
     private static func orderedColumnInfo(_ columnInfo: [ColumnInfo], fieldNames: [String]) -> [ColumnInfo] {
         return fieldNames.map { fieldName in
-            columnInfo.first { $0.name == fieldName } ?? ColumnInfo(name: fieldName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
+            columnInfo.first { $0.name == fieldName } ?? ColumnInfo(name: fieldName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
         }
     }
 
@@ -1105,6 +1162,8 @@ private extension SALightweightContentViewController {
         guard columnFilterTerms != nextTerms else { return }
 
         columnFilterTerms = nextTerms
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
         applyColumnFilter()
         rebuildColumns()
     }
@@ -1312,6 +1371,7 @@ private extension SALightweightContentViewController {
         if columnSignature == displayedColumnSignature,
            tableView.tableColumns.count == filteredColumns.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
+            applySortDescriptorsFromCurrentState()
             tableView.headerView?.needsDisplay = true
             scheduleVisibleColumnAutosize(delay: 0.01)
             return
@@ -1323,7 +1383,7 @@ private extension SALightweightContentViewController {
             let columnName = columns[columnIndex]
             let column = columnIndex < columnInfo.count
                 ? columnInfo[columnIndex]
-                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
+                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
             let tableColumn = SALightweightResultGrid.configuredColumn(
                 identifier: columnIndex,
                 title: columnName,
@@ -1340,6 +1400,7 @@ private extension SALightweightContentViewController {
 
         displayedColumnSignature = columnSignature
         tableView.reloadData()
+        applySortDescriptorsFromCurrentState()
         scheduleVisibleColumnAutosize(delay: 0.01)
     }
 
@@ -1386,7 +1447,7 @@ private extension SALightweightContentViewController {
             let columnName = columns[columnIndex]
             let column = columnIndex < columnInfo.count
                 ? columnInfo[columnIndex]
-                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false)
+                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
             let tableColumn = tableView.tableColumns[displayIndex]
             SALightweightResultGrid.updateColumn(tableColumn,
                                                  identifier: columnIndex,
@@ -1898,7 +1959,8 @@ private extension SALightweightContentViewController {
                 isRuleFilterActive: isRuleFilterActive,
                 sortColumn: sortColumn,
                 sortAscending: sortAscending,
-                pageIndex: pageIndex
+                pageIndex: pageIndex,
+                columnFilter: serializedColumnFilter()
             ),
             for: currentTableKey
         )
@@ -1929,6 +1991,7 @@ private extension SALightweightContentViewController {
         sortColumn = cached.sortColumn
         sortAscending = cached.sortAscending
         isRuleFilterActive = cached.isRuleFilterActive
+        restoreColumnFilter(cached.columnFilter)
 
         sessionState.setContentState(
             SALightweightSessionState.ContentState(
@@ -1936,7 +1999,8 @@ private extension SALightweightContentViewController {
                 isRuleFilterActive: cached.isRuleFilterActive,
                 sortColumn: cached.sortColumn,
                 sortAscending: cached.sortAscending,
-                pageIndex: cached.pageIndex
+                pageIndex: cached.pageIndex,
+                columnFilter: cached.columnFilter
             ),
             for: key
         )
@@ -1971,19 +2035,33 @@ private extension SALightweightContentViewController {
             sortColumn: sortColumn,
             sortAscending: sortAscending,
             isRuleFilterActive: isRuleFilterActive,
-            serializedRuleFilter: sessionState.contentState(for: currentTableKey)?.serializedRuleFilter
+            serializedRuleFilter: sessionState.contentState(for: currentTableKey)?.serializedRuleFilter,
+            columnFilter: serializedColumnFilter()
         )
         noteContentCacheUse(for: currentTableKey)
     }
 
+    func serializedColumnFilter() -> String? {
+        let filter = columnFilterSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return filter.isEmpty ? nil : filter
+    }
+
+    func restoreColumnFilter(_ filter: String?) {
+        let filter = filter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        columnFilterSearchField.stringValue = filter
+        let terms = filter
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        columnFilterTerms = terms.isEmpty ? nil : terms
+    }
+
     func applySortDescriptorsFromCurrentState() {
-        isApplyingProgrammaticSortDescriptors = true
         if let sortColumn = sortColumn, let columnIndex = columns.firstIndex(of: sortColumn) {
-            tableView.sortDescriptors = [NSSortDescriptor(key: "\(columnIndex)", ascending: sortAscending)]
+            SALightweightResultGrid.applySortIndicator(to: tableView, columnIndex: columnIndex, ascending: sortAscending)
         } else {
-            tableView.sortDescriptors = []
+            SALightweightResultGrid.applySortIndicator(to: tableView, columnIndex: nil, ascending: true)
         }
-        isApplyingProgrammaticSortDescriptors = false
     }
 
     func noteContentCacheUse(for key: SALightweightSessionState.TableKey) {
@@ -2302,6 +2380,22 @@ private extension SALightweightContentViewController {
 
             return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
         }
+    }
+
+    private static func sqlValue(forEditedString value: String, columnInfo: ColumnInfo, connection: SPMySQLConnection) -> EditedContentSQLValue? {
+        if let expression = SALightweightResultGrid.editedSQLExpression(for: value,
+                                                                        typeGrouping: columnInfo.typeGrouping,
+                                                                        defaultExpression: columnInfo.defaultExpression,
+                                                                        allowsStringUUIDFunction: true) {
+            return EditedContentSQLValue(sql: expression, localValue: .object(value), requiresReload: true)
+        }
+
+        let localValue: ContentValue = value == (UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL") && columnInfo.isNullable
+            ? .null
+            : .object(value)
+        guard let sqlValue = sqlValue(localValue, columnInfo: columnInfo, connection: connection) else { return nil }
+
+        return EditedContentSQLValue(sql: sqlValue, localValue: localValue, requiresReload: false)
     }
 
     func csvStringForCurrentContent() -> String {
@@ -2738,13 +2832,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         }
 
         let columnName = columnInfo[columnIndex].name
-        let updatedValue: ContentValue = newValue == (UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL") && columnInfo[columnIndex].isNullable
-            ? .null
-            : .object(newValue)
-        guard let sqlValue = Self.sqlValue(updatedValue, columnInfo: columnInfo[columnIndex], connection: connection) else { return }
+        guard let updatedValue = Self.sqlValue(forEditedString: newValue, columnInfo: columnInfo[columnIndex], connection: connection) else { return }
         let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
         let countQuery = "SELECT COUNT(1) FROM \(tableReference) WHERE \(whereClause)"
-        let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(sqlValue) WHERE \(whereClause)"
+        let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(updatedValue.sql) WHERE \(whereClause)"
+        let refreshQuery = "SELECT \(Self.backtickQuoted(columnName)) FROM \(tableReference) WHERE \(whereClause) LIMIT 1"
         let reloadAfterEdit = UserDefaults.standard.bool(forKey: SPReloadAfterEditingRow)
 
         statusLabel.stringValue = NSLocalizedString("Saving cell...", comment: "lightweight content saving cell")
@@ -2761,6 +2853,16 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                 _ = connection.queryString(updateQuery)
             }
             let updateError = connection.queryErrored() ? connection.lastErrorMessage() : error
+            var refreshedValue: ContentValue?
+            if updateError == nil, matchingRows == 1, updatedValue.requiresReload, !reloadAfterEdit {
+                let result = connection.queryString(refreshQuery)
+                result?.defaultRowReturnType = SPMySQLResultRowAsArray
+                if !connection.queryErrored(),
+                   let row = result?.getRowAsArray(),
+                   !row.isEmpty {
+                    refreshedValue = Self.contentValue(for: row.first ?? nil)
+                }
+            }
 
             DispatchQueue.main.async {
                 self.isLoading = false
@@ -2779,16 +2881,17 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                     return
                 }
 
-                self.rows[row].values[columnIndex] = updatedValue
-                self.rows[row].originalValues[columnIndex] = updatedValue
-                self.displayCache.invalidate(row: row, column: columnIndex)
-                self.tableContentDidChange?()
-
-                if reloadAfterEdit {
+                if reloadAfterEdit || (updatedValue.requiresReload && refreshedValue == nil) {
                     self.invalidateCurrentContentCache()
                     self.loadCurrentPage()
                     return
                 }
+
+                let localValue = refreshedValue ?? updatedValue.localValue
+                self.rows[row].values[columnIndex] = localValue
+                self.rows[row].originalValues[columnIndex] = localValue
+                self.displayCache.invalidate(row: row, column: columnIndex)
+                self.tableContentDidChange?()
 
                 self.updateStatus()
                 self.updateControls()
@@ -2842,16 +2945,26 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         }
     }
 
-    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard !isLoading, !isRestoringCachedContent, !isApplyingProgrammaticSortDescriptors, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key, let columnIndex = Int(key), columnIndex < columns.count else { return }
+    func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
+        guard !isLoading,
+              !isRestoringCachedContent,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
+              columnIndex < columns.count else { return }
 
-        sortColumn = columns[columnIndex]
-        sortAscending = descriptor.ascending
+        let clickedColumn = columns[columnIndex]
+        let shiftPressed = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+        if sortColumn == clickedColumn {
+            sortAscending.toggle()
+        } else {
+            sortColumn = clickedColumn
+            sortAscending = !shiftPressed
+        }
+        applySortDescriptorsFromCurrentState()
         pageIndex = 0
         storeCurrentRuleFilterState()
         sessionStateDidChange?()
         invalidateCurrentContentCache()
-        loadCurrentPage()
+        loadCurrentPage(preservingColumns: true)
     }
 
     func rebuildDisplayValues() {

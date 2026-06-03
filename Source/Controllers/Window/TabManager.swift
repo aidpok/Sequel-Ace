@@ -77,8 +77,12 @@ import AppKit
         return managedWindows.compactMap { $0.windowController}
     }
 
+    @objc var orderedWindows: [NSWindow] {
+        return windowControllers.compactMap { $0.window }
+    }
+
     @objc var windows: Set<NSWindow> {
-        return Set(windowControllers.compactMap { $0.window })
+        return Set(orderedWindows)
     }
 
     weak var appController: SPAppController?

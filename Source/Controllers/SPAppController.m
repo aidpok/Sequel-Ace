@@ -415,7 +415,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     NSMutableDictionary *win = [NSMutableDictionary dictionary];
     NSMutableArray *processedWindows = [NSMutableArray array];
 
-    for (NSWindow *window in [self.tabManager windows]) {
+    for (NSWindow *window in [self.tabManager orderedWindows]) {
         NSArray *tabGroupWindows = [[window tabGroup] windows];
         NSArray *windowsToProcess = [tabGroupWindows count] > 0 ? tabGroupWindows : ([[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window]);
         for (NSWindow *processedWindow in windowsToProcess) {
@@ -509,6 +509,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
             if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
                 restoredAnyWindow = YES;
+                window = newWindowController.window;
             }
             else if (isFirstRestoredWindow) {
                 [newWindowController close];
@@ -686,7 +687,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
     NSMutableArray *processedWindows = [NSMutableArray new];
 
-    NSSet *allWindows = [self.tabManager windows];
+    NSArray *allWindows = [self.tabManager orderedWindows];
     for (NSWindow *window in allWindows) {
         NSMutableArray *tabs = [NSMutableArray array];
         NSMutableDictionary *win = [NSMutableDictionary dictionary];
@@ -1081,6 +1082,7 @@ validateMenuItemDone:
                     if (![newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
                         break;
                     }
+                    window = newWindowController.window;
                 } else {
                     NSString *fileName = nil;
                     BOOL isBundleFile = NO;
@@ -1100,6 +1102,7 @@ validateMenuItemDone:
                         if (![newWindowController.databaseDocument setStateFromConnectionFile:fileName]) {
                             break;
                         }
+                        window = newWindowController.window;
                     } else {
                         SPLog(@"Bundle file “%@” does not exists", fileName);
                         NSBeep();

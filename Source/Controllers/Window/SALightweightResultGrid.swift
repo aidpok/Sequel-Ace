@@ -346,7 +346,6 @@ enum SALightweightResultGrid {
         tableColumn.maxWidth = maxWidth
         tableColumn.resizingMask = resizingMask
         tableColumn.headerToolTip = headerToolTip
-        tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(identifier)", ascending: true)
         tableColumn.headerCell.font = headerFont(for: font)
         tableColumn.headerCell.attributedStringValue = headerAttributedString
         tableColumn.dataCell = dataCell(for: descriptor, font: font, editable: editable)
@@ -365,7 +364,6 @@ enum SALightweightResultGrid {
         tableColumn.title = title
         tableColumn.isEditable = editable
         tableColumn.headerToolTip = headerToolTip
-        tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: "\(identifier)", ascending: true)
         tableColumn.headerCell.font = headerFont(for: font)
         tableColumn.headerCell.attributedStringValue = headerAttributedString
 
@@ -376,6 +374,23 @@ enum SALightweightResultGrid {
         } else {
             tableColumn.dataCell = dataCell(for: descriptor, font: font, editable: editable)
         }
+    }
+
+    static func applySortIndicator(to tableView: NSTableView, columnIndex: Int?, ascending: Bool) {
+        if !tableView.sortDescriptors.isEmpty {
+            tableView.sortDescriptors = []
+        }
+        tableView.highlightedTableColumn = nil
+        for column in tableView.tableColumns {
+            column.sortDescriptorPrototype = nil
+            tableView.setIndicatorImage(nil, in: column)
+        }
+
+        guard let columnIndex,
+              let tableColumn = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("\(columnIndex)")) else { return }
+
+        tableView.highlightedTableColumn = tableColumn
+        tableView.setIndicatorImage(NSImage(named: ascending ? "NSAscendingSortIndicator" : "NSDescendingSortIndicator"), in: tableColumn)
     }
 
     static func contextMenu(target: AnyObject,
@@ -853,6 +868,40 @@ enum SALightweightResultGrid {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private static let currentTimestampExpressionRegex = try? NSRegularExpression(pattern: SPCurrentTimestampPattern)
+
+    static func editedSQLExpression(for value: String, typeGrouping: String, defaultExpression: String? = nil, allowsStringUUIDFunction: Bool = false) -> String? {
+        if let defaultExpression = defaultExpression,
+           value == defaultExpression {
+            return value
+        }
+
+        if let currentTimestampExpression = currentTimestampSQLExpression(from: value) {
+            return currentTimestampExpression
+        }
+
+        if typeGrouping.lowercased() == "date" && value == "NOW()" {
+            return "NOW()"
+        }
+
+        if allowsStringUUIDFunction && typeGrouping.lowercased() == "string" && value == "UUID()" {
+            return "UUID()"
+        }
+
+        return nil
+    }
+
+    static func currentTimestampSQLExpression(from value: String) -> String? {
+        guard let regex = currentTimestampExpressionRegex else { return nil }
+
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range),
+              match.range.location == range.location,
+              match.range.length == range.length else { return nil }
+
+        return value
     }
 
     static func backtickQuoted(_ value: String) -> String {
