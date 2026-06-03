@@ -243,6 +243,7 @@ final class SALightweightSessionState {
         static let sortColumn = "sortColumn"
         static let sortAscending = "sortAscending"
         static let pageIndex = "pageIndex"
+        static let columnFilter = "columnFilter"
     }
 
     struct ConnectionKey: Hashable {
@@ -268,6 +269,7 @@ final class SALightweightSessionState {
         var sortColumn: String?
         var sortAscending: Bool
         var pageIndex: Int
+        var columnFilter: String?
     }
 
     private var queryStates: [TableKey: QueryState] = [:]
@@ -277,6 +279,12 @@ final class SALightweightSessionState {
         guard let database = database, !database.isEmpty, let table = table, !table.isEmpty else { return nil }
 
         return TableKey(connection: connectionKey(for: connection), database: database, table: table)
+    }
+
+    static func queryKey(database: String?, table: String?, connection: SPMySQLConnection) -> TableKey? {
+        guard let database = database, !database.isEmpty else { return nil }
+
+        return TableKey(connection: connectionKey(for: connection), database: database, table: table ?? "")
     }
 
     static func connectionKey(for connection: SPMySQLConnection) -> ConnectionKey {
@@ -347,6 +355,9 @@ final class SALightweightSessionState {
                     }
                     dictionary[SnapshotKey.sortAscending] = state.sortAscending
                     dictionary[SnapshotKey.pageIndex] = state.pageIndex
+                    if let columnFilter = state.columnFilter, !columnFilter.isEmpty {
+                        dictionary[SnapshotKey.columnFilter] = columnFilter
+                    }
                     return dictionary
                 }
         }
@@ -360,7 +371,7 @@ final class SALightweightSessionState {
 
         if let queries = dictionary[SnapshotKey.queries] as? [NSDictionary] {
             for query in queries {
-                guard let key = Self.tableKey(from: query),
+                guard let key = Self.queryKey(from: query),
                       let text = query[SnapshotKey.text] as? String,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 queryStates[key] = QueryState(text: text)
@@ -376,7 +387,8 @@ final class SALightweightSessionState {
                     isRuleFilterActive: Self.boolValue(item[SnapshotKey.isRuleFilterActive]),
                     sortColumn: item[SnapshotKey.sortColumn] as? String,
                     sortAscending: Self.boolValue(item[SnapshotKey.sortAscending], defaultValue: true),
-                    pageIndex: max(0, Self.intValue(item[SnapshotKey.pageIndex]))
+                    pageIndex: max(0, Self.intValue(item[SnapshotKey.pageIndex])),
+                    columnFilter: item[SnapshotKey.columnFilter] as? String
                 )
             }
         }
@@ -407,6 +419,21 @@ final class SALightweightSessionState {
             connection: ConnectionKey(transport: transport, host: host, port: port, username: username),
             database: database,
             table: table
+        )
+    }
+
+    private static func queryKey(from dictionary: NSDictionary) -> TableKey? {
+        guard let transport = dictionary[SnapshotKey.transport] as? String,
+              let host = dictionary[SnapshotKey.host] as? String,
+              let port = dictionary[SnapshotKey.port] as? String,
+              let username = dictionary[SnapshotKey.username] as? String,
+              let database = dictionary[SnapshotKey.database] as? String,
+              !database.isEmpty else { return nil }
+
+        return TableKey(
+            connection: ConnectionKey(transport: transport, host: host, port: port, username: username),
+            database: database,
+            table: dictionary[SnapshotKey.table] as? String ?? ""
         )
     }
 
@@ -896,6 +923,17 @@ private extension SPWindowController {
             self?.markLightweightResumeStateChanged()
         }
         databaseToolbarController.delegate = self
+    }
+
+    func saveCurrentLightweightViewState() {
+        switch activeLightweightDetailKey?.viewMode {
+        case .content:
+            lightweightContentController.saveCurrentSessionState()
+        case .query:
+            lightweightQueryController.saveCurrentSessionState()
+        default:
+            break
+        }
     }
 
     func installConnectionView() {
@@ -2225,6 +2263,8 @@ private extension SPWindowController {
     func loadTables(for database: String, preservingSelection: Bool = false, restoringTable: String? = nil, restoringViewMode: SAViewMode? = nil) {
         guard let activeConnection = activeConnection else { return }
 
+        saveCurrentLightweightViewState()
+
         let tableToRestore = restoringTable ?? (preservingSelection ? selectedTable : nil)
         if selectedDatabase != database {
             resetLightweightTableHistory()
@@ -2283,6 +2323,9 @@ private extension SPWindowController {
 
     func selectLightweightTable(_ table: String, recordsHistory: Bool = true) {
         let tableChanged = selectedTable != table
+        if tableChanged {
+            saveCurrentLightweightViewState()
+        }
         selectedTable = table
         setLightweightFallbackToolbarItemsEnabled(true)
         markLightweightResumeStateChanged()
@@ -2485,8 +2528,7 @@ private extension SPWindowController {
         databaseToolbarController.selectViewMode(.query)
 
         let queryView = lightweightQueryController.view
-        let detailChanged = installLightweightDetailSubview(queryView, key: LightweightDetailKey(viewMode: .query, database: selectedDatabase, table: selectedTable, placeholder: nil))
-        guard detailChanged else { return }
+        _ = installLightweightDetailSubview(queryView, key: LightweightDetailKey(viewMode: .query, database: selectedDatabase, table: selectedTable, placeholder: nil))
         lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
     }
 
@@ -3317,6 +3359,7 @@ extension SPWindowController: SADatabaseToolbarControllerDelegate {
         }
 
         markLightweightResumeStateChanged()
+        saveCurrentLightweightViewState()
 
         switch mode {
         case .structure:

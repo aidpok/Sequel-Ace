@@ -67,5 +67,6 @@
 #import "SPQueryController.h"
 #import "SPGotoDatabaseController.h"
 #import "SPFilterTableController.h"
+#import "YRKSpinningProgressIndicator.h"
 #import <SPMySQL/SPMySQL.h>
 #import "SPSSHTunnel.h"

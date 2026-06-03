@@ -83,7 +83,9 @@ final class SALightweightQueryViewController: NSViewController {
     private struct CellUpdate {
         let countQuery: String
         let updateQuery: String
+        let refreshQuery: String?
         let localValue: Any
+        let requiresReload: Bool
     }
 
     private weak var connection: SPMySQLConnection?
@@ -106,6 +108,8 @@ final class SALightweightQueryViewController: NSViewController {
     private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
     private var isApplyingQuerySort = false
+    private var querySortColumnIndex: Int?
+    private var querySortAscending = true
     private var bracketHighlighter: SPBracketHighlighter?
     private let helpViewerClient = SPHelpViewerClient()
     private lazy var fieldEditor = SPFieldEditorController()
@@ -168,6 +172,16 @@ final class SALightweightQueryViewController: NSViewController {
     private let bottomBarView = NSView(frame: .zero)
     private let infoPaneView = NSView(frame: .zero)
     private let infoTextScrollView = NSScrollView(frame: .zero)
+    private var queryProgressWindow: NSWindow?
+    private var queryProgressView: NSBox?
+    private var queryProgressIndicator: YRKSpinningProgressIndicator?
+    private var queryProgressDescriptionLabel: NSTextField?
+    private var queryProgressDurationLabel: NSTextField?
+    private var queryProgressCancelButton: NSButton?
+    private var queryProgressFadeTimer: Timer?
+    private var queryProgressDurationTimer: Timer?
+    private var queryProgressFadeStartDate: Date?
+    private var queryProgressStartDate: Date?
     private var didSetInitialQueryEditorSplitPosition = false
     private var didSetInitialQueryInfoSplitPosition = false
     private static let queryEditorInitialHeightRatio: CGFloat = 142.0 / 387.0
@@ -255,12 +269,13 @@ final class SALightweightQueryViewController: NSViewController {
     }()
 
     private lazy var runButton: SPComboPopupButton = {
-        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 180, height: 22), pullsDown: true)
+        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 240, height: 22), pullsDown: true)
         button.target = self
         button.action = #selector(runPrimaryQuery(_:))
         button.keyEquivalent = "r"
         button.keyEquivalentModifierMask = [.command]
         button.cell?.controlSize = .small
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }()
 
@@ -423,7 +438,7 @@ final class SALightweightQueryViewController: NSViewController {
 
             runButton.trailingAnchor.constraint(equalTo: controlBarView.trailingAnchor, constant: -8),
             runButton.centerYAnchor.constraint(equalTo: controlBarView.centerYAnchor),
-            runButton.widthAnchor.constraint(equalToConstant: 180),
+            runButton.widthAnchor.constraint(equalToConstant: 240),
 
             queryInfoButton.leadingAnchor.constraint(equalTo: bottomBarView.leadingAnchor, constant: 10),
             queryInfoButton.topAnchor.constraint(equalTo: bottomBarView.topAnchor, constant: 4),
@@ -489,6 +504,7 @@ final class SALightweightQueryViewController: NSViewController {
 
     deinit {
         autosizeCoordinator.cancel()
+        hideQueryProgressPanel()
         NotificationCenter.default.removeObserver(self)
         if didInstallObservers {
             for key in Self.observedPreferenceKeys {
@@ -532,7 +548,8 @@ final class SALightweightQueryViewController: NSViewController {
     }
 
     func loadQuery(database: String?, table: String?, connection: SPMySQLConnection) {
-        let tableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
+        let queryKey = SALightweightSessionState.queryKey(database: database, table: nil, connection: connection)
+        let legacyTableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
         saveCurrentQueryTextIfNeeded()
 
         self.connection = connection
@@ -547,9 +564,9 @@ final class SALightweightQueryViewController: NSViewController {
         queryTextView.setConnection(connection, withVersion: Int(connection.serverMajorVersion()))
         helpViewerClient.setConnection(connection)
 
-        if currentQueryTableKey != tableKey {
-            currentQueryTableKey = tableKey
-            restoreUserQueryText(for: tableKey)
+        if currentQueryTableKey != queryKey || queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            currentQueryTableKey = queryKey
+            restoreUserQueryText(for: queryKey, fallbackTableKey: legacyTableKey)
         }
 
         updateCurrentQueryRange()
@@ -563,13 +580,212 @@ final class SALightweightQueryViewController: NSViewController {
 }
 
 private extension SALightweightQueryViewController {
-    func restoreUserQueryText(for tableKey: SALightweightSessionState.TableKey?) {
-        guard let restoredQueryText = tableKey.flatMap({ sessionState.queryState(for: $0)?.text }) else {
+    func showQueryProgressPanel(description: String, cancelButtonTitle: String) {
+        guard let parentWindow = view.window else { return }
+
+        queryProgressFadeTimer?.invalidate()
+        queryProgressDurationTimer?.invalidate()
+
+        let progressWindow = queryProgressWindow ?? makeQueryProgressWindow()
+        queryProgressWindow = progressWindow
+        if progressWindow.parent == nil {
+            parentWindow.addChildWindow(progressWindow, ordered: .above)
+        }
+        progressWindow.orderFront(nil)
+
+        queryProgressStartDate = Date()
+        queryProgressFadeStartDate = Date()
+        queryProgressCancelButton?.isEnabled = true
+        setQueryProgressCancelButtonTitle(cancelButtonTitle)
+        setQueryProgressDescription(description)
+        updateQueryProgressDuration()
+        centerQueryProgressWindow()
+        progressWindow.alphaValue = 0
+        queryProgressIndicator?.startAnimation(self)
+
+        queryProgressFadeTimer = Timer.scheduledTimer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(fadeInQueryProgressPanel(_:)), userInfo: nil, repeats: true)
+        queryProgressDurationTimer = Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(updateQueryProgressDurationTimerFired(_:)), userInfo: nil, repeats: true)
+    }
+
+    func hideQueryProgressPanel() {
+        queryProgressFadeTimer?.invalidate()
+        queryProgressFadeTimer = nil
+        queryProgressDurationTimer?.invalidate()
+        queryProgressDurationTimer = nil
+        queryProgressFadeStartDate = nil
+        queryProgressStartDate = nil
+        queryProgressIndicator?.stopAnimation(self)
+        queryProgressWindow?.alphaValue = 0
+        queryProgressWindow?.orderOut(self)
+        if let queryProgressWindow, let parent = queryProgressWindow.parent {
+            parent.removeChildWindow(queryProgressWindow)
+        }
+    }
+
+    func makeQueryProgressWindow() -> NSWindow {
+        let layer = NSBox(frame: NSRect(x: 0, y: 0, width: 437, height: 90))
+        layer.boxType = .custom
+        layer.borderType = .noBorder
+        layer.titlePosition = .noTitle
+        layer.isTransparent = false
+        layer.fillColor = NSColor(calibratedWhite: 0, alpha: 0.7)
+        layer.borderColor = NSColor(calibratedWhite: 0, alpha: 0.42)
+        layer.cornerRadius = 15
+
+        let innerBox = NSBox(frame: .zero)
+        innerBox.boxType = .custom
+        innerBox.borderType = .noBorder
+        innerBox.titlePosition = .noTitle
+        innerBox.fillColor = NSColor(calibratedWhite: 0.2540322542, alpha: 0.8)
+        innerBox.borderColor = NSColor(calibratedWhite: 0, alpha: 0.42)
+        innerBox.cornerRadius = 9
+
+        let indicator = YRKSpinningProgressIndicator(frame: .zero)
+        indicator.setForeColor(.white)
+        indicator.shadow = queryProgressTextShadow(blurRadius: 1)
+
+        let descriptionLabel = NSTextField(labelWithString: "")
+        descriptionLabel.attributedStringValue = queryProgressAttributedString("")
+        descriptionLabel.lineBreakMode = .byTruncatingTail
+        descriptionLabel.maximumNumberOfLines = 1
+
+        let durationLabel = NSTextField(labelWithString: "")
+        durationLabel.attributedStringValue = queryProgressAttributedString("")
+
+        let cancelButton = NSButton(title: NSLocalizedString("Cancel", comment: "cancel button"), target: self, action: #selector(cancelQueryProgressPanel(_:)))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "."
+        cancelButton.keyEquivalentModifierMask = .command
+
+        layer.contentView?.addSubview(innerBox)
+        innerBox.contentView?.addSubview(indicator)
+        innerBox.contentView?.addSubview(descriptionLabel)
+        innerBox.contentView?.addSubview(durationLabel)
+        innerBox.contentView?.addSubview(cancelButton)
+
+        [innerBox, indicator, descriptionLabel, durationLabel, cancelButton].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        guard let layerContentView = layer.contentView,
+              let innerContentView = innerBox.contentView else {
+            return NSWindow(contentRect: layer.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+        }
+
+        NSLayoutConstraint.activate([
+            innerBox.leadingAnchor.constraint(equalTo: layerContentView.leadingAnchor),
+            innerBox.trailingAnchor.constraint(equalTo: layerContentView.trailingAnchor, constant: -1),
+            innerBox.topAnchor.constraint(equalTo: layerContentView.topAnchor),
+            innerBox.bottomAnchor.constraint(equalTo: layerContentView.bottomAnchor),
+
+            indicator.leadingAnchor.constraint(equalTo: innerContentView.leadingAnchor, constant: 20),
+            indicator.centerYAnchor.constraint(equalTo: innerContentView.centerYAnchor),
+            indicator.widthAnchor.constraint(equalToConstant: 70),
+            indicator.heightAnchor.constraint(equalToConstant: 70),
+
+            descriptionLabel.leadingAnchor.constraint(equalTo: indicator.trailingAnchor, constant: 10),
+            descriptionLabel.trailingAnchor.constraint(equalTo: innerContentView.trailingAnchor, constant: -20),
+            descriptionLabel.topAnchor.constraint(equalTo: innerContentView.topAnchor, constant: 11),
+
+            durationLabel.leadingAnchor.constraint(equalTo: indicator.trailingAnchor, constant: 10),
+            durationLabel.bottomAnchor.constraint(equalTo: innerContentView.bottomAnchor, constant: -11),
+            durationLabel.widthAnchor.constraint(equalToConstant: 180),
+
+            cancelButton.leadingAnchor.constraint(equalTo: durationLabel.trailingAnchor, constant: 8),
+            cancelButton.trailingAnchor.constraint(equalTo: innerContentView.trailingAnchor, constant: -20),
+            cancelButton.bottomAnchor.constraint(equalTo: innerContentView.bottomAnchor, constant: -11),
+            cancelButton.heightAnchor.constraint(equalToConstant: 19)
+        ])
+
+        queryProgressView = layer
+        queryProgressIndicator = indicator
+        queryProgressDescriptionLabel = descriptionLabel
+        queryProgressDurationLabel = durationLabel
+        queryProgressCancelButton = cancelButton
+
+        let window = NSWindow(contentRect: layer.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.alphaValue = 0
+        window.contentView = layer
+        return window
+    }
+
+    func centerQueryProgressWindow() {
+        guard let parentWindow = view.window, let queryProgressWindow else { return }
+
+        let parentFrame = parentWindow.frame
+        let progressFrame = queryProgressWindow.frame
+        let origin = NSPoint(x: round(parentFrame.origin.x + parentFrame.width / 2 - progressFrame.width / 2),
+                             y: round(parentFrame.origin.y + parentFrame.height / 2 - progressFrame.height / 2))
+        queryProgressWindow.setFrameOrigin(origin)
+    }
+
+    func setQueryProgressDescription(_ description: String) {
+        queryProgressDescriptionLabel?.attributedStringValue = queryProgressAttributedString(description)
+    }
+
+    func setQueryProgressCancelButtonTitle(_ title: String) {
+        queryProgressCancelButton?.attributedTitle = NSAttributedString(string: title,
+                                                                        attributes: [.foregroundColor: NSColor.white])
+    }
+
+    func updateQueryProgressDuration() {
+        let duration = queryProgressStartDate.map { Date().timeIntervalSince($0) } ?? 0
+        let durationString = DateComponentsFormatter.hourMinSecFormatter.string(from: duration) ?? "00:00"
+        queryProgressDurationLabel?.attributedStringValue = queryProgressAttributedString(durationString)
+    }
+
+    func queryProgressAttributedString(_ string: String) -> NSAttributedString {
+        return NSAttributedString(string: string,
+                                  attributes: [.font: NSFont.boldSystemFont(ofSize: 13),
+                                               .foregroundColor: NSColor.white,
+                                               .shadow: queryProgressTextShadow(blurRadius: 3)])
+    }
+
+    func queryProgressTextShadow(blurRadius: CGFloat) -> NSShadow {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.75)
+        shadow.shadowOffset = NSSize(width: 1, height: -1)
+        shadow.shadowBlurRadius = blurRadius
+        return shadow
+    }
+
+    @objc func fadeInQueryProgressPanel(_ timer: Timer) {
+        guard let startDate = queryProgressFadeStartDate, let queryProgressWindow else { return }
+
+        let elapsed = Date().timeIntervalSince(startDate)
+        guard elapsed >= 0.5 else { return }
+
+        centerQueryProgressWindow()
+        let alphaValue = min(1, CGFloat((elapsed - 0.5) / 0.6))
+        queryProgressWindow.alphaValue = alphaValue
+        if alphaValue >= 1 {
+            queryProgressFadeTimer?.invalidate()
+            queryProgressFadeTimer = nil
+        }
+    }
+
+    @objc func updateQueryProgressDurationTimerFired(_ timer: Timer) {
+        updateQueryProgressDuration()
+    }
+
+    @objc func cancelQueryProgressPanel(_ sender: Any?) {
+        cancelRunningQuery()
+    }
+
+    func restoreUserQueryText(for tableKey: SALightweightSessionState.TableKey?, fallbackTableKey: SALightweightSessionState.TableKey?) {
+        guard let restoredQueryText = tableKey.flatMap({ sessionState.queryState(for: $0)?.text })
+            ?? fallbackTableKey.flatMap({ sessionState.queryState(for: $0)?.text }) else {
             replaceEditorText("", marksUserEdited: false)
             return
         }
 
         replaceEditorText(restoredQueryText, marksUserEdited: true)
+        if let tableKey = tableKey {
+            sessionState.setQueryText(restoredQueryText, for: tableKey)
+        }
     }
 
     func saveCurrentQueryTextIfNeeded() {
@@ -951,7 +1167,9 @@ private extension SALightweightQueryViewController {
     func cancelRunningQuery() {
         isCancellationRequested = true
         connection?.cancelCurrentQuery()
+        queryProgressCancelButton?.isEnabled = false
         setStatusText(NSLocalizedString("Cancelling query...", comment: "lightweight query cancelling status"))
+        setQueryProgressDescription(NSLocalizedString("Cancelling query...", comment: "lightweight query cancelling status"))
     }
 
     @objc func switchDefaultQueryAction(_ sender: Any?) {
@@ -1108,17 +1326,33 @@ private extension SALightweightQueryViewController {
         let token = queryToken
         isCancellationRequested = false
 
+        let preservingColumnsForSort = isApplyingQuerySort && !columnDefinitions.isEmpty
+        if !isApplyingQuerySort {
+            querySortColumnIndex = nil
+            querySortAscending = true
+            applyQuerySortIndicator()
+        }
+
         isRunning = true
-        columnDefinitions = []
         rows = []
         displayCache.invalidateAll()
-        columnWidthCache.invalidateAll()
+        if preservingColumnsForSort {
+            tableView.noteNumberOfRowsChanged()
+        } else {
+            columnDefinitions = []
+            columnWidthCache.invalidateAll()
+            rebuildColumns()
+        }
         lastExecutedQuery = ""
         lastResultQuery = ""
-        rebuildColumns()
-        setStatusText(runnableQueries.count > 1
+        let runningStatus = runnableQueries.count > 1
             ? String(format: NSLocalizedString("Running query 1 of %ld...", comment: "lightweight query running multiple status"), runnableQueries.count)
-            : NSLocalizedString("Running query...", comment: "lightweight query running status"))
+            : NSLocalizedString("Running query...", comment: "lightweight query running status")
+        setStatusText(runningStatus)
+        showQueryProgressPanel(description: runningStatus,
+                               cancelButtonTitle: runnableQueries.count > 1
+                                   ? NSLocalizedString("Stop queries", comment: "Stop queries string")
+                                   : NSLocalizedString("Stop query", comment: "Stop query string"))
         updateControls()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -1154,7 +1388,9 @@ private extension SALightweightQueryViewController {
                 if runnableQueries.count > 1 {
                     DispatchQueue.main.async {
                         guard self.queryToken == token else { return }
-                        self.setStatusText(String(format: NSLocalizedString("Running query %ld of %ld...", comment: "lightweight query running multiple status"), index + 1, runnableQueries.count))
+                        let runningStatus = String(format: NSLocalizedString("Running query %ld of %ld...", comment: "lightweight query running multiple status"), index + 1, runnableQueries.count)
+                        self.setStatusText(runningStatus)
+                        self.setQueryProgressDescription(runningStatus)
                     }
                 }
 
@@ -1226,6 +1462,7 @@ private extension SALightweightQueryViewController {
                 var pendingPublishedRows: [[Any]] = []
                 var didPublishRowsForCurrentResult = false
                 var truncated = false
+                var fetchWasCancelled = false
                 resultQuery = definitions.isEmpty ? resultQuery : executionQuery
 
                 if !definitions.isEmpty {
@@ -1237,6 +1474,11 @@ private extension SALightweightQueryViewController {
 
                 let fetchStart = CFAbsoluteTimeGetCurrent()
                 while let row = result.getRowAsArray() {
+                    if token != self.queryToken || self.isCancellationRequested {
+                        fetchWasCancelled = true
+                        finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
+                        break
+                    }
                     if loadedRows.count < self.maxDisplayedRows {
                         loadedRows.append(row)
                         pendingPublishedRows.append(row)
@@ -1264,6 +1506,9 @@ private extension SALightweightQueryViewController {
                         truncated = true
                         break
                     }
+                }
+                if fetchWasCancelled {
+                    break
                 }
                 if !pendingPublishedRows.isEmpty, !definitions.isEmpty {
                     let rowsToPublish = pendingPublishedRows
@@ -1298,6 +1543,7 @@ private extension SALightweightQueryViewController {
 
                 guard self.queryToken == token else { return }
 
+                self.hideQueryProgressPanel()
                 self.isRunning = false
                 self.isCancellationRequested = false
                 self.lastExecutedQuery = finalResult.executedQuery
@@ -1308,6 +1554,7 @@ private extension SALightweightQueryViewController {
                 }
 
                 if let error = finalResult.fatalError, !error.isEmpty {
+                    self.isApplyingQuerySort = false
                     self.columnDefinitions = []
                     self.rows = []
                     self.displayCache.invalidateAll()
@@ -1342,6 +1589,7 @@ private extension SALightweightQueryViewController {
                 }
                 self.rebuildMenus()
                 self.updateControls()
+                self.isApplyingQuerySort = false
             }
         }
     }
@@ -2015,11 +2263,17 @@ private extension SALightweightQueryViewController {
     func publishQueryColumns(_ definitions: [NSDictionary], token: UUID) {
         guard queryToken == token, !definitions.isEmpty else { return }
 
+        let canPreserveColumns = isApplyingQuerySort && definitions.count == columnDefinitions.count
         columnDefinitions = definitions
         rows = []
         displayCache.invalidateAll()
-        columnWidthCache.invalidateAll()
-        rebuildColumns()
+        if canPreserveColumns {
+            tableView.noteNumberOfRowsChanged()
+            applyQuerySortIndicator()
+        } else {
+            columnWidthCache.invalidateAll()
+            rebuildColumns()
+        }
         setStatusText(NSLocalizedString("Loading rows...", comment: "lightweight query loading rows status"))
     }
 
@@ -2033,7 +2287,9 @@ private extension SALightweightQueryViewController {
 
         rows.append(contentsOf: newRows)
         tableView.noteNumberOfRowsChanged()
-        scheduleVisibleColumnAutosize(delay: 0.05)
+        if !isApplyingQuerySort {
+            scheduleVisibleColumnAutosize(delay: 0.05)
+        }
 
         if forceDisplay {
             tableView.layoutSubtreeIfNeeded()
@@ -2058,6 +2314,7 @@ private extension SALightweightQueryViewController {
         if columnSignature == displayedColumnSignature,
            tableView.tableColumns.count == columnDefinitions.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
+            applyQuerySortIndicator()
             tableView.headerView?.needsDisplay = true
             scheduleVisibleColumnAutosize(delay: 0.01)
             return
@@ -2087,6 +2344,7 @@ private extension SALightweightQueryViewController {
 
         displayedColumnSignature = columnSignature
         tableView.reloadData()
+        applyQuerySortIndicator()
         scheduleVisibleColumnAutosize(delay: 0.01)
     }
 
@@ -2100,6 +2358,10 @@ private extension SALightweightQueryViewController {
 
     @objc func resultGridDidEndLiveScroll(_ notification: Notification) {
         autosizeCoordinator.didEndLiveScroll()
+    }
+
+    func applyQuerySortIndicator() {
+        SALightweightResultGrid.applySortIndicator(to: tableView, columnIndex: querySortColumnIndex, ascending: querySortAscending)
     }
 
     func scheduleVisibleColumnAutosize(delay: TimeInterval = 0.05) {
@@ -2162,9 +2424,11 @@ private extension SALightweightQueryViewController {
                                                 columnWidthCache: columnWidthCache,
                                                 shouldSkipColumn: { [weak self] columnIndex, _ in
                                                     guard let self = self, columnIndex < self.columnDefinitions.count else { return true }
+                                                    let columnDefinition = self.columnDefinitions[columnIndex]
                                                     let typeGrouping = (self.columnDefinitions[columnIndex]["typegrouping"] as? String) ?? ""
                                                     return SALightweightResultGrid.isWideTextColumn(typeGrouping: typeGrouping)
-                                                        || self.savedResultColumnWidth(for: self.columnDefinitions[columnIndex]) != nil
+                                                        || self.savedResultColumnWidth(for: columnDefinition) != nil
+                                                        || self.resultColumnWidths[self.resultColumnWidthKey(for: columnDefinition, fallbackIndex: columnIndex)] != nil
                                                 },
                                                 cacheKey: { [weak self] columnIndex, tableColumn, visibleRows in
                                                     self?.resultColumnWidthCacheKey(for: tableColumn, columnIndex: columnIndex, visibleRows: visibleRows) ?? tableColumn.identifier.rawValue
@@ -2270,25 +2534,29 @@ private extension SALightweightQueryViewController {
     func queryByApplyingSort(to query: String, columnIndex: Int, descending: Bool) -> String {
         let orderClause = " ORDER BY \(columnIndex + 1) \(descending ? "DESC" : "ASC") "
         let maskedQuery = queryMaskedForClauseSearch(query)
+        let queryNSString = query as NSString
         var mutableQuery = NSMutableString(string: query)
+        let trailingSemicolonRange = firstRegexRange(in: maskedQuery, pattern: #"(?s);\s*$"#)
+        let insertionLimit = trailingSemicolonRange?.location ?? queryNSString.length
+        let prefix = (maskedQuery as NSString).substring(to: insertionLimit)
 
-        if let existingOrderRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]+?(?:\s+(?:DESC|ASC))?(?=\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b)"#) {
+        if let existingOrderRange = firstRegexRange(in: prefix, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]+?(?:\s+(?:DESC|ASC))?(?=\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b)"#) {
             mutableQuery.replaceCharacters(in: existingOrderRange, with: orderClause)
             return mutableQuery as String
         }
 
-        if let trailingOrderRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]*$"#) {
+        if let trailingOrderRange = firstRegexRange(in: prefix, pattern: #"(?is)\s+ORDER\s+BY\s+[\s\S]*$"#) {
             mutableQuery.replaceCharacters(in: trailingOrderRange, with: orderClause)
             return mutableQuery as String
         }
 
-        if let suffixRange = firstRegexRange(in: maskedQuery, pattern: #"(?is)\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b"#),
-           firstRegexRange(in: maskedQuery, pattern: #"(?is)^\s*\(?\s*SELECT\b"#) != nil {
+        if let suffixRange = firstRegexRange(in: prefix, pattern: #"(?is)\s+(?:LIMIT|PROCEDURE|INTO|FOR|LOCK)\b"#),
+           firstRegexRange(in: prefix, pattern: #"(?is)^\s*\(?\s*SELECT\b"#) != nil {
             mutableQuery.insert(orderClause, at: suffixRange.location)
             return mutableQuery as String
         }
 
-        mutableQuery.append(" \(orderClause)")
+        mutableQuery.insert(orderClause, at: insertionLimit)
         return mutableQuery as String
     }
 
@@ -2912,8 +3180,9 @@ private extension SALightweightQueryViewController {
         let tableReference = "\(Self.backtickQuoted(origin.database)).\(Self.backtickQuoted(origin.table))"
         let countQuery = "SELECT COUNT(1) FROM \(tableReference) \(whereClause)"
         let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(origin.column)) = \(newValue.sql) \(whereClause)"
+        let refreshQuery = newValue.requiresReload ? "SELECT \(Self.backtickQuoted(origin.column)) FROM \(tableReference) \(whereClause) LIMIT 1" : nil
 
-        return CellUpdate(countQuery: countQuery, updateQuery: updateQuery, localValue: newValue.localValue)
+        return CellUpdate(countQuery: countQuery, updateQuery: updateQuery, refreshQuery: refreshQuery, localValue: newValue.localValue, requiresReload: newValue.requiresReload)
     }
 
     private func whereClause(for rowIndex: Int, origin: ResultColumnOrigin, connection: SPMySQLConnection) -> String? {
@@ -2994,38 +3263,40 @@ private extension SALightweightQueryViewController {
         return connection.escapeAndQuoteString(value) ?? Self.singleQuoted(value)
     }
 
-    func sqlValue(forEditedObject object: Any?, columnDefinition: NSDictionary, connection: SPMySQLConnection) -> (sql: String, localValue: Any) {
+    func sqlValue(forEditedObject object: Any?, columnDefinition: NSDictionary, connection: SPMySQLConnection) -> (sql: String, localValue: Any, requiresReload: Bool) {
         if let number = object as? NSNumber {
-            return (number.stringValue, number.stringValue)
+            return (number.stringValue, number.stringValue, false)
         }
 
         if let data = object as? Data {
-            return (connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false)), data)
+            return (connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false)), data, false)
         }
 
         let value = String(describing: object ?? "")
         let typeGrouping = (columnDefinition["typegrouping"] as? String) ?? ""
         let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
 
+        if let expression = SALightweightResultGrid.editedSQLExpression(for: value,
+                                                                        typeGrouping: typeGrouping,
+                                                                        allowsStringUUIDFunction: true) {
+            return (expression, value, true)
+        }
+
         if value == nullValue || ((typeGrouping == "float" || typeGrouping == "integer" || typeGrouping == "date") && value.isEmpty) {
-            return ("NULL", NSNull())
+            return ("NULL", NSNull(), false)
         }
 
         if typeGrouping == "bit" {
             let bitValue = value.isEmpty || value == "0" ? "0" : value
-            return ("b'\(bitValue)'", bitValue)
+            return ("b'\(bitValue)'", bitValue, false)
         }
 
         if typeGrouping == "geometry" {
             let geometryValue = geometrySQLValue(from: value)
-            return (geometryValue, value)
+            return (geometryValue, value, false)
         }
 
-        if typeGrouping == "date" && value == "NOW()" {
-            return ("NOW()", value)
-        }
-
-        return (connection.escapeAndQuoteString(value) ?? Self.singleQuoted(value), value)
+        return (connection.escapeAndQuoteString(value) ?? Self.singleQuoted(value), value, false)
     }
 
     func geometrySQLValue(from value: String) -> String {
@@ -3268,22 +3539,24 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         rows.count
     }
 
-    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+    func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
         guard !isRunning,
-              !isApplyingQuerySort,
-              let descriptor = tableView.sortDescriptors.first,
-              let key = descriptor.key,
-              let columnIndex = Int(key),
+              let columnIndex = Int(tableColumn.identifier.rawValue),
               columnIndex < columnDefinitions.count else { return }
 
-        let queryToSort = lastResultQuery.isEmpty ? lastExecutedQuery : lastResultQuery
-        guard !queryToSort.isEmpty else { return }
+        guard !lastExecutedQuery.isEmpty else { return }
+
+        let shiftPressed = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+        if querySortColumnIndex == columnIndex {
+            querySortAscending.toggle()
+        } else {
+            querySortColumnIndex = columnIndex
+            querySortAscending = !shiftPressed
+        }
+        applyQuerySortIndicator()
 
         isApplyingQuerySort = true
-        runQueries([queryByApplyingSort(to: queryToSort, columnIndex: columnIndex, descending: !descriptor.ascending)])
-        DispatchQueue.main.async { [weak self] in
-            self?.isApplyingQuerySort = false
-        }
+        runQueries([queryByApplyingSort(to: lastExecutedQuery, columnIndex: columnIndex, descending: !querySortAscending)])
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
@@ -3353,6 +3626,20 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                 _ = connection.queryString(update.updateQuery)
                 error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             }
+            var refreshedValue: Any?
+            if error == nil,
+               matchingRows == 1,
+               update.requiresReload,
+               !reloadAfterEdit,
+               let refreshQuery = update.refreshQuery {
+                let result = connection.queryString(refreshQuery)
+                result?.defaultRowReturnType = SPMySQLResultRowAsArray
+                if !connection.queryErrored(),
+                   let row = result?.getRowAsArray(),
+                   !row.isEmpty {
+                    refreshedValue = row.first ?? NSNull()
+                }
+            }
 
             DispatchQueue.main.async {
                 self.isRunning = false
@@ -3373,13 +3660,18 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                     return
                 }
 
+                if update.requiresReload, !reloadAfterEdit, refreshedValue == nil, !queryToReload.isEmpty {
+                    self.runQueries([queryToReload])
+                    return
+                }
+
                 guard row < self.rows.count,
                       columnIndex < self.rows[row].count else {
                     self.tableView.reloadData()
                     return
                 }
 
-                self.rows[row][columnIndex] = update.localValue
+                self.rows[row][columnIndex] = refreshedValue ?? update.localValue
                 self.displayCache.invalidate(row: row, column: columnIndex)
                 self.setStatusText(NSLocalizedString("Cell updated.", comment: "lightweight query cell updated status"))
                 self.reloadCell(row: row, columnIndex: columnIndex)
