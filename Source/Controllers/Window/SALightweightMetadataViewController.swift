@@ -400,7 +400,7 @@ final class SALightweightRelationsViewController: NSViewController {
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         for row in selectedRows {
             guard let constraint = row["name"], !constraint.isEmpty else { continue }
@@ -498,7 +498,7 @@ final class SALightweightRelationsViewController: NSViewController {
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.runModal()
+        alert.runModalCenteredInKeyWindow()
     }
 }
 
@@ -916,7 +916,7 @@ final class SALightweightTriggersViewController: NSViewController {
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         for row in selectedRows {
             guard let trigger = row["TriggerName"], !trigger.isEmpty else { continue }
@@ -1025,7 +1025,7 @@ final class SALightweightTriggersViewController: NSViewController {
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.runModal()
+        alert.runModalCenteredInKeyWindow()
     }
 }
 

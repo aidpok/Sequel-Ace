@@ -792,7 +792,7 @@ enum SALightweightResultGrid {
             try content.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             let alert = NSAlert(error: error)
-            alert.runModal()
+            alert.runModalCenteredInKeyWindow()
         }
     }
 

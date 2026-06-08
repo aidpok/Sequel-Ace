@@ -1099,7 +1099,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
             alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))
             alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-            if alert.runModal() == .alertFirstButtonReturn {
+            if alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn {
                 executeChange()
             } else {
                 restoreHandler?()

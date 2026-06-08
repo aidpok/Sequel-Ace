@@ -31,12 +31,26 @@
 import Cocoa
 import SnapKit
 
+private final class SALightweightConsoleLogger: NSObject, SPMySQLConnectionDelegate {
+    weak var owner: SPWindowController?
+
+    func willQueryString(_ query: String!, connection: Any!) {
+        owner?.logLightweightConsoleQuery(query)
+    }
+
+    func queryGaveError(_ error: String!, connection: Any!) {
+        owner?.logLightweightConsoleError(error)
+    }
+}
+
 private enum SALightweightWindowSessionSnapshotKey {
     static let state = "state"
     static let selectedDatabase = "selectedDatabase"
     static let selectedTable = "selectedTable"
     static let viewMode = "viewMode"
     static let tableFilter = "tableFilter"
+    static let sidebarWidth = "sidebarWidth"
+    static let tablesPaneHeight = "tablesPaneHeight"
     static let historyBackStack = "historyBackStack"
     static let historyForwardStack = "historyForwardStack"
 }
@@ -57,6 +71,7 @@ private enum SALightweightConnectionDictionaryKey {
     static let socket = "socket"
     static let port = "port"
     static let colorIndex = SPFavoriteColorIndexKey
+    static let hasColorIndex = "hasColorIndex"
     static let kcid = "kcid"
     static let useSSL = "useSSL"
     static let allowDataLocalInfile = "allowDataLocalInfile"
@@ -472,6 +487,9 @@ final class SALightweightSessionState {
     private var connectionController: SPConnectionController?
     private var activeConnection: SPMySQLConnection?
     private var activeConnectionInfo: SAConnectionInfoObjC?
+    private let lightweightConsoleLoggingLock = NSLock()
+    private var lightweightConsoleQueryMode = 0
+    private let lightweightConsoleLogger = SALightweightConsoleLogger()
 
     private var selectedDatabase: String?
     private var databaseListNeedsLoad = true
@@ -664,6 +682,12 @@ extension SPWindowController {
         if !tableFilterField.stringValue.isEmpty {
             snapshot[SALightweightWindowSessionSnapshotKey.tableFilter] = tableFilterField.stringValue
         }
+        if let sidebarWidth = currentLightweightSidebarWidth() {
+            snapshot[SALightweightWindowSessionSnapshotKey.sidebarWidth] = sidebarWidth
+        }
+        if let tablesPaneHeight = currentLightweightTablesPaneHeight() {
+            snapshot[SALightweightWindowSessionSnapshotKey.tablesPaneHeight] = tablesPaneHeight
+        }
         if !lightweightHistoryBackStack.isEmpty {
             snapshot[SALightweightWindowSessionSnapshotKey.historyBackStack] = lightweightHistoryBackStack
         }
@@ -737,6 +761,7 @@ extension SPWindowController {
         }
         if info.colorIndex >= 0 {
             connection[SALightweightConnectionDictionaryKey.colorIndex] = info.colorIndex
+            connection[SALightweightConnectionDictionaryKey.hasColorIndex] = true
         }
         if !info.connectionKeychainID.isEmpty {
             connection[SALightweightConnectionDictionaryKey.kcid] = info.connectionKeychainID
@@ -818,7 +843,11 @@ extension SPWindowController {
         info.database = Self.stringValue(connection[SALightweightConnectionDictionaryKey.database])
         info.socket = Self.stringValue(connection[SALightweightConnectionDictionaryKey.socket])
         info.port = Self.stringValue(connection[SALightweightConnectionDictionaryKey.port])
-        info.colorIndex = Self.intValue(connection[SALightweightConnectionDictionaryKey.colorIndex], defaultValue: 0)
+        if Self.boolValue(connection[SALightweightConnectionDictionaryKey.hasColorIndex]) {
+            info.colorIndex = Self.intValue(connection[SALightweightConnectionDictionaryKey.colorIndex], defaultValue: -1)
+        } else {
+            info.colorIndex = -1
+        }
         info.connectionKeychainID = Self.stringValue(connection[SALightweightConnectionDictionaryKey.kcid])
         info.useSSL = Self.intValue(connection[SALightweightConnectionDictionaryKey.useSSL])
         info.allowDataLocalInfile = Self.intValue(connection[SALightweightConnectionDictionaryKey.allowDataLocalInfile])
@@ -909,6 +938,7 @@ extension SPWindowController {
 private extension SPWindowController {
     func setupAppearance() {
         installConnectionView()
+        lightweightConsoleLogger.owner = self
 
         if #available(macOS 10.13, *) {
             window?.tab.accessoryView = tabAccessoryView
@@ -921,6 +951,12 @@ private extension SPWindowController {
         lightweightQueryController.sessionState = lightweightSessionState
         lightweightQueryController.sessionStateDidChange = { [weak self] in
             self?.markLightweightResumeStateChanged()
+        }
+        lightweightQueryController.queryExecutionWillBegin = { [weak self] in
+            self?.setLightweightConsoleQueryMode(1)
+        }
+        lightweightQueryController.queryExecutionDidEnd = { [weak self] in
+            self?.setLightweightConsoleQueryMode(0)
         }
         databaseToolbarController.delegate = self
     }
@@ -1020,10 +1056,16 @@ private extension SPWindowController {
         databaseToolbarController.setDatabasePickerEnabled(true)
         registerLightweightPreferenceObserversIfNeeded()
 
-        let sidebarWidth = LightweightDBViewLayout.sidebarWidth
+        let defaultSidebarWidth = LightweightDBViewLayout.sidebarWidth
         let tableInfoHeight = LightweightDBViewLayout.tableInfoHeight
         let sidebarButtonBarHeight = LightweightDBViewLayout.sidebarButtonBarHeight
-        let savedSidebarWidth = savedSplitViewFirstSubviewLength(forAutosaveName: LightweightDBViewLayout.dbViewAutosaveName, isVertical: true)
+        let restoredSidebarWidth = restoredLightweightSidebarWidth(from: pendingLightweightSessionSnapshot)
+        let savedSidebarWidth = sanitizedLightweightSidebarWidth(restoredSidebarWidth ?? savedSplitViewFirstSubviewLength(forAutosaveName: LightweightDBViewLayout.dbViewAutosaveName, isVertical: true),
+                                                                 in: contentView.bounds.width)
+        let sidebarWidth = savedSidebarWidth ?? defaultSidebarWidth
+        let restoredTablesPaneHeight = restoredLightweightTablesPaneHeight(from: pendingLightweightSessionSnapshot)
+        let savedTablesPaneHeight = sanitizedLightweightTablesPaneHeight(restoredTablesPaneHeight ?? savedSplitViewFirstSubviewLength(forAutosaveName: LightweightDBViewLayout.tableInfoAutosaveName, isVertical: false),
+                                                                         in: max(0, contentView.bounds.height - sidebarButtonBarHeight))
 
         lightweightShellView.removeFromSuperviewWithoutNeedingDisplay()
         lightweightShellView.frame = contentView.bounds
@@ -1129,9 +1171,9 @@ private extension SPWindowController {
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.lightweightContentSplitView.superview != nil else { return }
-            self.lightweightContentSplitView.setPosition(savedSidebarWidth ?? sidebarWidth, ofDividerAt: 0)
+            self.lightweightContentSplitView.setPosition(sidebarWidth, ofDividerAt: 0)
             let defaultTablesPaneHeight = max(LightweightDBViewLayout.sidebarPaneMinimumHeight, self.lightweightSidebarSplitView.bounds.height - tableInfoHeight)
-            self.lightweightSidebarSplitView.setPosition(defaultTablesPaneHeight, ofDividerAt: 0)
+            self.lightweightSidebarSplitView.setPosition(savedTablesPaneHeight ?? defaultTablesPaneHeight, ofDividerAt: 0)
 
             if UserDefaults.standard.bool(forKey: SPTableInformationPanelCollapsed) {
                 self.lightweightSidebarSplitView.setCollapsibleSubviewCollapsed(true, animate: false)
@@ -1800,18 +1842,7 @@ private extension SPWindowController {
         alert.window.isRestorable = false
         alert.window.animationBehavior = .none
 
-        guard let window = window else { return alert.runModal() }
-
-        alert.window.center()
-        var response: NSApplication.ModalResponse = .cancel
-        alert.beginSheetModal(for: window) { modalResponse in
-            response = modalResponse
-            alert.window.orderOut(nil)
-            NSApp.stopModal(withCode: modalResponse)
-        }
-
-        let modalResponse = NSApp.runModal(for: alert.window)
-        return response == .cancel ? modalResponse : response
+        return alert.runModalCentered(over: window)
     }
 
     func centerLightweightModalWindow(_ modalWindow: NSWindow) {
@@ -2010,6 +2041,76 @@ private extension SPWindowController {
         if let tableColumn = lightweightTableInfoView.tableColumns.first {
             tableColumn.width = max(tableColumn.minWidth, lightweightTableInfoView.enclosingScrollView?.contentSize.width ?? lightweightTableInfoView.bounds.width)
         }
+    }
+
+    func currentLightweightSidebarWidth() -> CGFloat? {
+        guard lightweightContentSplitView.superview != nil,
+              let sidebarView = lightweightContentSplitView.subviews.first else {
+            return nil
+        }
+
+        return sanitizedLightweightSidebarWidth(sidebarView.frame.width, in: lightweightContentSplitView.bounds.width)
+    }
+
+    func currentLightweightTablesPaneHeight() -> CGFloat? {
+        guard lightweightSidebarSplitView.superview != nil,
+              let tablesPane = lightweightSidebarSplitView.subviews.first else {
+            return nil
+        }
+
+        return sanitizedLightweightTablesPaneHeight(tablesPane.frame.height, in: lightweightSidebarSplitView.bounds.height)
+    }
+
+    func restoredLightweightSidebarWidth(from snapshot: NSDictionary?) -> CGFloat? {
+        return numericSnapshotValue(snapshot?[SALightweightWindowSessionSnapshotKey.sidebarWidth])
+    }
+
+    func restoredLightweightTablesPaneHeight(from snapshot: NSDictionary?) -> CGFloat? {
+        return numericSnapshotValue(snapshot?[SALightweightWindowSessionSnapshotKey.tablesPaneHeight])
+    }
+
+    func sanitizedLightweightSidebarWidth(_ width: CGFloat?, in availableWidth: CGFloat) -> CGFloat? {
+        guard let width = width, width.isFinite, availableWidth.isFinite else { return nil }
+
+        let maximumWidth = min(CGFloat(420), availableWidth - LightweightDBViewLayout.detailMinimumWidth - lightweightContentSplitView.dividerThickness)
+        guard maximumWidth >= LightweightDBViewLayout.sidebarMinimumWidth else { return nil }
+
+        let roundedWidth = width.rounded()
+        guard roundedWidth >= LightweightDBViewLayout.sidebarMinimumWidth, roundedWidth <= maximumWidth else {
+            return nil
+        }
+
+        return roundedWidth
+    }
+
+    func sanitizedLightweightTablesPaneHeight(_ height: CGFloat?, in availableHeight: CGFloat) -> CGFloat? {
+        guard let height = height, height.isFinite, availableHeight.isFinite else { return nil }
+
+        let maximumHeight = availableHeight - LightweightDBViewLayout.sidebarPaneMinimumHeight - lightweightSidebarSplitView.dividerThickness
+        guard maximumHeight >= LightweightDBViewLayout.sidebarPaneMinimumHeight else { return nil }
+
+        let roundedHeight = height.rounded()
+        guard roundedHeight >= LightweightDBViewLayout.sidebarPaneMinimumHeight, roundedHeight <= maximumHeight else {
+            return nil
+        }
+
+        return roundedHeight
+    }
+
+    func numericSnapshotValue(_ value: Any?) -> CGFloat? {
+        if let number = value as? NSNumber {
+            return CGFloat(number.doubleValue)
+        }
+
+        if let double = value as? Double {
+            return CGFloat(double)
+        }
+
+        if let string = value as? String, let double = Double(string) {
+            return CGFloat(double)
+        }
+
+        return nil
     }
 
     func savedSplitViewFirstSubviewLength(forAutosaveName autosaveName: String, isVertical: Bool) -> CGFloat? {
@@ -2891,7 +2992,44 @@ private extension SPWindowController {
     }
 
     @objc func showConsole() {
-        installLegacyDatabaseDocumentIfNeeded().toggleConsole()
+        toggleLightweightConsole()
+    }
+
+    @objc func toggleConsole(_ sender: Any?) {
+        toggleLightweightConsole()
+    }
+
+    @objc func clearConsole(_ sender: Any?) {
+        SPQueryController.shared()?.clearConsole(sender)
+    }
+
+    private func toggleLightweightConsole() {
+        guard let queryController = SPQueryController.shared() else { return }
+        guard let consoleWindow = queryController.window else { return }
+
+        if consoleWindow.isVisible,
+           NSApp.keyWindow?.windowController is SPQueryController {
+            consoleWindow.orderOut(self)
+            return
+        }
+
+        if !consoleWindow.isVisible {
+            queryController.updateEntries()
+        }
+
+        consoleWindow.makeKeyAndOrderFront(self)
+    }
+
+    func setLightweightConsoleQueryMode(_ mode: Int) {
+        lightweightConsoleLoggingLock.lock()
+        lightweightConsoleQueryMode = mode
+        lightweightConsoleLoggingLock.unlock()
+    }
+
+    func currentLightweightConsoleQueryMode() -> Int {
+        lightweightConsoleLoggingLock.lock()
+        defer { lightweightConsoleLoggingLock.unlock() }
+        return lightweightConsoleQueryMode
     }
 
     private func lightweightCreateTableSyntax(showErrors: Bool) -> String? {
@@ -3146,13 +3284,7 @@ private extension SPWindowController {
         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
         alert.window.animationBehavior = .none
 
-        if let window = window {
-            alert.beginSheetModal(for: window) { _ in
-                alert.window.orderOut(nil)
-            }
-        } else {
-            alert.runModal()
-        }
+        alert.runModalCentered(over: window)
     }
 
     private func showLightweightCreateSyntaxSheet(title: String, syntax: String) {
@@ -3185,13 +3317,7 @@ private extension SPWindowController {
         alert.accessoryView = scrollView
         alert.window.animationBehavior = .none
 
-        if let window = window {
-            alert.beginSheetModal(for: window) { _ in
-                alert.window.orderOut(nil)
-            }
-        } else {
-            alert.runModal()
-        }
+        alert.runModalCentered(over: window)
     }
 
     private func showLightweightCreateSyntaxError(_ message: String) {
@@ -3202,13 +3328,7 @@ private extension SPWindowController {
         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
         alert.window.animationBehavior = .none
 
-        if let window = window {
-            alert.beginSheetModal(for: window) { _ in
-                alert.window.orderOut(nil)
-            }
-        } else {
-            alert.runModal()
-        }
+        alert.runModalCentered(over: window)
     }
 
 }
@@ -3251,6 +3371,8 @@ extension SPWindowController: SADatabaseDocumentProviding {
 
     @objc func setConnection(_ connection: SPMySQLConnection) {
         activeConnection = connection
+        connection.setDelegate(lightweightConsoleLogger)
+        connection.delegateQueryLogging = true
     }
 
     @objc var isProcessing: Bool {
@@ -3267,6 +3389,8 @@ extension SPWindowController: SADatabaseDocumentProviding {
 extension SPWindowController: SAConnectionDelegate {
     @objc func connectionDidEstablish(_ connection: SPMySQLConnection, info: SAConnectionInfoObjC) {
         activeConnection = connection
+        connection.setDelegate(lightweightConsoleLogger)
+        connection.delegateQueryLogging = true
         activeConnectionInfo = info
         activeConnectionName = info.name
         activeServerVersion = connection.serverVersionString()
@@ -3275,6 +3399,8 @@ extension SPWindowController: SAConnectionDelegate {
         databaseListNeedsLoad = true
 
         updateLightweightWindowTitle()
+        updateWindowAccessory(color: SPFavoriteColorSupport.sharedInstance().color(for: info.colorIndex),
+                              isSSL: connection.isConnectedViaSSL())
         installLightweightDatabaseShell()
         setLightweightFallbackToolbarItemsEnabled(true)
         requestLightweightDatabasesIfNeeded()
@@ -3293,6 +3419,66 @@ extension SPWindowController: SAConnectionDelegate {
 
     @objc func connectionDidFail(withError error: String, detail: String?) {
         showLightweightPlaceholder(error)
+    }
+}
+
+private extension SPWindowController {
+    func logLightweightConsoleQuery(_ query: String?) {
+        guard let query = query, !query.isEmpty else { return }
+
+        let prefs = UserDefaults.standard
+        guard prefs.bool(forKey: SPConsoleEnableLogging) else { return }
+
+        let queryMode = currentLightweightConsoleQueryMode()
+        let shouldLog: Bool
+        switch queryMode {
+        case 1:
+            shouldLog = prefs.bool(forKey: SPConsoleEnableCustomQueryLogging)
+        case 2:
+            shouldLog = prefs.bool(forKey: SPConsoleEnableImportExportLogging)
+        default:
+            shouldLog = prefs.bool(forKey: SPConsoleEnableInterfaceLogging)
+        }
+        guard shouldLog else { return }
+
+        SPQueryController.shared()?.showMessage(inConsole: query,
+                                                connection: lightweightConsoleConnectionName(),
+                                                database: lightweightConsoleDatabaseName())
+    }
+
+    func logLightweightConsoleError(_ error: String?) {
+        guard let error = error, !error.isEmpty else { return }
+
+        let prefs = UserDefaults.standard
+        guard prefs.bool(forKey: SPConsoleEnableLogging),
+              prefs.bool(forKey: SPConsoleEnableErrorLogging) else { return }
+
+        SPQueryController.shared()?.showError(inConsole: error,
+                                              connection: lightweightConsoleConnectionName(),
+                                              database: lightweightConsoleDatabaseName())
+    }
+
+    private func lightweightConsoleConnectionName() -> String {
+        if let activeConnectionName, !activeConnectionName.isEmpty {
+            return activeConnectionName
+        }
+        if let name = activeConnectionInfo?.name, !name.isEmpty {
+            return name
+        }
+        if let host = activeConnection?.host, !host.isEmpty {
+            return host
+        }
+        return ""
+    }
+
+    private func lightweightConsoleDatabaseName() -> String {
+        if let selectedDatabase, !selectedDatabase.isEmpty {
+            return selectedDatabase
+        }
+        if let database = activeConnection?.database, !database.isEmpty {
+            return database
+        }
+        return activeConnectionInfo?.database ?? ""
     }
 }
 
@@ -3440,6 +3626,7 @@ extension SPWindowController: NSSplitViewDelegate, AllowSplitViewResizing {
         }
 
         resizeLightweightSidebarColumns()
+        markLightweightResumeStateChanged()
     }
 }
 

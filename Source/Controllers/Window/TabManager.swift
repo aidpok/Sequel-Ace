@@ -165,11 +165,10 @@ private extension TabManager {
         window.tabbingMode = .preferred
         newWindow.tabbingMode = .preferred
 
-        // If AppKit has not already attached the new tab, attach it explicitly. During app restore the
-        // first restored window may not be main yet, but later restored windows still belong in its tab group.
-        if newWindow.tabGroup == nil || newWindow.tabGroup !== window.tabGroup {
-            window.addTabbedWindow(newWindow, ordered: orderingMode)
-        }
+        // AppKit can auto-attach restored windows before we place them. Re-apply the requested insertion
+        // point so restored server tabs keep the saved left-to-right order instead of being stacked after
+        // the first tab in reverse creation order.
+        window.addTabbedWindow(newWindow, ordered: orderingMode)
         let index = managedWindowInsertIndex(for: newWindow, in: window.tabGroup?.windows)
         managedWindows.insert(newManagement, at: index)
         window.tabGroup?.selectedWindow = newWindow

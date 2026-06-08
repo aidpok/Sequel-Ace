@@ -228,7 +228,13 @@
  */
 - (NSRect)drawTitle:(NSAttributedString *)title withFrame:(NSRect)frame inView:(NSView *)controlView
 {
-	frame.size.width -= 1;
+	if ([controlView respondsToSelector:@selector(lineOffset)]) {
+		NSRect bounds = [controlView bounds];
+		frame.origin.x = bounds.origin.x + 8;
+		frame.size.width = MAX(0, bounds.size.width - [(SPComboPopupButton *)controlView lineOffset] - 16);
+	} else {
+		frame.size.width -= 1;
+	}
 	return [super drawTitle:title withFrame:frame inView:controlView];
 }
 
