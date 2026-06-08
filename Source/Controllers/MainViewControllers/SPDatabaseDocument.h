@@ -65,7 +65,7 @@
 /**
  * The SPDatabaseDocument class controls the primary database view window.
  */
-@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate>
+@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, NSMenuDelegate, SPCountedObject, WebFrameLoadDelegate>
 {
 	// IBOutlets
 	IBOutlet SPTablesList *tablesListInstance;
@@ -184,6 +184,7 @@
 
 	BOOL _workingTimeout;
 
+	BOOL databaseListNeedsLoad;
 	SATaskController *taskController;
 
 	NSToolbarItem *chooseDatabaseToolbarItem;

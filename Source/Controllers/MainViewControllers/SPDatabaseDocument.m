@@ -440,8 +440,9 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         }
     }
 
-    // Update the database list
-    [self setDatabases];
+    // Populate the database list lazily; SHOW DATABASES is unnecessary on the
+    // critical path for opening a usable connection.
+    [self setDatabasesPlaceholder];
 
     [chooseDatabaseButton setEnabled:!_isWorkingLevel];
 
@@ -587,6 +588,8 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         return;
     }
 
+    databaseListNeedsLoad = NO;
+
     NSArray *theDatabaseList = [mySQLConnection databases];
 
     SADatabasePartition *partition = [SADatabaseListManager configurePopup:chooseDatabaseButton
@@ -601,6 +604,35 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // absorb those readers into the manager.
     allSystemDatabases = [partition.systemDatabases mutableCopy];
     allDatabases = [partition.userDatabases mutableCopy];
+}
+
+- (void)setDatabasesPlaceholder
+{
+    if (!chooseDatabaseButton) {
+        return;
+    }
+
+    databaseListNeedsLoad = YES;
+
+    [chooseDatabaseButton removeAllItems];
+
+    if ([self database]) {
+        [chooseDatabaseButton addItemWithTitle:[self database]];
+    } else {
+        [chooseDatabaseButton addItemWithTitle:NSLocalizedString(@"Choose Database...", @"menu item for choose db")];
+    }
+
+    [[chooseDatabaseButton menu] addItem:[NSMenuItem separatorItem]];
+    [[chooseDatabaseButton menu] addItemWithTitle:NSLocalizedString(@"Load Databases", @"menu item to load db") action:@selector(setDatabases:) keyEquivalent:@""];
+    [[chooseDatabaseButton menu] addItemWithTitle:NSLocalizedString(@"Refresh Databases", @"menu item to refresh databases") action:@selector(setDatabases:) keyEquivalent:@""];
+    [[chooseDatabaseButton menu] setDelegate:self];
+}
+
+- (void)menuWillOpen:(NSMenu *)menu
+{
+    if (menu == [chooseDatabaseButton menu] && databaseListNeedsLoad) {
+        [self setDatabases];
+    }
 }
 
 /**
