@@ -59,6 +59,8 @@
 @property (nonatomic, strong, readonly) TabManager *tabManager;
 @property (nonatomic, assign) BOOL fastQuitConfirmationApproved;
 
+- (BOOL)hasVisibleWindowForQuitPrompt;
+
 @property (weak) IBOutlet NSView *staleBookmarkHelpView;
 @property (weak) IBOutlet HyperlinkTextField *staleBookmarkTextField;
 @property (weak) IBOutlet NSTextFieldCell *staleBookmarkTextFieldCell;

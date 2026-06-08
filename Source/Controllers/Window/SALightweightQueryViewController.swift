@@ -66,6 +66,7 @@ final class SALightweightQueryViewController: NSViewController {
         let lastErrorID: UInt
         let queriesRun: Int
         let truncated: Bool
+        var wasCancelled = false
     }
 
     private enum MultiQueryErrorChoice {
@@ -101,6 +102,7 @@ final class SALightweightQueryViewController: NSViewController {
     private var queryToken = UUID()
     private var isRunning = false
     private var isCancellationRequested = false
+    private var runningQueryCount = 0
     private var isApplyingProgrammaticQueryText = false
     private var editorWasConfigured = false
     private var didInstallObservers = false
@@ -152,6 +154,8 @@ final class SALightweightQueryViewController: NSViewController {
         guard let documentURL else { return true }
         return documentURL.absoluteString.hasPrefix(NSLocalizedString("Untitled", comment: "Title of a new Sequel Ace Document"))
     }
+    var queryExecutionWillBegin: (() -> Void)?
+    var queryExecutionDidEnd: (() -> Void)?
     var tableDocumentInstance: Any { favoriteDocumentProxy }
     var textView: SPTextView { queryTextView }
 
@@ -269,12 +273,14 @@ final class SALightweightQueryViewController: NSViewController {
     }()
 
     private lazy var runButton: SPComboPopupButton = {
-        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 240, height: 22), pullsDown: true)
+        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 300, height: 22), pullsDown: true)
         button.target = self
         button.action = #selector(runPrimaryQuery(_:))
         button.keyEquivalent = "r"
         button.keyEquivalentModifierMask = [.command]
         button.cell?.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.cell?.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }()
@@ -438,7 +444,7 @@ final class SALightweightQueryViewController: NSViewController {
 
             runButton.trailingAnchor.constraint(equalTo: controlBarView.trailingAnchor, constant: -8),
             runButton.centerYAnchor.constraint(equalTo: controlBarView.centerYAnchor),
-            runButton.widthAnchor.constraint(equalToConstant: 240),
+            runButton.widthAnchor.constraint(equalToConstant: 300),
 
             queryInfoButton.leadingAnchor.constraint(equalTo: bottomBarView.leadingAnchor, constant: 10),
             queryInfoButton.topAnchor.constraint(equalTo: bottomBarView.topAnchor, constant: 4),
@@ -1058,7 +1064,7 @@ private extension SALightweightQueryViewController {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let titleItem = NSMenuItem(title: NSLocalizedString("Run Current", comment: "run button title"), action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: NSLocalizedString("Run Current Query", comment: "run button title"), action: nil, keyEquivalent: "")
         titleItem.isHidden = true
         menu.addItem(titleItem)
 
@@ -1097,7 +1103,7 @@ private extension SALightweightQueryViewController {
         let secondaryItem = menu.items[3]
 
         if primaryActionIsRunAll {
-            titleItem.title = NSLocalizedString("Run All", comment: "run all button")
+            titleItem.title = NSLocalizedString("Run All Queries", comment: "run all button")
             primaryItem.title = NSLocalizedString("Run All Queries", comment: "run all menu item title")
         } else {
             secondaryItem.title = NSLocalizedString("Run All Queries", comment: "run all menu item title")
@@ -1119,18 +1125,18 @@ private extension SALightweightQueryViewController {
         if queryTextView.selectedRange().length == 0 {
             if currentQueryBeforeCaret {
                 if !primaryActionIsRunAll {
-                    titleItem.title = NSLocalizedString("Run Previous", comment: "run previous button")
+                    titleItem.title = NSLocalizedString("Run Previous Query", comment: "run previous button")
                 }
                 contextualItem.title = NSLocalizedString("Run Previous Query", comment: "run previous query menu item")
             } else {
                 if !primaryActionIsRunAll {
-                    titleItem.title = NSLocalizedString("Run Current", comment: "run current button")
+                    titleItem.title = NSLocalizedString("Run Current Query", comment: "run current button")
                 }
                 contextualItem.title = NSLocalizedString("Run Current Query", comment: "run current query menu item")
             }
         } else {
             if !primaryActionIsRunAll {
-                titleItem.title = NSLocalizedString("Run Selection", comment: "run selection button")
+                titleItem.title = NSLocalizedString("Run Selected Text", comment: "run selection button")
             }
             contextualItem.title = NSLocalizedString("Run Selected Text", comment: "run selected text menu item")
         }
@@ -1319,7 +1325,7 @@ private extension SALightweightQueryViewController {
             alert.informativeText = destructiveQueryWarning(for: runnableQueries)
             alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "execute sql proceed button"))
             alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
         }
 
         queryToken = UUID()
@@ -1334,6 +1340,7 @@ private extension SALightweightQueryViewController {
         }
 
         isRunning = true
+        runningQueryCount = runnableQueries.count
         rows = []
         displayCache.invalidateAll()
         if preservingColumnsForSort {
@@ -1354,9 +1361,16 @@ private extension SALightweightQueryViewController {
                                    ? NSLocalizedString("Stop queries", comment: "Stop queries string")
                                    : NSLocalizedString("Stop query", comment: "Stop query string"))
         updateControls()
+        queryExecutionWillBegin?()
+        let queryExecutionDidEnd = queryExecutionDidEnd
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self, let connection else { return }
+            defer {
+                DispatchQueue.main.async {
+                    queryExecutionDidEnd?()
+                }
+            }
 
             if !self.database.isEmpty {
                 _ = connection.selectDatabase(self.database)
@@ -1381,7 +1395,11 @@ private extension SALightweightQueryViewController {
 
             for (index, query) in runnableQueries.enumerated() {
                 if token != self.queryToken || self.isCancellationRequested {
-                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
+                    let error = NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
+                    if errors.isEmpty {
+                        errors.append(error)
+                    }
+                    finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: max(queriesRun, 1), truncated: finalResult.truncated, wasCancelled: true)
                     break
                 }
 
@@ -1399,6 +1417,19 @@ private extension SALightweightQueryViewController {
                 let queryStart = CFAbsoluteTimeGetCurrent()
                 guard let result = connection.streamingQueryString(executionQuery) else {
                     queriesRun += 1
+                    if connection.lastQueryWasCancelled || self.isCancellationRequested {
+                        let error = NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
+                        if firstErrorQueryNumber == nil {
+                            firstErrorQueryNumber = index + 1
+                        }
+                        if runnableQueries.count > 1 {
+                            errors.append(String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error))
+                        } else {
+                            errors.append(error)
+                        }
+                        finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated, wasCancelled: true)
+                        break
+                    }
                     let error = self.displayErrorMessage(for: connection)
                     finalResult = self.queryResultAfterError(error,
                                                              errorID: connection.lastErrorID(),
@@ -1435,6 +1466,19 @@ private extension SALightweightQueryViewController {
                 }
 
                 if connection.queryErrored() {
+                    if connection.lastQueryWasCancelled || self.isCancellationRequested {
+                        let error = NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
+                        if firstErrorQueryNumber == nil {
+                            firstErrorQueryNumber = index + 1
+                        }
+                        if runnableQueries.count > 1 {
+                            errors.append(String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error))
+                        } else {
+                            errors.append(error)
+                        }
+                        finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated, wasCancelled: true)
+                        break
+                    }
                     let error = self.displayErrorMessage(for: connection)
                     finalResult = self.queryResultAfterError(error,
                                                              errorID: connection.lastErrorID(),
@@ -1476,7 +1520,16 @@ private extension SALightweightQueryViewController {
                 while let row = result.getRowAsArray() {
                     if token != self.queryToken || self.isCancellationRequested {
                         fetchWasCancelled = true
-                        finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), errorText: NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated)
+                        let error = NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
+                        if firstErrorQueryNumber == nil {
+                            firstErrorQueryNumber = index + 1
+                        }
+                        if runnableQueries.count > 1 {
+                            errors.append(String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error))
+                        } else {
+                            errors.append(error)
+                        }
+                        finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated, wasCancelled: true)
                         break
                     }
                     if loadedRows.count < self.maxDisplayedRows {
@@ -1546,6 +1599,7 @@ private extension SALightweightQueryViewController {
                 self.hideQueryProgressPanel()
                 self.isRunning = false
                 self.isCancellationRequested = false
+                self.runningQueryCount = 0
                 self.lastExecutedQuery = finalResult.executedQuery
                 self.lastResultQuery = finalResult.resultQuery
 
@@ -1659,7 +1713,7 @@ private extension SALightweightQueryViewController {
         alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
         alert.addButton(withTitle: NSLocalizedString("Stop", comment: "stop button"))
 
-        switch alert.runModal() {
+        switch alert.runModalCenteredInKeyWindow() {
         case .alertFirstButtonReturn:
             return .runAll
         case .alertSecondButtonReturn:
@@ -2146,7 +2200,7 @@ private extension SALightweightQueryViewController {
         alert.addButton(withTitle: NSLocalizedString("Clear", comment: "clear button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-        guard alert.runModal() == .alertFirstButtonReturn, let documentURL else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn, let documentURL else { return }
         SPQueryController.shared().replaceHistory(by: [], forFileURL: documentURL)
     }
 
@@ -2170,7 +2224,7 @@ private extension SALightweightQueryViewController {
             alert.window.animationBehavior = .none
             alert.messageText = NSLocalizedString("Empty query", comment: "empty query message")
             alert.informativeText = NSLocalizedString("Cannot save an empty query.", comment: "empty query informative message")
-            alert.runModal()
+            alert.runModalCenteredInKeyWindow()
             return
         }
 
@@ -2196,7 +2250,7 @@ private extension SALightweightQueryViewController {
         alert.addButton(withTitle: NSLocalizedString("Save", comment: "save button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
@@ -2496,7 +2550,13 @@ private extension SALightweightQueryViewController {
             ? NSLocalizedString("Errors", comment: "Errors title")
             : NSLocalizedString("No errors", comment: "No errors title")
 
-        if result.columnDefinitions.isEmpty {
+        if result.wasCancelled {
+            if result.queriesRun > 1 {
+                setStatusText(String(format: NSLocalizedString("%@; Cancelled in query %ld, after %@", comment: "text showing multiple queries were cancelled"), statusTitle, result.queriesRun, time))
+            } else {
+                setStatusText(String(format: NSLocalizedString("%@; Cancelled after %@", comment: "text showing a query was cancelled"), statusTitle, time))
+            }
+        } else if result.columnDefinitions.isEmpty {
             setStatusText(queryCount > 1
                 ? String(format: NSLocalizedString("%@; %llu rows affected by %ld queries, taking %@", comment: "lightweight query multiple affected rows status"), statusTitle, result.affectedRows, queryCount, time)
                 : String(format: NSLocalizedString("%@; %llu rows affected, taking %@", comment: "lightweight query affected rows status"), statusTitle, result.affectedRows, time))
@@ -2595,7 +2655,9 @@ private extension SALightweightQueryViewController {
         historyButton.isEnabled = !isRunning
         queryTextView.isEditable = !isRunning
         if isRunning {
-            runButton.menu?.items.first?.title = NSLocalizedString("Stop query", comment: "Stop query string")
+            runButton.menu?.items.first?.title = runningQueryCount > 1
+                ? NSLocalizedString("Stop queries", comment: "Stop queries string")
+                : NSLocalizedString("Stop query", comment: "Stop query string")
         } else {
             updateContextualRunInterface()
         }

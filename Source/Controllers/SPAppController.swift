@@ -122,6 +122,10 @@ extension SPAppController {
         tabManager.activeWindowController?.showConsole()
     }
 
+    @IBAction func clearConsole(_ sender: Any) {
+        tabManager.activeWindowController?.clearConsole(sender)
+    }
+
     @IBAction func toggleNavigator(_ sender: Any) {
         tabManager.activeWindowController?.databaseDocument.toggleNavigator()
     }
@@ -342,7 +346,7 @@ extension SPAppController {
     }
 
     @objc func promptedTerminate(_ sender: Any?) {
-        if NSApp.keyWindow != nil,
+        if hasVisibleWindowForQuitPrompt(),
            UserDefaults.standard.bool(forKey: SPApplicationPromptOnQuit),
            !dialogOKCancel(question: NSLocalizedString("Close the app?", comment: "quitting app informal alert title"),
                            text: NSLocalizedString("Are you sure you want to quit the app?", comment: "quitting app informal alert body")) {
@@ -361,6 +365,6 @@ extension SPAppController {
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.window.animationBehavior = .none
-        return alert.runModal() == .alertFirstButtonReturn
+        return alert.runModalCentered(over: NSApp.keyWindow) == .alertFirstButtonReturn
     }
 }

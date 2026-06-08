@@ -43,7 +43,7 @@ struct SAConnectionInfo {
     var database: String = ""
     var socket: String = ""
     var port: String = ""
-    var colorIndex: Int = 0
+    var colorIndex: Int = -1
     var useCompression: Bool = false
 
     // MARK: Time Zone

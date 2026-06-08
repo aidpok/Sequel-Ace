@@ -53,6 +53,7 @@
 #import "SPTreeNode.h"
 #import "SPConnectionController.h"
 #import "SPFavoritesOutlineView.h"
+#import "SPQueryController.h"
 
 #import "sequel-ace-Swift.h"
 
@@ -80,9 +81,13 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 - (void)checkForNewVersionFromMenu;
 - (NSString *)lightweightResumeFilePath;
 - (NSDictionary *)lightweightResumeStateDictionary;
+- (NSString *)frameStringForWindowGroupContainingWindow:(NSWindow *)window;
 - (BOOL)restoreLightweightResumeState;
+- (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window;
+- (BOOL)shouldStartEmptySessionFromLaunchModifierFlags;
 - (void)saveLightweightResumeState;
 - (void)lightweightResumeStateDidChange:(NSNotification *)notification;
+- (void)lightweightWindowFrameDidChange:(NSNotification *)notification;
 - (void)windowWillClose:(NSNotification *)notification;
 - (void)scheduleLightweightResumeStateSave;
 - (void)savePendingLightweightResumeStateIfNeeded;
@@ -295,6 +300,8 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(switchToNextTab:) name:SPWindowSelectNextTabNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(saveConnectionsToSPF:) name:SPDocumentSaveToSPFNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lightweightResumeStateDidChange:) name:SALightweightResumeStateDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lightweightWindowFrameDidChange:) name:NSWindowDidMoveNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lightweightWindowFrameDidChange:) name:NSWindowDidResizeNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowWillClose:) name:NSWindowWillCloseNotification object:nil];
 
     [self installFastQuitMenuAction];
@@ -302,8 +309,14 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     [SPBundleManager.shared reloadBundles:self];
     [self _copyDefaultThemes];
 
+    BOOL startEmptySession = [self shouldStartEmptySessionFromLaunchModifierFlags];
+    if (startEmptySession) {
+        SPLog(@"Skipping startup connection restore because Shift or Option was held during launch");
+        spfDict = nil;
+    }
+
     BOOL restoredLightweightWindows = NO;
-    if (!spfDict) {
+    if (!spfDict && !startEmptySession) {
         restoredLightweightWindows = [self restoreLightweightResumeState];
     }
 
@@ -312,12 +325,12 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
         SPWindowController *newWindowController = [self.tabManager replaceTabServiceWithInitialWindow];
 
-        if (spfDict) {
+        if (spfDict && !startEmptySession) {
             [newWindowController.databaseDocument setState:spfDict];
         }
 
         // Set autoconnection if appropriate
-        if ([prefs boolForKey:SPAutoConnectToDefault] && secureBookmarkManager.staleBookmarks.count == 0) {
+        if (!startEmptySession && [prefs boolForKey:SPAutoConnectToDefault] && secureBookmarkManager.staleBookmarks.count == 0) {
             [newWindowController.databaseDocument connect];
         }
     }
@@ -409,6 +422,12 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     return [dataPath stringByAppendingPathComponent:SALightweightResumeFileName];
 }
 
+- (BOOL)shouldStartEmptySessionFromLaunchModifierFlags
+{
+    NSEventModifierFlags launchFlags = ([NSEvent modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask);
+    return (launchFlags & (NSEventModifierFlagShift | NSEventModifierFlagOption)) != 0;
+}
+
 - (NSDictionary *)lightweightResumeStateDictionary
 {
     NSMutableArray *tabs = [NSMutableArray array];
@@ -432,9 +451,12 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
             NSMutableDictionary *tabData = [NSMutableDictionary dictionary];
             [tabData setObject:@YES forKey:@"isLightweight"];
             [tabData setObject:lightweightState forKey:@"lightweightState"];
+            if ([[processedWindow tabGroup] selectedWindow] == processedWindow) {
+                [win setObject:@([tabs count]) forKey:@"selectedTabIndex"];
+            }
             [tabs addObject:tabData];
             if (![win objectForKey:@"frame"]) {
-                [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
+                [win setObject:[self frameStringForWindowGroupContainingWindow:window] forKey:@"frame"];
             }
 
             [processedWindows addObject:windowController.uniqueID];
@@ -446,11 +468,20 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     [win setObject:tabs forKey:@"tabs"];
+    if (![win objectForKey:@"selectedTabIndex"]) {
+        [win setObject:@0 forKey:@"selectedTabIndex"];
+    }
 
     return @{
         @"version": @1,
         @"windows": @[win]
     };
+}
+
+- (NSString *)frameStringForWindowGroupContainingWindow:(NSWindow *)window
+{
+    NSWindow *selectedWindow = [[window tabGroup] selectedWindow];
+    return NSStringFromRect([(selectedWindow ?: window) frame]);
 }
 
 - (BOOL)restoreLightweightResumeState
@@ -480,46 +511,111 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     BOOL restoredAnyWindow = NO;
     NSWindow *window = nil;
     NSString *restoredFrame = nil;
-    for (NSDictionary *windowDictionary in [windowDictionaries reverseObjectEnumerator]) {
-        if (![windowDictionary isKindOfClass:[NSDictionary class]]) {
-            continue;
-        }
+    NSMutableArray *createdWindowControllers = [NSMutableArray array];
 
-        NSArray *tabs = [windowDictionary objectForKey:@"tabs"];
-        if (![tabs isKindOfClass:[NSArray class]]) {
-            continue;
-        }
-
-        for (NSDictionary *tab in tabs) {
-            if (![tab isKindOfClass:[NSDictionary class]] || ![[tab objectForKey:@"isLightweight"] boolValue]) {
+    @try {
+        for (NSDictionary *windowDictionary in [windowDictionaries reverseObjectEnumerator]) {
+            if (![windowDictionary isKindOfClass:[NSDictionary class]]) {
                 continue;
             }
 
-            BOOL isFirstRestoredWindow = window == nil;
-            SPWindowController *newWindowController = isFirstRestoredWindow ? [self.tabManager replaceTabServiceWithInitialWindow] : [self.tabManager newWindowForTabInWindow:window];
-            if (window == nil) {
-                window = newWindowController.window;
+            NSArray *tabs = [windowDictionary objectForKey:@"tabs"];
+            if (![tabs isKindOfClass:[NSArray class]]) {
+                continue;
             }
 
-            NSString *frame = [windowDictionary objectForKey:@"frame"];
-            if (!restoredFrame && [frame isKindOfClass:[NSString class]]) {
-                restoredFrame = frame;
-                [newWindowController.window setFrameFromString:frame];
+            NSMutableDictionary *restoredTabsByIndex = [NSMutableDictionary dictionary];
+            SPWindowController *firstRestoredWindowController = nil;
+            for (NSUInteger tabIndex = 0; tabIndex < [tabs count]; tabIndex++) {
+                NSDictionary *tab = [tabs objectAtIndex:tabIndex];
+                if (![tab isKindOfClass:[NSDictionary class]] || ![[tab objectForKey:@"isLightweight"] boolValue]) {
+                    continue;
+                }
+
+                BOOL isFirstRestoredWindow = window == nil;
+                SPWindowController *newWindowController = isFirstRestoredWindow ? [self.tabManager replaceTabServiceWithInitialWindow] : [self.tabManager newWindowForTabInWindow:window];
+                [createdWindowControllers addObject:newWindowController];
+                if (window == nil) {
+                    window = newWindowController.window;
+                }
+
+                NSString *frame = [windowDictionary objectForKey:@"frame"];
+                if (!restoredFrame && [frame isKindOfClass:[NSString class]]) {
+                    restoredFrame = frame;
+                    [self applyLightweightResumeFrameString:frame toWindow:newWindowController.window];
+                }
+
+                if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
+                    restoredAnyWindow = YES;
+                    window = newWindowController.window;
+                    if (!firstRestoredWindowController) {
+                        firstRestoredWindowController = newWindowController;
+                    }
+                    [restoredTabsByIndex setObject:newWindowController forKey:@(tabIndex)];
+                }
+                else {
+                    SPLog(@"Skipping invalid lightweight resume tab at index %lu", (unsigned long)tabIndex);
+                    [newWindowController close];
+                    [createdWindowControllers removeObject:newWindowController];
+                    if (isFirstRestoredWindow) {
+                        window = nil;
+                        restoredFrame = nil;
+                    }
+                }
             }
 
-            if ([newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
-                restoredAnyWindow = YES;
-                window = newWindowController.window;
+            NSNumber *selectedTabIndex = [windowDictionary objectForKey:@"selectedTabIndex"];
+            SPWindowController *selectedWindowController = [selectedTabIndex isKindOfClass:[NSNumber class]] ? [restoredTabsByIndex objectForKey:selectedTabIndex] : nil;
+            if (!selectedWindowController) {
+                selectedWindowController = firstRestoredWindowController;
             }
-            else if (isFirstRestoredWindow) {
-                [newWindowController close];
-                window = nil;
-                restoredFrame = nil;
+            if (selectedWindowController.window) {
+                selectedWindowController.window.tabGroup.selectedWindow = selectedWindowController.window;
+                [selectedWindowController.window makeKeyAndOrderFront:nil];
             }
         }
     }
+    @catch (NSException *exception) {
+        SPLog(@"Could not restore lightweight resume state, opening empty session instead: %@", exception);
+        for (SPWindowController *windowController in [createdWindowControllers copy]) {
+            [windowController close];
+        }
+        return NO;
+    }
 
     return restoredAnyWindow;
+}
+
+- (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window
+{
+    if (![frameString length] || !window) {
+        return NO;
+    }
+
+    NSRect frame = NSRectFromString(frameString);
+    if (NSIsEmptyRect(frame) || frame.size.width < 640 || frame.size.height < 420) {
+        return NO;
+    }
+
+    NSScreen *targetScreen = nil;
+    for (NSScreen *screen in [NSScreen screens]) {
+        if (NSIntersectsRect(frame, [screen visibleFrame])) {
+            targetScreen = screen;
+            break;
+        }
+    }
+
+    if (!targetScreen) {
+        targetScreen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
+        NSRect visibleFrame = [targetScreen visibleFrame];
+        frame.size.width = MIN(frame.size.width, visibleFrame.size.width);
+        frame.size.height = MIN(frame.size.height, visibleFrame.size.height);
+        frame.origin.x = NSMidX(visibleFrame) - (frame.size.width / 2);
+        frame.origin.y = NSMidY(visibleFrame) - (frame.size.height / 2);
+    }
+
+    [window setFrame:frame display:NO];
+    return YES;
 }
 
 - (void)saveLightweightResumeState
@@ -555,6 +651,34 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 {
     self.lightweightResumeStateDirty = YES;
     [self scheduleLightweightResumeStateSave];
+}
+
+- (void)lightweightWindowFrameDidChange:(NSNotification *)notification
+{
+    if (![[notification object] isKindOfClass:[NSWindow class]]) {
+        return;
+    }
+
+    NSWindow *window = [notification object];
+    SPWindowController *windowController = [window.windowController isKindOfClass:[SPWindowController class]] ? (SPWindowController *)window.windowController : nil;
+    if (!windowController && [window tabGroup]) {
+        for (NSWindow *tabWindow in [[window tabGroup] windows]) {
+            if ([tabWindow.windowController isKindOfClass:[SPWindowController class]]) {
+                windowController = (SPWindowController *)tabWindow.windowController;
+                break;
+            }
+        }
+    }
+
+    if (!windowController) {
+        return;
+    }
+
+    if (![windowController hasActiveLightweightConnection]) {
+        return;
+    }
+
+    [self lightweightResumeStateDidChange:nil];
 }
 
 - (void)windowWillClose:(NSNotification *)notification
@@ -732,7 +856,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
                 [tabData setObject:[[databaseDocument fileURL] path] forKey:@"path"];
             }
             [tabs addObject:tabData];
-            [win setObject:NSStringFromRect([[windowController window] frame]) forKey:@"frame"];
+            [win setObject:[self frameStringForWindowGroupContainingWindow:window] forKey:@"frame"];
 
             [processedWindows addObject:windowController.uniqueID];
         }
@@ -793,6 +917,17 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
     if (action == @selector(visitHelpWebsite:) || action == @selector(visitFAQWebsite:) || action == @selector(viewKeyboardShortcuts:)) {
         isValid = YES;
+        goto validateMenuItemDone;
+    }
+
+    if (action == @selector(toggleConsole:)) {
+        [menuItem setTitle:([[[SPQueryController sharedQueryController] window] isVisible] && [[[NSApp keyWindow] windowController] isKindOfClass:[SPQueryController class]]) ? NSLocalizedString(@"Hide Console", @"hide console") : NSLocalizedString(@"Show Console", @"show console")];
+        isValid = YES;
+        goto validateMenuItemDone;
+    }
+
+    if (action == @selector(clearConsole:)) {
+        isValid = ([[SPQueryController sharedQueryController] consoleMessageCount] > 0);
         goto validateMenuItemDone;
     }
 
@@ -1760,7 +1895,7 @@ validateMenuItemDone:
     BOOL fastQuitConfirmationApproved = self.fastQuitConfirmationApproved;
     self.fastQuitConfirmationApproved = NO;
 
-    if ([sender keyWindow] != nil && [[NSUserDefaults standardUserDefaults] boolForKey:SPApplicationPromptOnQuit] && !fastQuitConfirmationApproved) {
+    if ([self hasVisibleWindowForQuitPrompt] && [[NSUserDefaults standardUserDefaults] boolForKey:SPApplicationPromptOnQuit] && !fastQuitConfirmationApproved) {
         BOOL answer = [self dialogOKCancelWithQuestion:NSLocalizedString(@"Close the app?", @"quitting app informal alert title") text:NSLocalizedString(@"Are you sure you want to quit the app?", @"quitting app informal alert body")];
         if (answer == NO) {
             return NSTerminateCancel;
@@ -1776,6 +1911,7 @@ validateMenuItemDone:
         [fileManager removeItemAtPath:lastBundleBlobFilesDirectory error:nil];
     }
 
+    self.lightweightResumeStateDirty = YES;
     [self savePendingLightweightResumeStateIfNeeded];
 
     // Iterate through each open window
@@ -1828,6 +1964,17 @@ validateMenuItemDone:
     [self closeFontPanelIfOpen];
 
     return NSTerminateNow;
+}
+
+- (BOOL)hasVisibleWindowForQuitPrompt
+{
+    for (NSWindow *window in [NSApp windows]) {
+        if ([window isVisible] && ![window isMiniaturized] && ![window isKindOfClass:[NSPanel class]]) {
+            return YES;
+        }
+    }
+
+    return NO;
 }
 
 #pragma mark -

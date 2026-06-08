@@ -41,15 +41,14 @@ final class SPWindowTabAccessory: NSView {
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 0))
 
-        addSubviews(tabAccessoryColorView, tabAccessoryViewImage, tabText)
-        
-        tabAccessoryColorView.snp.makeConstraints {
-            $0.height.equalTo(5)
-            $0.bottom.leading.trailing.equalToSuperview()
-        }
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+
+        addSubviews(tabAccessoryViewImage, tabText)
+
         tabText.snp.makeConstraints {
-            $0.bottom.equalTo(tabAccessoryColorView.snp.top)
-            $0.leading.top.equalToSuperview()
+            $0.leading.top.bottom.equalToSuperview()
             $0.trailing.equalTo(tabAccessoryViewImage.snp.leading)
         }
 
@@ -65,13 +64,6 @@ final class SPWindowTabAccessory: NSView {
     }
     
     // MARK: Subviews
-    
-    private lazy var tabAccessoryColorView: NSView = {
-        let colorView = NSView()
-
-        colorView.wantsLayer = true
-        return colorView
-    }()
     
     private lazy var tabText: NSTextField = {
         let text = NSTextField()
@@ -106,7 +98,7 @@ final class SPWindowTabAccessory: NSView {
             }
         }
 
-        tabAccessoryColorView.layer?.backgroundColor = tabColor?.cgColor
+        layer?.backgroundColor = tabColor?.cgColor
         tabAccessoryViewImage.isHidden = !isSSL
     }
 
@@ -120,7 +112,7 @@ final class SPWindowTabAccessory: NSView {
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         if superview != nil {
-            self.snp.makeConstraints {
+            self.snp.remakeConstraints {
                 $0.leading.equalToSuperview().offset(35)
                 $0.trailing.equalToSuperview().offset(-35)
                 $0.top.equalToSuperview().offset(5)

@@ -1180,7 +1180,7 @@ final class SALightweightStructureViewController: NSViewController {
         alert.addButton(withTitle: NSLocalizedString("Add", comment: "add button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-        completion(alert.runModal() == .alertFirstButtonReturn ? popup.titleOfSelectedItem : nil)
+        completion(alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn ? popup.titleOfSelectedItem : nil)
     }
 
     @objc private func showIndexes(_ sender: Any?) {
@@ -1441,7 +1441,7 @@ private extension SALightweightStructureViewController {
             alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
         }
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -1497,7 +1497,7 @@ private extension SALightweightStructureViewController {
         alert.accessoryView = valueField
         alert.addButton(withTitle: NSLocalizedString("Reset", comment: "reset button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let value = max(valueField.integerValue, 1)
         isSaving = true
@@ -1746,7 +1746,7 @@ private extension SALightweightStructureViewController {
         alert.informativeText = NSLocalizedString("This action cannot be undone.", comment: "delete index message")
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let query = indexName == "PRIMARY"
             ? "ALTER TABLE \(tableReference()) DROP PRIMARY KEY"
@@ -1792,7 +1792,7 @@ private extension SALightweightStructureViewController {
         alert.informativeText = String(format: NSLocalizedString("The foreign key relationship '%@' has a dependency on index '%@'. This relationship must be removed before the index can be deleted.\n\nAre you sure you want to continue to delete the relationship and the index? This action cannot be undone.", comment: "foreign key needs index message"), foreignKey.name, indexName)
         alert.addButton(withTitle: NSLocalizedString("Delete Both", comment: "delete both button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let dropForeignKeyQuery = "ALTER TABLE \(tableReference()) DROP FOREIGN KEY \(Self.backtickQuoted(foreignKey.name))"
         let dropIndexQuery = indexName == "PRIMARY"

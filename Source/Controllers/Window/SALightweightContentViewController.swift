@@ -1246,7 +1246,7 @@ private extension SALightweightContentViewController {
             : NSLocalizedString("Delete Selected Rows", comment: "delete selected rows button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let rowsToDelete = selectedIndexes.compactMap { index in index < rows.count ? rows[index] : nil }
         runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows")) { [database, table, columnInfo] connection in
@@ -2088,11 +2088,7 @@ private extension SALightweightContentViewController {
         alert.messageText = NSLocalizedString("Invalid Filter", comment: "table content apply filter invalid filter message title")
         alert.informativeText = error?.localizedDescription ?? NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback")
 
-        if let window = view.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        alert.runModalCentered(over: view.window)
     }
 
     func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
