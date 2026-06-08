@@ -45,6 +45,16 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
     /// Reference to favorites controller for save operations.
     @objc var favoritesController: SPFavoritesController
 
+    /// Active search query. Setting this rebuilds the visible-node set.
+    /// Empty / whitespace-only query disables the filter (all nodes visible).
+    @objc var searchQuery: String = "" {
+        didSet { rebuildVisibleNodes() }
+    }
+
+    /// Set of nodes currently visible under an active search filter.
+    /// `nil` means no filter active — every node is visible.
+    private var visibleNodes: Set<SPTreeNode>?
+
     private var favoritesContainer: SPTreeNode? {
         childNodes(for: favoritesRoot).first
     }
@@ -87,9 +97,50 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
         outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
     }
 
-    /// Reloads the outline view data and expands the root node.
+    /// Reloads the outline view and expands every currently-visible top-level item.
+    /// Top-level groups have no disclosure triangle in source-list mode, so they must
+    /// be re-expanded after every reload — otherwise filtering can leave the section
+    /// collapsed when a previously-hidden group reappears.
+    ///
+    /// If a search filter is active, recomputes `visibleNodes` first so that any
+    /// underlying tree changes (rename, add, remove, reorder) made while the query
+    /// stayed unchanged are reflected in the filtered view.
     @objc func reloadData(in outlineView: NSOutlineView) {
+        if visibleNodes != nil {
+            rebuildVisibleNodes()
+        }
         outlineView.reloadData()
+        // Snapshot the top-level items BEFORE expanding any of them: each expandItem
+        // call inserts child rows, which would otherwise shift the indexes of the
+        // remaining top-level groups and cause the loop to expand newly-inserted
+        // child rows instead.
+        let topLevelItems = (0..<outlineView.numberOfRows).compactMap { outlineView.item(atRow: $0) }
+        for item in topLevelItems {
+            outlineView.expandItem(item, expandChildren: false)
+        }
+    }
+
+    // MARK: - Filtering
+
+    /// Rebuilds `visibleNodes` based on the current `searchQuery`.
+    /// The matching rule and the tree walk live in
+    /// `SAFavoriteSearchMatcher` / `SAFavoriteSearchTreeWalker`
+    /// (see those files for semantics + test coverage).
+    private func rebuildVisibleNodes() {
+        let matcher = SAFavoriteSearchMatcher(query: searchQuery)
+        guard matcher.isActive else {
+            visibleNodes = nil
+            return
+        }
+        visibleNodes = SAFavoriteSearchTreeWalker.visibleNodes(in: favoritesRoot, matcher: matcher)
+    }
+
+    /// Returns the children of `node` that are visible under the current filter.
+    /// When no filter is active, returns all children unchanged.
+    private func filteredChildren(of node: SPTreeNode) -> [SPTreeNode] {
+        let raw = childNodes(for: node)
+        guard let visible = visibleNodes else { return raw }
+        return raw.filter { visible.contains($0) }
     }
 
     /// Recursively restores expand/collapse state from stored node preferences.
@@ -97,13 +148,20 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
         guard node.isGroup else { return }
 
         for child in node.children ?? [] {
-            guard child.isGroup else { continue }
-            if let groupObj = child.representedObject as? SPGroupNode, groupObj.nodeIsExpanded {
-                outlineView.expandItem(child)
+            guard let childNode = child as? SPTreeNode, childNode.isGroup else { continue }
+
+            // Top-level groups (parent is the synthetic root) live in the source-list
+            // section and have no disclosure triangle; they must always be expanded
+            // or their children are unreachable. For deeper groups, honor the saved
+            // expand/collapse state.
+            let isTopLevelGroup = childNode.parent?.parent == nil
+            let groupObj = childNode.representedObject as? SPGroupNode
+            if isTopLevelGroup || (groupObj?.nodeIsExpanded ?? false) {
+                outlineView.expandItem(childNode)
             } else {
-                outlineView.collapseItem(child)
+                outlineView.collapseItem(childNode)
             }
-            restoreOutlineViewState(child, in: outlineView)
+            restoreOutlineViewState(childNode, in: outlineView)
         }
     }
 }
@@ -114,12 +172,13 @@ extension SAFavoritesListDataSource: NSOutlineViewDataSource {
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         let node = (item as? SPTreeNode) ?? favoritesRoot
+        let count = filteredChildren(of: node).count
 
         if item == nil {
             guard let favoritesContainer else { return 1 }
-            return 2 + childNodes(for: favoritesContainer).count
+            return 2 + filteredChildren(of: favoritesContainer).count
         }
-        return childNodes(for: node).count
+        return count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
@@ -133,11 +192,13 @@ extension SAFavoritesListDataSource: NSOutlineViewDataSource {
             }
 
             guard let favoritesContainer else { return NSNull() }
-            return childNodes(for: favoritesContainer)[safe: index - 2] ?? NSNull()
+            let children = filteredChildren(of: favoritesContainer)
+            return children[safe: index - 2] ?? NSNull()
         }
 
         let node = (item as? SPTreeNode) ?? favoritesRoot
-        return childNodes(for: node)[safe: index] ?? NSNull()
+        let children = filteredChildren(of: node)
+        return children[safe: index] ?? NSNull()
     }
 
     func outlineView(_ outlineView: NSOutlineView, objectValueFor tableColumn: NSTableColumn?, byItem item: Any?) -> Any? {
@@ -352,7 +413,7 @@ extension SAFavoritesListDataSource: NSOutlineViewDelegate {
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         guard let node = item as? SPTreeNode else { return false }
-        return node !== quickConnectItem && node.parent?.parent != nil && !childNodes(for: node).isEmpty
+        return node !== quickConnectItem && node.parent?.parent != nil && !filteredChildren(of: node).isEmpty
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
