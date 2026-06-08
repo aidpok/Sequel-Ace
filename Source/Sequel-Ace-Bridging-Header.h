@@ -28,7 +28,13 @@
 //
 
 #import "SPAppController.h"
+#import "SPCustomQuery.h"
+#import "SPTextView.h"
+#import "SPSQLParser.h"
+#import "SPStringAdditions.h"
 #import "SPDatabaseDocument.h"
+#import "YRKSpinningProgressIndicator.h"
+#import "SPTableContent.h"
 #import "SPProcessListController.h"
 #import "SPBundleManager.h"
 #import "SPWindow.h"
@@ -48,24 +54,9 @@
 #import "SPFavoriteTextFieldCell.h"
 #import "SPFavoritesOutlineView.h"
 #import "SPFavoriteColorSupport.h"
-#import "SPTablesList.h"
-#import "SPTableTextFieldCell.h"
-#import "SPTableView.h"
-#import "SPCopyTable.h"
-#import "SPComboBoxCell.h"
-#import "SPTextAndLinkCell.h"
-#import "SPDataCellFormatter.h"
-#import "SPRuleFilterController.h"
-#import "SPTableFilterParser.h"
-#import "SPTextView.h"
-#import "SPBracketHighlighter.h"
-#import "SPComboPopupButton.h"
-#import "SPFieldEditorController.h"
-#import "SPHelpViewerClient.h"
-#import "SPQueryFavoriteManager.h"
-#import "SPSQLParser.h"
-#import "SPQueryController.h"
-#import "SPGotoDatabaseController.h"
-#import "SPFilterTableController.h"
-#import <SPMySQL/SPMySQL.h>
+#import "SPKeychain.h"
+#import <SPMySQL/SPMySQLConstants.h>
+#import <SPMySQL/SPMySQLConnectionDelegate.h>
+#import <SPMySQL/SPMySQLConnectionProxy.h>
+#import <SPMySQL/SPMySQLConnection.h>
 #import "SPSSHTunnel.h"

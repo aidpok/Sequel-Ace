@@ -52,6 +52,7 @@
 @class SPTableRelations;
 @class SPHelpViewerClient;
 @class SPDataImport;
+@class SATaskController;
 
 #import "SPDatabaseContentViewDelegate.h"
 #import "SPConnectionControllerDelegateProtocol.h"
@@ -64,7 +65,7 @@
 /**
  * The SPDatabaseDocument class controls the primary database view window.
  */
-@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, NSMenuDelegate, SPCountedObject, WebFrameLoadDelegate>
+@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate>
 {
 	// IBOutlets
 	IBOutlet SPTablesList *tablesListInstance;
@@ -106,11 +107,6 @@
 	SPCharsetCollationHelper *alterDatabaseCharsetHelper;
 
 	@public IBOutlet NSProgressIndicator* queryProgressBar;
-	IBOutlet NSBox *taskProgressLayer;
-	IBOutlet id taskProgressIndicator;
-	IBOutlet id taskDescriptionText;
-	IBOutlet id taskDurationTime;
-	IBOutlet NSButton *taskCancelButton;
 	
 	IBOutlet id databaseNameField;
 	IBOutlet id databaseEncodingButton;
@@ -188,19 +184,7 @@
 
 	BOOL _workingTimeout;
 
-	NSWindow *taskProgressWindow;
-	BOOL taskDisplayIsIndeterminate;
-	BOOL databaseListNeedsLoad;
-	CGFloat taskProgressValue;
-	CGFloat taskDisplayLastValue;
-	CGFloat taskProgressValueDisplayInterval;
-	NSTimer *taskDrawTimer;
-	NSTimer *queryExecutionTimer;
-	NSDate *taskFadeInStartDate;
-	NSDate *queryStartDate;
-	BOOL taskCanBeCancelled;
-	id taskCancellationCallbackObject;
-	SEL taskCancellationCallbackSelector;
+	SATaskController *taskController;
 
 	NSToolbarItem *chooseDatabaseToolbarItem;
 	
@@ -290,18 +274,19 @@
 
 // Task progress and notification methods
 - (void)startTaskWithDescription:(nonnull NSString *)description;
-- (void)fadeInTaskProgressWindow:(nonnull NSTimer *)theTimer;
 - (void)setTaskDescription:(nonnull NSString *)description;
 - (void)setTaskPercentage:(CGFloat)taskPercentage;
 - (void)setTaskProgressToIndeterminateAfterDelay:(BOOL)afterDelay NS_SWIFT_NAME(setTaskProgressToIndeterminate(afterDelay:));
 - (void)endTask;
 - (void)enableTaskCancellationWithTitle:(nonnull NSString *)buttonTitle callbackObject:(nullable NSObject *)callbackObject callbackFunction:(nullable SEL)callbackFunction NS_SWIFT_NAME(enableTaskCancellation(withTitle:callbackObject:callbackFunction:));
 - (void)disableTaskCancellation;
-- (IBAction)cancelTask:(id)sender;
 - (BOOL)isWorking;
 - (void)setDatabaseListIsSelectable:(BOOL)isSelectable;
-- (void)centerTaskWindow;
 - (void)setTaskIndicatorShouldAnimate:(BOOL)shouldAnimate;
+
+// SATaskControllerDelegate (Phase A2 — task progress UI lives in SATaskController)
+- (nullable NSWindow *)taskParentWindow;
+- (void)taskControllerDidRequestCancellation;
 
 // Encoding methods
 - (void)setConnectionEncoding:(NSString *)mysqlEncoding reloadingViews:(BOOL)reloadViews;
@@ -460,6 +445,7 @@
 - (void)refreshTables;
 - (void)flushPrivileges;
 - (void)setDatabases;
+- (IBAction)setDatabases:(id)sender;
 - (void)showUserManager;
 - (void)chooseEncoding:(id)sender;
 - (void)openDatabaseInNewTab;
