@@ -3010,6 +3010,7 @@ private extension SPWindowController {
         if consoleWindow.isVisible,
            NSApp.keyWindow?.windowController is SPQueryController {
             consoleWindow.orderOut(self)
+            markLightweightResumeStateChanged()
             return
         }
 
@@ -3018,6 +3019,7 @@ private extension SPWindowController {
         }
 
         consoleWindow.makeKeyAndOrderFront(self)
+        markLightweightResumeStateChanged()
     }
 
     func setLightweightConsoleQueryMode(_ mode: Int) {

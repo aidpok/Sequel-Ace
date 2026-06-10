@@ -64,6 +64,9 @@
 static const double SPDelayBeforeCheckingForNewReleases = 10;
 static NSString *SALightweightResumeFileName = @"LightweightResume.plist";
 static NSString *SALightweightResumeStateDidChangeNotification = @"SALightweightResumeStateDidChangeNotification";
+static NSString *SALightweightResumeConsoleKey = @"console";
+static NSString *SALightweightResumeConsoleVisibleKey = @"visible";
+static NSString *SALightweightResumeConsoleFrameKey = @"frame";
 static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
 @interface SPAppController ()
@@ -81,9 +84,12 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 - (void)checkForNewVersionFromMenu;
 - (NSString *)lightweightResumeFilePath;
 - (NSDictionary *)lightweightResumeStateDictionary;
+- (NSDictionary *)lightweightConsoleResumeStateDictionary;
 - (NSString *)frameStringForWindowGroupContainingWindow:(NSWindow *)window;
 - (BOOL)restoreLightweightResumeState;
+- (void)restoreLightweightConsoleResumeStateDictionary:(NSDictionary *)consoleState;
 - (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window;
+- (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window minimumSize:(NSSize)minimumSize;
 - (BOOL)shouldStartEmptySessionFromLaunchModifierFlags;
 - (void)saveLightweightResumeState;
 - (void)lightweightResumeStateDidChange:(NSNotification *)notification;
@@ -472,9 +478,30 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         [win setObject:@0 forKey:@"selectedTabIndex"];
     }
 
-    return @{
+    NSMutableDictionary *resumeState = [@{
         @"version": @1,
         @"windows": @[win]
+    } mutableCopy];
+
+    NSDictionary *consoleState = [self lightweightConsoleResumeStateDictionary];
+    if ([consoleState count]) {
+        [resumeState setObject:consoleState forKey:SALightweightResumeConsoleKey];
+    }
+
+    return resumeState;
+}
+
+- (NSDictionary *)lightweightConsoleResumeStateDictionary
+{
+    SPQueryController *queryController = [SPQueryController existingSharedQueryController];
+    NSWindow *consoleWindow = [queryController window];
+    if (!consoleWindow) {
+        return nil;
+    }
+
+    return @{
+        SALightweightResumeConsoleVisibleKey: @([consoleWindow isVisible]),
+        SALightweightResumeConsoleFrameKey: NSStringFromRect([consoleWindow frame])
     };
 }
 
@@ -583,17 +610,50 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         return NO;
     }
 
+    if (restoredAnyWindow) {
+        NSDictionary *consoleState = [resumeState objectForKey:SALightweightResumeConsoleKey];
+        if ([consoleState isKindOfClass:[NSDictionary class]]) {
+            [self restoreLightweightConsoleResumeStateDictionary:consoleState];
+        }
+    }
+
     return restoredAnyWindow;
 }
 
+- (void)restoreLightweightConsoleResumeStateDictionary:(NSDictionary *)consoleState
+{
+    if (![[consoleState objectForKey:SALightweightResumeConsoleVisibleKey] boolValue]) {
+        return;
+    }
+
+    SPQueryController *queryController = [SPQueryController sharedQueryController];
+    NSWindow *consoleWindow = [queryController window];
+    NSString *frame = [consoleState objectForKey:SALightweightResumeConsoleFrameKey];
+    if ([frame isKindOfClass:[NSString class]]) {
+        [self applyLightweightResumeFrameString:frame toWindow:consoleWindow minimumSize:NSMakeSize(480, 140)];
+    }
+    [queryController resizeConsoleColumnsToFillAvailableWidth];
+
+    if (![consoleWindow isVisible]) {
+        [queryController updateEntries];
+    }
+
+    [consoleWindow orderFront:nil];
+}
+
 - (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window
+{
+    return [self applyLightweightResumeFrameString:frameString toWindow:window minimumSize:NSMakeSize(640, 420)];
+}
+
+- (BOOL)applyLightweightResumeFrameString:(NSString *)frameString toWindow:(NSWindow *)window minimumSize:(NSSize)minimumSize
 {
     if (![frameString length] || !window) {
         return NO;
     }
 
     NSRect frame = NSRectFromString(frameString);
-    if (NSIsEmptyRect(frame) || frame.size.width < 640 || frame.size.height < 420) {
+    if (NSIsEmptyRect(frame) || frame.size.width < minimumSize.width || frame.size.height < minimumSize.height) {
         return NO;
     }
 
@@ -660,6 +720,11 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     NSWindow *window = [notification object];
+    if ([window.windowController isKindOfClass:[SPQueryController class]]) {
+        [self lightweightResumeStateDidChange:nil];
+        return;
+    }
+
     SPWindowController *windowController = [window.windowController isKindOfClass:[SPWindowController class]] ? (SPWindowController *)window.windowController : nil;
     if (!windowController && [window tabGroup]) {
         for (NSWindow *tabWindow in [[window tabGroup] windows]) {
