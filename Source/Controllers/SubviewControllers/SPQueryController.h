@@ -75,6 +75,7 @@ extern NSString *SPTableViewDatabaseColumnID;
 @property (readwrite, strong) NSFont *consoleFont;
 
 + (SPQueryController *)sharedQueryController;
++ (SPQueryController *)existingSharedQueryController;
 - (instancetype)init NS_UNAVAILABLE;
 
 /**
@@ -92,6 +93,7 @@ extern NSString *SPTableViewDatabaseColumnID;
 - (IBAction)toggleShowHelpStatements:(id)sender;
 
 - (void)updateEntries;
+- (void)resizeConsoleColumnsToFillAvailableWidth;
 
 - (BOOL)allowConsoleUpdate;
 - (void)setAllowConsoleUpdate:(BOOL)allowUpdate;

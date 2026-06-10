@@ -57,6 +57,7 @@ static NSUInteger SPMessageTruncateCharacterLength = 256;
 
 - (void)_updateFilterState;
 - (void)_allowFilterClearOrSave:(NSNumber *)enabled;
+- (void)_consoleWindowDidResize:(NSNotification *)notification;
 - (BOOL)_messageMatchesCurrentFilters:(NSString *)message;
 - (NSString *)_getConsoleStringWithTimeStamps:(BOOL)timeStamps connections:(BOOL)connections databases:(BOOL)databases;
 - (void)_addMessageToConsole:(NSString *)message connection:(NSString *)connection isError:(BOOL)error database:(NSString *)database;
@@ -85,6 +86,11 @@ static SPQueryController *sharedQueryController = nil;
 		});
 	}
 
+	return sharedQueryController;
+}
+
++ (SPQueryController *)existingSharedQueryController
+{
 	return sharedQueryController;
 }
 
@@ -272,6 +278,7 @@ static SPQueryController *sharedQueryController = nil;
 - (IBAction)toggleShowTimeStamps:(id)sender
 {
 	[[consoleTableView tableColumnWithIdentifier:SPTableViewDateColumnID] setHidden:[(NSMenuItem*)sender state]];
+	[self resizeConsoleColumnsToFillAvailableWidth];
 }
 
 /**
@@ -280,6 +287,7 @@ static SPQueryController *sharedQueryController = nil;
 - (IBAction)toggleShowConnections:(id)sender
 {
 	[[consoleTableView tableColumnWithIdentifier:SPTableViewConnectionColumnID] setHidden:[(NSMenuItem*)sender state]];
+	[self resizeConsoleColumnsToFillAvailableWidth];
 }
 
 /**
@@ -288,6 +296,7 @@ static SPQueryController *sharedQueryController = nil;
 - (IBAction)toggleShowDatabases:(id)sender
 {
 	[[consoleTableView tableColumnWithIdentifier:SPTableViewDatabaseColumnID] setHidden:[(NSMenuItem*)sender state]];
+	[self resizeConsoleColumnsToFillAvailableWidth];
 }
 
 /**
@@ -426,6 +435,7 @@ static SPQueryController *sharedQueryController = nil;
 - (void)updateEntries
 {
 	[consoleTableView reloadData];
+	[self resizeConsoleColumnsToFillAvailableWidth];
 	[consoleTableView scrollRowToVisible:([messagesVisibleSet count] - 1)];
 }
 
@@ -461,6 +471,7 @@ static SPQueryController *sharedQueryController = nil;
 		messagesVisibleSet = messagesFullSet;
 
 		[consoleTableView reloadData];
+		[self resizeConsoleColumnsToFillAvailableWidth];
 		[consoleTableView scrollRowToVisible:([messagesVisibleSet count] - 1)];
 
 		[self _allowFilterClearOrSave:@YES];
@@ -489,6 +500,7 @@ static SPQueryController *sharedQueryController = nil;
 	messagesVisibleSet = messagesFilteredSet;
 
 	[consoleTableView reloadData];
+	[self resizeConsoleColumnsToFillAvailableWidth];
 	[consoleTableView scrollRowToVisible:([messagesVisibleSet count] - 1)];
 
 	if ([messagesVisibleSet count] > 0) {
@@ -667,6 +679,48 @@ static SPQueryController *sharedQueryController = nil;
 
 	//allow drag-out copying of selected rows
 	[consoleTableView setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_consoleWindowDidResize:) name:NSWindowDidResizeNotification object:[self window]];
+	[self resizeConsoleColumnsToFillAvailableWidth];
+}
+
+- (void)_consoleWindowDidResize:(NSNotification *)notification
+{
+	[self resizeConsoleColumnsToFillAvailableWidth];
+}
+
+- (void)resizeConsoleColumnsToFillAvailableWidth
+{
+	NSTableColumn *queryColumn = [consoleTableView tableColumnWithIdentifier:@"message"];
+	NSScrollView *scrollView = [consoleTableView enclosingScrollView];
+	if (!queryColumn || !scrollView) return;
+
+	CGFloat availableWidth = NSWidth([[scrollView contentView] bounds]);
+	if (availableWidth <= 0) return;
+
+	NSRect tableFrame = [consoleTableView frame];
+	if (fabs(NSWidth(tableFrame) - availableWidth) > 0.5) {
+		tableFrame.size.width = availableWidth;
+		[consoleTableView setFrame:tableFrame];
+	}
+
+	CGFloat fixedColumnsWidth = 0;
+	NSUInteger visibleColumnCount = 0;
+	for (NSTableColumn *column in [consoleTableView tableColumns]) {
+		if ([column isHidden]) continue;
+
+		visibleColumnCount++;
+		if (column != queryColumn) {
+			fixedColumnsWidth += [column width];
+		}
+	}
+
+	CGFloat intercellWidth = [consoleTableView intercellSpacing].width * MAX((NSInteger)visibleColumnCount - 1, 0);
+	CGFloat queryWidth = floor(availableWidth - fixedColumnsWidth - intercellWidth);
+	queryWidth = MAX([queryColumn minWidth], queryWidth);
+
+	if (fabs([queryColumn width] - queryWidth) > 0.5) {
+		[queryColumn setWidth:queryWidth];
+	}
 }
 
 /**
@@ -1176,6 +1230,7 @@ static SPQueryController *sharedQueryController = nil;
 
 - (void)dealloc
 {
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:[self window]];
 	[prefs removeObserver:self forKeyPath:SPGlobalFontSettings];
 	messagesVisibleSet = nil;
 	[NSObject cancelPreviousPerformRequestsWithTarget:self];
