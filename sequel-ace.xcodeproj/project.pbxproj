@@ -273,6 +273,14 @@
 		51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */; };
 		51BB391C25F82B060048CA69 /* SPAppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BB391B25F82B060048CA69 /* SPAppController.swift */; };
 		51BC14F825BE135500F1CDC9 /* SPWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC14F725BE135500F1CDC9 /* SPWindowController.swift */; };
+		C3D100022F8E000100C4C14A /* SPWindowController+LightweightSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D100012F8E000100C4C14A /* SPWindowController+LightweightSession.swift */; };
+		C3D100042F8E000100C4C14A /* SPWindowController+LightweightShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D100032F8E000100C4C14A /* SPWindowController+LightweightShell.swift */; };
+		C3D100062F8E000100C4C14A /* SPWindowController+LightweightActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D100052F8E000100C4C14A /* SPWindowController+LightweightActions.swift */; };
+		C3D100082F8E000100C4C14A /* SPWindowController+LightweightSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D100072F8E000100C4C14A /* SPWindowController+LightweightSidebar.swift */; };
+		C3D1000A2F8E000100C4C14A /* SPWindowController+LightweightServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D100092F8E000100C4C14A /* SPWindowController+LightweightServices.swift */; };
+		C3D1000C2F8E000100C4C14A /* SPWindowController+LightweightDelegates.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D1000B2F8E000100C4C14A /* SPWindowController+LightweightDelegates.swift */; };
+		C3D1000E2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D1000D2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift */; };
+		C3D100102F8E000100C4C14A /* SPConnectionController+Lightweight.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D1000F2F8E000100C4C14A /* SPConnectionController+Lightweight.swift */; };
 		51BC150125BE138700F1CDC9 /* SnapKit in Frameworks */ = {isa = PBXBuildFile; productRef = 51BC150025BE138700F1CDC9 /* SnapKit */; };
 		51BC150625BE13C400F1CDC9 /* NSViewExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC150525BE13C400F1CDC9 /* NSViewExtension.swift */; };
 		51C4626D254ED02500F63E70 /* UserDefaultsExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C4626C254ED02500F63E70 /* UserDefaultsExtension.swift */; };
@@ -1042,6 +1050,14 @@
 		51BB3DFC25AEF020005AAE44 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		51BB3E0425AEF0D7005AAE44 /* zh-Hant */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		51BC14F725BE135500F1CDC9 /* SPWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPWindowController.swift; sourceTree = "<group>"; };
+		C3D100012F8E000100C4C14A /* SPWindowController+LightweightSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightSession.swift"; sourceTree = "<group>"; };
+		C3D100032F8E000100C4C14A /* SPWindowController+LightweightShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightShell.swift"; sourceTree = "<group>"; };
+		C3D100052F8E000100C4C14A /* SPWindowController+LightweightActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightActions.swift"; sourceTree = "<group>"; };
+		C3D100072F8E000100C4C14A /* SPWindowController+LightweightSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightSidebar.swift"; sourceTree = "<group>"; };
+		C3D100092F8E000100C4C14A /* SPWindowController+LightweightServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightServices.swift"; sourceTree = "<group>"; };
+		C3D1000B2F8E000100C4C14A /* SPWindowController+LightweightDelegates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightDelegates.swift"; sourceTree = "<group>"; };
+		C3D1000D2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightPrinting.swift"; sourceTree = "<group>"; };
+		C3D1000F2F8E000100C4C14A /* SPConnectionController+Lightweight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPConnectionController+Lightweight.swift"; sourceTree = "<group>"; };
 		51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightContentViewController.swift; sourceTree = "<group>"; };
 		51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightQueryViewController.swift; sourceTree = "<group>"; };
 		51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightResultGrid.swift; sourceTree = "<group>"; };
@@ -1823,6 +1839,14 @@
 				51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */,
 				C3D000012F8D000100C4C14A /* SALightweightPreferenceObserver.swift */,
 				51BC14F725BE135500F1CDC9 /* SPWindowController.swift */,
+				C3D100012F8E000100C4C14A /* SPWindowController+LightweightSession.swift */,
+				C3D100032F8E000100C4C14A /* SPWindowController+LightweightShell.swift */,
+				C3D100052F8E000100C4C14A /* SPWindowController+LightweightActions.swift */,
+				C3D100072F8E000100C4C14A /* SPWindowController+LightweightSidebar.swift */,
+				C3D100092F8E000100C4C14A /* SPWindowController+LightweightServices.swift */,
+				C3D1000B2F8E000100C4C14A /* SPWindowController+LightweightDelegates.swift */,
+				C3D1000D2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift */,
+				C3D1000F2F8E000100C4C14A /* SPConnectionController+Lightweight.swift */,
 				5147B0012F8C000100C4C14A /* SAWindowTitleBuilder.swift */,
 				5132930A25F586A900D803AD /* TabManager.swift */,
 			);
@@ -3399,6 +3423,14 @@
 				51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */,
 				C3D000022F8D000100C4C14A /* SALightweightPreferenceObserver.swift in Sources */,
 				51BC14F825BE135500F1CDC9 /* SPWindowController.swift in Sources */,
+				C3D100022F8E000100C4C14A /* SPWindowController+LightweightSession.swift in Sources */,
+				C3D100042F8E000100C4C14A /* SPWindowController+LightweightShell.swift in Sources */,
+				C3D100062F8E000100C4C14A /* SPWindowController+LightweightActions.swift in Sources */,
+				C3D100082F8E000100C4C14A /* SPWindowController+LightweightSidebar.swift in Sources */,
+				C3D1000A2F8E000100C4C14A /* SPWindowController+LightweightServices.swift in Sources */,
+				C3D1000C2F8E000100C4C14A /* SPWindowController+LightweightDelegates.swift in Sources */,
+				C3D1000E2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift in Sources */,
+				C3D100102F8E000100C4C14A /* SPConnectionController+Lightweight.swift in Sources */,
 				173C4366104455E0001F3A30 /* SPQueryFavoriteManager.m in Sources */,
 				FD6DFF872ADB40630057B713 /* SPTableHistoryManager.swift in Sources */,
 				173C44D81044A6B0001F3A30 /* SPOutlineView.m in Sources */,
