@@ -54,6 +54,7 @@
 #import "SPConnectionController.h"
 #import "SPFavoritesOutlineView.h"
 #import "SPQueryController.h"
+#import "SPNavigatorController.h"
 
 #import "sequel-ace-Swift.h"
 
@@ -1004,6 +1005,22 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     if ([activeWindowController hasActiveLightweightConnection]) {
+        if (action == @selector(saveConnectionSheet:)) {
+            isValid = [activeWindowController validateLightweightSaveConnectionMenuItem:menuItem];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(addConnectionToFavorites:)) {
+            isValid = [activeWindowController canAddLightweightConnectionToFavorites];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(toggleNavigator:)) {
+            [menuItem setTitle:([[[SPNavigatorController sharedNavigatorController] window] isVisible]) ? NSLocalizedString(@"Hide Navigator", @"hide navigator") : NSLocalizedString(@"Show Navigator", @"show navigator")];
+            isValid = YES;
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(showGotoDatabase:) ||
             action == @selector(addDatabase:) ||
             action == @selector(flushPrivileges:) ||
