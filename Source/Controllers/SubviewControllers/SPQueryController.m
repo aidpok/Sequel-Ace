@@ -667,6 +667,8 @@ static SPQueryController *sharedQueryController = nil;
 	[consoleTableView setGridStyleMask:([prefs boolForKey:SPDisplayTableViewVerticalGridlines]) ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 
 	[prefs addObserver:self forKeyPath:SPGlobalFontSettings options:NSKeyValueObservingOptionNew context:nil];
+	[prefs addObserver:self forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:nil];
+	[prefs addObserver:self forKeyPath:SPConsoleEnableLogging options:NSKeyValueObservingOptionNew context:nil];
 
 	// Set the strutcture and index view's font
 	NSFont *tableFont = [NSUserDefaults getFont];
@@ -1232,6 +1234,8 @@ static SPQueryController *sharedQueryController = nil;
 {
 	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:[self window]];
 	[prefs removeObserver:self forKeyPath:SPGlobalFontSettings];
+	[prefs removeObserver:self forKeyPath:SPDisplayTableViewVerticalGridlines];
+	[prefs removeObserver:self forKeyPath:SPConsoleEnableLogging];
 	messagesVisibleSet = nil;
 	[NSObject cancelPreviousPerformRequestsWithTarget:self];
 	

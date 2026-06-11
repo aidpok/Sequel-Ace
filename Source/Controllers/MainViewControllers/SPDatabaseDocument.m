@@ -5317,10 +5317,6 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     [prefs addObserver:customQueryInstance forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:NULL];
     [prefs addObserver:tableRelationsInstance forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:NULL];
     [prefs addObserver:self forKeyPath:SPEditInSheetEnabled options:NSKeyValueObservingOptionNew context:NULL];
-    [prefs addObserver:[SPQueryController sharedQueryController] forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:NULL];
-
-    // Register observers for when the logging preference changes
-    [prefs addObserver:[SPQueryController sharedQueryController] forKeyPath:SPConsoleEnableLogging options:NSKeyValueObservingOptionNew context:NULL];
 
     // Register a second observer for when the logging preference changes so we can tell the current connection about it
     [prefs addObserver:self forKeyPath:SPConsoleEnableLogging options:NSKeyValueObservingOptionNew context:NULL];
@@ -5338,9 +5334,6 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     [prefs removeObserver:customQueryInstance forKeyPath:SPDisplayTableViewVerticalGridlines];
     [prefs removeObserver:tableRelationsInstance forKeyPath:SPDisplayTableViewVerticalGridlines];
     [prefs removeObserver:tableSourceInstance forKeyPath:SPDisplayTableViewVerticalGridlines];
-
-    [prefs removeObserver:[SPQueryController sharedQueryController] forKeyPath:SPConsoleEnableLogging];
-    [prefs removeObserver:[SPQueryController sharedQueryController] forKeyPath:SPDisplayTableViewVerticalGridlines];
 }
 
 #pragma mark - SPDatabaseViewController
