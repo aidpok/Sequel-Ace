@@ -36,6 +36,8 @@
 #import "YRKSpinningProgressIndicator.h"
 #import "SPTableContent.h"
 #import "SPProcessListController.h"
+#import "SPServerVariablesController.h"
+#import "SPUserManager.h"
 #import "SPBundleManager.h"
 #import "SPWindow.h"
 

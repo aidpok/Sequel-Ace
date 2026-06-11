@@ -963,6 +963,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     BOOL isValid = YES;
     SEL action = [menuItem action];
     SPDatabaseDocument *activeDocument = nil;
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
     if (action == @selector(newWindow:) || action == @selector(openConnectionSheet:) || action == @selector(openStandaloneConnectionWindow:)) {
         isValid = YES;
         goto validateMenuItemDone;
@@ -996,9 +997,60 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         goto validateMenuItemDone;
     }
 
-    activeDocument = [self.tabManager.activeWindowController loadedDatabaseDocumentIfAvailable];
+    activeDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
     if (activeDocument) {
         isValid = [activeDocument validateMenuItem:menuItem];
+        goto validateMenuItemDone;
+    }
+
+    if ([activeWindowController hasActiveLightweightConnection]) {
+        if (action == @selector(showGotoDatabase:) ||
+            action == @selector(addDatabase:) ||
+            action == @selector(flushPrivileges:) ||
+            action == @selector(setDatabases:) ||
+            action == @selector(showUserManager:) ||
+            action == @selector(showServerVariables:) ||
+            action == @selector(showServerProcesses:) ||
+            action == @selector(shutdownServer:))
+        {
+            isValid = YES;
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(chooseEncoding:)) {
+            isValid = [activeWindowController validateLightweightEncodingMenuItem:menuItem];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(removeDatabase:) ||
+            action == @selector(copyDatabase:) ||
+            action == @selector(renameDatabase:) ||
+            action == @selector(alterDatabase:) ||
+            action == @selector(refreshTables:) ||
+            action == @selector(openDatabaseInNewTab:))
+        {
+            isValid = [activeWindowController hasSelectedLightweightDatabase];
+            goto validateMenuItemDone;
+        }
+    }
+
+    if (action == @selector(showGotoDatabase:) ||
+        action == @selector(addDatabase:) ||
+        action == @selector(removeDatabase:) ||
+        action == @selector(copyDatabase:) ||
+        action == @selector(renameDatabase:) ||
+        action == @selector(alterDatabase:) ||
+        action == @selector(refreshTables:) ||
+        action == @selector(flushPrivileges:) ||
+        action == @selector(setDatabases:) ||
+        action == @selector(showUserManager:) ||
+        action == @selector(chooseEncoding:) ||
+        action == @selector(openDatabaseInNewTab:) ||
+        action == @selector(showServerVariables:) ||
+        action == @selector(showServerProcesses:) ||
+        action == @selector(shutdownServer:))
+    {
+        isValid = NO;
         goto validateMenuItemDone;
     }
 

@@ -509,7 +509,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
     private var loadToken = UUID()
     private var rows: [SALightweightTableInfoRow] = []
-    private var didRegisterPreferenceObservers = false
+    private var preferenceObserver: SALightweightPreferenceObserver?
     private var table = ""
     private var database = ""
     private weak var connection: SPMySQLConnection?
@@ -718,16 +718,10 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     }
 
     deinit {
-        if didRegisterPreferenceObservers {
-            UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines)
-            UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
-        }
+        preferenceObserver?.invalidate()
     }
 
-    override func observeValue(forKeyPath keyPath: String?,
-                               of object: Any?,
-                               change: [NSKeyValueChangeKey: Any]?,
-                               context: UnsafeMutableRawPointer?) {
+    private func preferenceDidChange(_ keyPath: String) {
         if keyPath == SPDisplayTableViewVerticalGridlines {
             tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
             tableView.setNeedsDisplay(tableView.visibleRect)
@@ -738,8 +732,6 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
             applyTablePreferences()
             return
         }
-
-        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
 
     override func viewDidLayout() {
@@ -1203,11 +1195,15 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     }
 
     private func registerPreferenceObserversIfNeeded() {
-        guard !didRegisterPreferenceObservers else { return }
+        guard preferenceObserver == nil else { return }
 
-        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayTableViewVerticalGridlines, options: .new, context: nil)
-        UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
-        didRegisterPreferenceObservers = true
+        preferenceObserver = SALightweightPreferenceObserver(keys: [
+            SPDisplayTableViewVerticalGridlines,
+            SPGlobalFontSettings
+        ]) { [weak self] keyPath in
+            self?.preferenceDidChange(keyPath)
+        }
+        preferenceObserver?.start()
     }
 
     private func applyTablePreferences() {
