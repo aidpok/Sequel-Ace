@@ -957,6 +957,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     return allDatabases;
 }
 
+- (NSArray *)userManagerDatabaseNames
+{
+    return [self allDatabaseNames];
+}
+
 /**
  * Returns an array of all available system database names
  */
@@ -2084,17 +2089,12 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     if (!userManagerInstance) {
         userManagerInstance = [[SPUserManager alloc] init];
 
-        [userManagerInstance setDatabaseDocument:self];
+        [userManagerInstance setDatabaseProvider:self];
         [userManagerInstance setConnection:mySQLConnection];
         [userManagerInstance setServerSupport:serverSupport];
     }
 
-    // Before displaying the user manager make sure the current user has access to the mysql.user table.
-    SPMySQLResult *result = [mySQLConnection queryString:@"SELECT user FROM mysql.user LIMIT 1"];
-
-    if ([mySQLConnection queryErrored] && ([result numberOfRows] == 0)) {
-
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Unable to get list of users", @"unable to get list of users message") message:NSLocalizedString(@"An error occurred while trying to get the list of users. Please make sure you have the necessary privileges to perform user management, including access to the mysql.user table.", @"unable to get list of users informative message") callback:nil];
+    if (![userManagerInstance validateUserManagementAccessShowingAlert]) {
         return;
     }
 

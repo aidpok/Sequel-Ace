@@ -598,7 +598,6 @@
                     </menu>
                 </menuItem>
                 <menuItem title="Database" tag="4" id="627">
-                    <attributedString key="attributedTitle"/>
                     <menu key="submenu" title="Database" id="628">
                         <items>
                             <menuItem title="Go to Database…" keyEquivalent="D" id="8MG-hk-1qS">

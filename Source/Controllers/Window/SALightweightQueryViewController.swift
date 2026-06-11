@@ -106,6 +106,7 @@ final class SALightweightQueryViewController: NSViewController {
     private var isApplyingProgrammaticQueryText = false
     private var editorWasConfigured = false
     private var didInstallObservers = false
+    private var preferenceObserver: SALightweightPreferenceObserver?
     private var isApplyingProgrammaticColumnWidths = false
     private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
@@ -512,20 +513,13 @@ final class SALightweightQueryViewController: NSViewController {
         autosizeCoordinator.cancel()
         hideQueryProgressPanel()
         NotificationCenter.default.removeObserver(self)
-        if didInstallObservers {
-            for key in Self.observedPreferenceKeys {
-                UserDefaults.standard.removeObserver(self, forKeyPath: key)
-            }
-        }
+        preferenceObserver?.invalidate()
         if let documentURL = documentURL {
             SPQueryController.shared().removeRegisteredDocument(withFileURL: documentURL)
         }
     }
 
-    override func observeValue(forKeyPath keyPath: String?,
-                               of object: Any?,
-                               change: [NSKeyValueChangeKey: Any]?,
-                               context: UnsafeMutableRawPointer?) {
+    private func preferenceDidChange(_ keyPath: String) {
         switch keyPath {
         case SPDisplayTableViewVerticalGridlines:
             tableView.gridStyleMask = UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines) ? .solidVerticalGridLineMask : []
@@ -549,7 +543,7 @@ final class SALightweightQueryViewController: NSViewController {
             rebuildMenus()
             updateActionMenuState()
         default:
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+            break
         }
     }
 
@@ -839,9 +833,10 @@ private extension SALightweightQueryViewController {
                                                selector: #selector(helpWindowClosedByUser(_:)),
                                                name: NSNotification.Name("SPUserClosedHelpViewer"),
                                                object: helpViewerClient)
-        for key in Self.observedPreferenceKeys {
-            UserDefaults.standard.addObserver(self, forKeyPath: key, options: .new, context: nil)
+        preferenceObserver = SALightweightPreferenceObserver(keys: Self.observedPreferenceKeys) { [weak self] keyPath in
+            self?.preferenceDidChange(keyPath)
         }
+        preferenceObserver?.start()
         didInstallObservers = true
     }
 

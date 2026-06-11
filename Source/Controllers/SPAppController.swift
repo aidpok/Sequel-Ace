@@ -50,27 +50,27 @@ extension SPAppController {
     }
 
     @IBAction func export(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.exportData()
+        performLegacyBackedDocumentAction { $0.exportData() }
     }
 
     @IBAction func addConnectionToFavorites(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.addConnectionToFavorites()
+        performLegacyBackedDocumentAction { $0.addConnectionToFavorites() }
     }
 
     @IBAction func saveConnectionSheet(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.saveConnectionSheet(sender)
+        performLegacyBackedDocumentAction { $0.saveConnectionSheet(sender) }
     }
 
     @IBAction func `import`(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.importFile()
+        performLegacyBackedDocumentAction { $0.importFile() }
     }
 
     @IBAction func importFromClipboard(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.importFromClipboard()
+        performLegacyBackedDocumentAction { $0.importFromClipboard() }
     }
 
     @IBAction func printDocument(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.print()
+        performLegacyBackedDocumentAction { $0.print() }
     }
 
     // MARK: Edit menu actions
@@ -127,7 +127,7 @@ extension SPAppController {
     }
 
     @IBAction func toggleNavigator(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.toggleNavigator()
+        performLegacyBackedDocumentAction { $0.toggleNavigator() }
     }
 
     // MARK: Database menu actions
@@ -143,23 +143,53 @@ extension SPAppController {
     }
 
     @IBAction func addDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.addDatabase(sender)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.addDatabase(sender)
+            return
+        }
+
+        windowController.addLightweightDatabase(sender)
     }
 
     @IBAction func removeDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.removeDatabase(sender)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.removeDatabase(sender)
+            return
+        }
+
+        windowController.removeLightweightDatabase(sender)
     }
 
     @IBAction func copyDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.copyDatabase()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.copyDatabase()
+            return
+        }
+
+        windowController.copyLightweightDatabase(sender)
     }
 
     @IBAction func renameDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.renameDatabase()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.renameDatabase()
+            return
+        }
+
+        windowController.renameLightweightDatabase(sender)
     }
 
     @IBAction func alterDatabase(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.alterDatabase()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.alterDatabase()
+            return
+        }
+
+        windowController.alterLightweightDatabase(sender)
     }
 
     @IBAction func refreshTables(_ sender: Any) {
@@ -173,7 +203,13 @@ extension SPAppController {
     }
 
     @IBAction func flushPrivileges(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.flushPrivileges()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.flushPrivileges()
+            return
+        }
+
+        windowController.flushLightweightPrivileges(sender)
     }
 
     @IBAction func setDatabases(_ sender: Any) {
@@ -187,27 +223,62 @@ extension SPAppController {
     }
 
     @IBAction func showUserManager(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showUserManager()
+        guard let windowController = tabManager.activeWindowController else { return }
+        guard windowController.loadedDatabaseDocumentIfAvailable() != nil || windowController.hasActiveLightweightConnection else { return }
+        windowController.showUserManager()
     }
 
     @IBAction func chooseEncoding(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.chooseEncoding(sender)
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.chooseEncoding(sender)
+            return
+        }
+
+        windowController.chooseLightweightEncoding(sender)
     }
 
     @IBAction func openDatabaseInNewTab(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.openDatabaseInNewTab()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.openDatabaseInNewTab()
+            return
+        }
+
+        windowController.openLightweightDatabaseInNewTab(sender)
     }
 
     @IBAction func showServerVariables(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showServerVariables()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showServerVariables()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.showLightweightServerVariables(sender)
     }
 
     @IBAction func showServerProcesses(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showServerProcesses()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showServerProcesses()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.showLightweightServerProcesses(sender)
     }
 
     @IBAction func shutdownServer(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.shutdownServer()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.shutdownServer()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.shutdownLightweightServer(sender)
     }
 
     // MARK: Table menu actions
@@ -289,7 +360,25 @@ extension SPAppController {
     // MARK: Help menu actions
 
     @IBAction func showMySQLHelp(_ sender: Any) {
-        tabManager.activeWindowController?.databaseDocument.showMySQLHelp()
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.showMySQLHelp()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.showLightweightMySQLHelp()
+    }
+
+    private func performLegacyBackedDocumentAction(_ action: (SPDatabaseDocument) -> Void) {
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            action(document)
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        action(windowController.legacyDatabaseDocumentForMenuAction())
     }
 
     private func performTableMaintenanceAction(legacy: (SPDatabaseDocument) -> Void, lightweight: (SPWindowController) -> Void) {

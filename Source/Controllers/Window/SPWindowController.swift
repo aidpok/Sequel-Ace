@@ -34,6 +34,10 @@ import SnapKit
 private final class SALightweightConsoleLogger: NSObject, SPMySQLConnectionDelegate {
     weak var owner: SPWindowController?
 
+    @objc func isWorking() -> Bool {
+        return false
+    }
+
     func willQueryString(_ query: String!, connection: Any!) {
         owner?.logLightweightConsoleQuery(query)
     }
@@ -119,7 +123,9 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
     var response: NSApplication.ModalResponse = .cancel
     var encodingNamesByTitle: [String: String?] = [:]
     var collationsByEncoding: [String: [String]] = [:]
+    var defaultCollationTitlesByEncoding: [String: String] = [:]
     var defaultCollationTitle = NSLocalizedString("Default", comment: "default collation title")
+    let unknownDefaultCollationTitle = NSLocalizedString("Default", comment: "Collation Dropdown : Default (unknown)")
     weak var okButton: NSButton?
     weak var nameField: NSTextField?
     weak var encodingButton: NSPopUpButton?
@@ -127,6 +133,8 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
     weak var tableTypeButton: NSPopUpButton?
     weak var targetDatabaseButton: NSPopUpButton?
     weak var duplicateContentButton: NSButton?
+    var requiresName = true
+    var nameValidator: ((String) -> Bool)?
 
     init(window: NSWindow) {
         self.window = window
@@ -134,6 +142,12 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
     }
 
     @objc func accept(_ sender: Any?) {
+        updateOKButton()
+        guard okButton?.isEnabled != false else {
+            NSSound.beep()
+            return
+        }
+
         response = .OK
         NSApp.endSheet(window, returnCode: NSApplication.ModalResponse.OK.rawValue)
         window.orderOut(sender)
@@ -152,8 +166,15 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
 
         let selectedTitle = encodingButton.titleOfSelectedItem ?? ""
         let encodingName = encodingNamesByTitle[selectedTitle] ?? nil
+        let defaultTitle: String
+        if let encodingName = encodingName {
+            defaultTitle = defaultCollationTitlesByEncoding[encodingName] ?? unknownDefaultCollationTitle
+        } else {
+            defaultTitle = defaultCollationTitle
+        }
+
         collationButton.removeAllItems()
-        collationButton.addItem(withTitle: defaultCollationTitle)
+        collationButton.addItem(withTitle: defaultTitle)
 
         if let encodingName = encodingName, let collations = collationsByEncoding[encodingName], !collations.isEmpty {
             collationButton.menu?.addItem(.separator())
@@ -169,13 +190,15 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
     }
 
     func updateOKButton() {
-        okButton?.isEnabled = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        okButton?.isEnabled = (!requiresName || !name.isEmpty) && (nameValidator?(name) ?? true)
     }
 
     var result: SALightweightLegacySheetResult? {
-        guard response == .OK,
-              let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-              !name.isEmpty else { return nil }
+        guard response == .OK else { return nil }
+
+        let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !requiresName || !name.isEmpty else { return nil }
 
         let selectedEncodingTitle = encodingButton?.titleOfSelectedItem ?? ""
         let selectedCollation = (collationButton?.indexOfSelectedItem ?? 0) > 0 ? collationButton?.titleOfSelectedItem : nil
@@ -238,6 +261,51 @@ private enum SALightweightTableObjectType: Int {
         case .table, .view, .none: return nil
         }
     }
+}
+
+private enum SALightweightEncodingMenu {
+    static let autodetectTag = 0
+    static let utf8ViaLatin1Tag = 30
+
+    static let tagToMySQLEncoding: [Int: String] = [
+        10: "ucs2",
+        20: "utf8",
+        30: "utf8-",
+        40: "ascii",
+        50: "latin1",
+        60: "macroman",
+        70: "cp1250",
+        80: "latin2",
+        90: "cp1256",
+        100: "greek",
+        110: "hebrew",
+        120: "latin5",
+        130: "cp1257",
+        140: "cp1251",
+        150: "big5",
+        160: "sjis",
+        170: "ujis",
+        180: "euckr",
+        190: "utf8mb4"
+    ]
+
+    static let mysqlEncodingToTag: [String: Int] = Dictionary(uniqueKeysWithValues: tagToMySQLEncoding.map { ($0.value, $0.key) })
+}
+
+private enum SALightweightDatabaseRenameObjectType {
+    case table
+    case view
+    case procedure
+    case function
+    case event
+}
+
+private enum SALightweightDatabaseRenamePreflightResult {
+    case ready([String])
+    case sourceMissing
+    case targetExists
+    case unsupportedObjects
+    case failed(String)
 }
 
 final class SALightweightSessionState {
@@ -340,6 +408,28 @@ final class SALightweightSessionState {
     func clearAll() {
         queryStates.removeAll()
         contentStates.removeAll()
+    }
+
+    func removeDatabase(_ database: String) {
+        queryStates = queryStates.filter { $0.key.database.caseInsensitiveCompare(database) != .orderedSame }
+        contentStates = contentStates.filter { $0.key.database.caseInsensitiveCompare(database) != .orderedSame }
+    }
+
+    func renameDatabase(from oldDatabase: String, to newDatabase: String) {
+        queryStates = queryStates.reduce(into: [:]) { states, item in
+            let key = item.key
+            let newKey = key.database.caseInsensitiveCompare(oldDatabase) == .orderedSame
+                ? TableKey(connection: key.connection, database: newDatabase, table: key.table)
+                : key
+            states[newKey] = item.value
+        }
+        contentStates = contentStates.reduce(into: [:]) { states, item in
+            let key = item.key
+            let newKey = key.database.caseInsensitiveCompare(oldDatabase) == .orderedSame
+                ? TableKey(connection: key.connection, database: newDatabase, table: key.table)
+                : key
+            states[newKey] = item.value
+        }
     }
 
     func exportDictionary(includeQueryStates: Bool = true, includeContentStates: Bool = true) -> NSDictionary {
@@ -512,6 +602,10 @@ final class SALightweightSessionState {
     private let lightweightTableInfoController = SALightweightTableInfoViewController()
     private let lightweightRelationsController = SALightweightRelationsViewController()
     private let lightweightTriggersController = SALightweightTriggersViewController()
+    private let lightweightHelpViewerClient = SPHelpViewerClient()
+    private lazy var lightweightServerVariablesController = SPServerVariablesController()
+    private lazy var lightweightProcessListController = SPProcessListController()
+    private var lightweightUserManager: SPUserManager?
     private lazy var lightweightGotoDatabaseController = SPGotoDatabaseController()
     private lazy var lightweightFilterTableController: SPFilterTableController = {
         let controller = SPFilterTableController()
@@ -709,6 +803,33 @@ extension SPWindowController {
 
     @objc var hasActiveLightweightConnection: Bool {
         return activeConnection != nil && activeConnectionInfo != nil && loadedDatabaseDocument == nil
+    }
+
+    @objc var hasSelectedLightweightDatabase: Bool {
+        return activeConnection != nil && selectedDatabase?.isEmpty == false && loadedDatabaseDocument == nil
+    }
+
+    @objc func chooseLightweightEncoding(_ sender: Any) {
+        if let document = loadedDatabaseDocument {
+            document.chooseEncoding(sender)
+            return
+        }
+
+        guard hasActiveLightweightConnection, hasSelectedLightweightDatabase else { return }
+
+        let tag = (sender as? NSMenuItem)?.tag ?? SALightweightEncodingMenu.autodetectTag
+        let mysqlEncoding = Self.lightweightMySQLEncoding(fromEncodingTag: tag)
+        setLightweightConnectionEncoding(mysqlEncoding, reloadingViews: true)
+    }
+
+    @objc func validateLightweightEncodingMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard hasActiveLightweightConnection, hasSelectedLightweightDatabase else {
+            menuItem.state = .off
+            return false
+        }
+
+        menuItem.state = (menuItem.tag == currentLightweightEncodingMenuTag()) ? .on : .off
+        return true
     }
 
     @objc(lightweightConnectionStateDictionaryWithIncludePasswords:includeSession:includeQuery:)
@@ -1430,15 +1551,24 @@ private extension SPWindowController {
         ])
     }
 
-    func promptForLightweightName(title: String, message: String, defaultValue: String = "", buttonTitle: String) -> String? {
+    func promptForLightweightName(title: String,
+                                  message: String,
+                                  defaultValue: String = "",
+                                  buttonTitle: String,
+                                  nameValidator: ((String) -> Bool)? = nil) -> String? {
         let result = promptForLightweightSimpleName(title: title,
                                                     message: message,
                                                     defaultValue: defaultValue,
-                                                    buttonTitle: buttonTitle)
+                                                    buttonTitle: buttonTitle,
+                                                    nameValidator: nameValidator)
         return result?.name
     }
 
-    func promptForLightweightSimpleName(title: String, message: String, defaultValue: String = "", buttonTitle: String) -> SALightweightLegacySheetResult? {
+    func promptForLightweightSimpleName(title: String,
+                                        message: String,
+                                        defaultValue: String = "",
+                                        buttonTitle: String,
+                                        nameValidator: ((String) -> Bool)? = nil) -> SALightweightLegacySheetResult? {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 314, height: 102),
                               styleMask: .titled,
                               backing: .buffered,
@@ -1460,6 +1590,7 @@ private extension SPWindowController {
 
         controller.nameField = nameField
         controller.okButton = okButton
+        controller.nameValidator = nameValidator
         nameField.delegate = controller
         nameField.target = controller
         nameField.action = #selector(SALightweightLegacySheetController.accept(_:))
@@ -1487,7 +1618,108 @@ private extension SPWindowController {
                                               collationLabel: NSLocalizedString("Database Collation:", comment: "database collation label"),
                                               defaultEncodingTitle: lightweightDefaultEncodingTitle(database: nil, format: NSLocalizedString("Server Default (%@)", comment: "Add Database : Charset dropdown : default item ($1 = charset name)")),
                                               defaultCollationTitle: lightweightDefaultCollationTitle(database: nil, format: NSLocalizedString("Server Default (%@)", comment: "Add Database : Collation dropdown : default item ($1 = collation name)")),
-                                              buttonTitle: NSLocalizedString("Add", comment: "add database button"))
+                                               buttonTitle: NSLocalizedString("Add", comment: "add database button"),
+                                               nameValidator: lightweightDatabaseNameLiveValidator())
+    }
+
+    func promptForLightweightDatabaseCopy(sourceDatabase: String) -> SALightweightLegacySheetResult? {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 314, height: 127),
+                              styleMask: .titled,
+                              backing: .buffered,
+                              defer: false)
+        window.title = NSLocalizedString("Duplicate Database", comment: "copy database sheet title")
+
+        let controller = SALightweightLegacySheetController(window: window)
+        let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = contentView
+
+        let messageField = legacyLabel(sourceDatabase, frame: NSRect(x: 20, y: 89, width: 274, height: 18), alignment: .center)
+        let nameField = legacyTextField(frame: NSRect(x: 20, y: 67, width: 274, height: 19), value: sourceDatabase)
+        let duplicateContent = NSButton(checkboxWithTitle: NSLocalizedString("Duplicate database content", comment: "duplicate database content checkbox"), target: nil, action: nil)
+        duplicateContent.frame = NSRect(x: 20, y: 42, width: 274, height: 18)
+        duplicateContent.controlSize = .small
+        duplicateContent.font = .messageFont(ofSize: 11)
+        duplicateContent.state = .on
+        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 122, y: 12, width: 86, height: 28), keyEquivalent: "\u{1b}")
+        let duplicateButton = legacyButton(title: NSLocalizedString("Duplicate", comment: "duplicate database button"), frame: NSRect(x: 207, y: 12, width: 92, height: 28), keyEquivalent: "\r")
+
+        [messageField, nameField, duplicateContent, cancelButton, duplicateButton].forEach(contentView.addSubview)
+
+        controller.nameField = nameField
+        controller.okButton = duplicateButton
+        controller.duplicateContentButton = duplicateContent
+        controller.nameValidator = lightweightDatabaseNameLiveValidator()
+        nameField.delegate = controller
+        nameField.target = controller
+        nameField.action = #selector(SALightweightLegacySheetController.accept(_:))
+        cancelButton.target = controller
+        cancelButton.action = #selector(SALightweightLegacySheetController.cancel(_:))
+        duplicateButton.target = controller
+        duplicateButton.action = #selector(SALightweightLegacySheetController.accept(_:))
+        controller.updateOKButton()
+
+        guard runLightweightLegacySheet(controller, firstResponder: nameField) == .OK else { return nil }
+        return controller.result
+    }
+
+    func promptForLightweightDatabaseAlter(database: String) -> SALightweightLegacySheetResult? {
+        guard let activeConnection = activeConnection else { return nil }
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 384, height: 104),
+                              styleMask: .titled,
+                              backing: .buffered,
+                              defer: false)
+        window.title = NSLocalizedString("Alter Database", comment: "alter database sheet title")
+
+        let controller = SALightweightLegacySheetController(window: window)
+        controller.requiresName = false
+        let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = contentView
+
+        let currentDefaults = lightweightDatabaseDefaults(for: database, connection: activeConnection)
+        let currentEncoding = currentDefaults?.encoding ?? ""
+        let currentCollation = currentDefaults?.collation ?? ""
+        let encodingChoices = lightweightEncodingChoices(defaultTitle: NSLocalizedString("Default", comment: "default encoding title")).filter { $0.name != nil }
+        let selectedEncodingTitle = encodingChoices.first { $0.name?.caseInsensitiveCompare(currentEncoding) == .orderedSame }?.title ?? encodingChoices.first?.title ?? currentEncoding
+
+        let encodingButton = legacyPopup(frame: NSRect(x: 143, y: 66, width: 224, height: 22),
+                                         choices: encodingChoices,
+                                         defaultTitle: selectedEncodingTitle)
+        let collationButton = legacyPopup(frame: NSRect(x: 143, y: 41, width: 224, height: 22),
+                                          choices: [SALightweightEncodingChoice(title: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation, name: currentCollation.isEmpty ? nil : currentCollation)],
+                                          defaultTitle: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation)
+        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 205, y: 13, width: 86, height: 28), keyEquivalent: "\u{1b}")
+        let alterButton = legacyButton(title: NSLocalizedString("Alter", comment: "alter database button"), frame: NSRect(x: 289, y: 13, width: 80, height: 28), keyEquivalent: "\r")
+
+        contentView.addSubview(legacyLabel(NSLocalizedString("Database Encoding:", comment: "database encoding label"), frame: NSRect(x: 5, y: 71, width: 134, height: 14), alignment: .right))
+        contentView.addSubview(encodingButton)
+        contentView.addSubview(legacyLabel(NSLocalizedString("Database Collation:", comment: "database collation label"), frame: NSRect(x: 5, y: 46, width: 134, height: 14), alignment: .right))
+        contentView.addSubview(collationButton)
+        contentView.addSubview(cancelButton)
+        contentView.addSubview(alterButton)
+
+        controller.okButton = alterButton
+        controller.encodingButton = encodingButton
+        controller.collationButton = collationButton
+        controller.encodingNamesByTitle = Dictionary(uniqueKeysWithValues: encodingChoices.map { ($0.title, $0.name) })
+        let collationChoices = lightweightCollationChoices()
+        controller.collationsByEncoding = collationChoices.collationsByEncoding
+        controller.defaultCollationTitlesByEncoding = collationChoices.defaultCollationTitlesByEncoding
+        controller.defaultCollationTitle = currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation
+        encodingButton.target = controller
+        encodingButton.action = #selector(SALightweightLegacySheetController.encodingDidChange(_:))
+        cancelButton.target = controller
+        cancelButton.action = #selector(SALightweightLegacySheetController.cancel(_:))
+        alterButton.target = controller
+        alterButton.action = #selector(SALightweightLegacySheetController.accept(_:))
+        controller.encodingDidChange(encodingButton)
+        if !currentCollation.isEmpty {
+            collationButton.selectItem(withTitle: currentCollation)
+        }
+        controller.updateOKButton()
+
+        guard runLightweightLegacySheet(controller, firstResponder: encodingButton) == .OK else { return nil }
+        return controller.result
     }
 
     func promptForLightweightTable() -> SALightweightLegacySheetResult? {
@@ -1567,7 +1799,8 @@ private extension SPWindowController {
                                         defaultCollationTitle: String,
                                         buttonTitle: String,
                                         typeLabel: String? = nil,
-                                        typeChoices: [SALightweightEncodingChoice] = []) -> SALightweightLegacySheetResult? {
+                                        typeChoices: [SALightweightEncodingChoice] = [],
+                                        nameValidator: ((String) -> Bool)? = nil) -> SALightweightLegacySheetResult? {
         let controller = SALightweightLegacySheetController(window: window)
         let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
         window.contentView = contentView
@@ -1619,10 +1852,13 @@ private extension SPWindowController {
 
         controller.nameField = nameField
         controller.okButton = okButton
+        controller.nameValidator = nameValidator
         controller.encodingButton = encodingButton
         controller.collationButton = collationButton
         controller.encodingNamesByTitle = Dictionary(uniqueKeysWithValues: choices.map { ($0.title, $0.name) })
-        controller.collationsByEncoding = lightweightCollationChoices()
+        let collationChoices = lightweightCollationChoices()
+        controller.collationsByEncoding = collationChoices.collationsByEncoding
+        controller.defaultCollationTitlesByEncoding = collationChoices.defaultCollationTitlesByEncoding
         controller.defaultCollationTitle = defaultCollationTitle
         nameField.delegate = controller
         nameField.target = controller
@@ -1667,6 +1903,83 @@ private extension SPWindowController {
 
         let modalResponse = NSApp.runModal(for: controller.window)
         return response == .cancel ? modalResponse : response
+    }
+
+    func applyLightweightDefaultEncodingPreference() {
+        let preferredTag = UserDefaults.standard.integer(forKey: SPDefaultEncoding)
+        let mysqlEncoding = preferredTag == SALightweightEncodingMenu.autodetectTag
+            ? "utf8mb4"
+            : Self.lightweightMySQLEncoding(fromEncodingTag: preferredTag)
+        setLightweightConnectionEncoding(mysqlEncoding, reloadingViews: false)
+    }
+
+    @discardableResult
+    func setLightweightConnectionEncoding(_ mysqlEncoding: String, reloadingViews reloadViews: Bool) -> Bool {
+        guard let activeConnection = activeConnection else { return false }
+
+        var mysqlEncoding = mysqlEncoding
+        var useLatin1Transport = false
+        if mysqlEncoding == "utf8-" {
+            useLatin1Transport = true
+            mysqlEncoding = "utf8mb4"
+        }
+
+        guard activeConnection.setEncoding(mysqlEncoding) else {
+            NSLog("Error: could not set encoding to %@ nor fall back to database encoding on MySQL %@", mysqlEncoding, activeServerVersion ?? "")
+            return false
+        }
+
+        activeConnection.setEncodingUsesLatin1Transport(useLatin1Transport)
+        activeConnection.storeEncodingForRestoration()
+
+        if reloadViews {
+            reloadLightweightViewsAfterEncodingChange()
+        }
+
+        return true
+    }
+
+    func reloadLightweightViewsAfterEncodingChange() {
+        lightweightStructureController.clearCachedTables()
+        lightweightContentController.clearCachedTables()
+
+        guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
+
+        if let selectedTable = selectedTable {
+            loadLightweightTableInfo(for: selectedTable)
+
+            switch activeLightweightViewMode {
+            case .content:
+                lightweightContentController.loadContent(for: selectedTable, database: selectedDatabase, connection: activeConnection)
+            case .query:
+                lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
+            case .status:
+                lightweightTableInfoController.loadTableInfo(for: selectedTable, database: selectedDatabase, connection: activeConnection)
+            case .relations:
+                showLightweightRelations(for: selectedTable)
+            case .triggers:
+                showLightweightTriggers(for: selectedTable)
+            default:
+                lightweightStructureController.loadStructure(for: selectedTable, database: selectedDatabase, connection: activeConnection, useCache: false)
+            }
+        } else {
+            loadTables(for: selectedDatabase, preservingSelection: true)
+        }
+    }
+
+    func currentLightweightEncodingMenuTag() -> Int {
+        guard let activeConnection = activeConnection else { return SALightweightEncodingMenu.autodetectTag }
+
+        if activeConnection.encodingUsesLatin1Transport() {
+            return SALightweightEncodingMenu.utf8ViaLatin1Tag
+        }
+
+        let mysqlEncoding = activeConnection.encoding() ?? ""
+        return SALightweightEncodingMenu.mysqlEncodingToTag[mysqlEncoding] ?? SALightweightEncodingMenu.autodetectTag
+    }
+
+    static func lightweightMySQLEncoding(fromEncodingTag tag: Int) -> String {
+        return SALightweightEncodingMenu.tagToMySQLEncoding[tag] ?? "utf8mb4"
     }
 
     func legacyLabel(_ title: String, frame: NSRect, alignment: NSTextAlignment) -> NSTextField {
@@ -1760,16 +2073,23 @@ private extension SPWindowController {
 
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
-            var choices = [SALightweightEncodingChoice(title: defaultTitle, name: nil)]
+            var utf8Choices: [SALightweightEncodingChoice] = []
+            var otherChoices: [SALightweightEncodingChoice] = []
 
             while let row = result.getRowAsDictionary() as? [String: Any] {
                 let name = Self.displayString(for: row["CHARACTER_SET_NAME"] ?? row["Charset"])
                 guard !name.isEmpty else { continue }
                 let description = Self.displayString(for: row["DESCRIPTION"] ?? row["Description"])
                 let title = description.isEmpty ? name : "\(description) (\(name))"
-                choices.append(SALightweightEncodingChoice(title: title, name: name))
+                let choice = SALightweightEncodingChoice(title: title, name: name)
+                if name.hasPrefix("utf8") {
+                    utf8Choices.append(choice)
+                } else {
+                    otherChoices.append(choice)
+                }
             }
 
+            let choices = [SALightweightEncodingChoice(title: defaultTitle, name: nil)] + utf8Choices + otherChoices
             if choices.count > 1 {
                 return choices
             }
@@ -1778,11 +2098,11 @@ private extension SPWindowController {
         return [SALightweightEncodingChoice(title: defaultTitle, name: nil)]
     }
 
-    func lightweightCollationChoices() -> [String: [String]] {
-        guard let activeConnection = activeConnection else { return [:] }
+    func lightweightCollationChoices() -> (collationsByEncoding: [String: [String]], defaultCollationTitlesByEncoding: [String: String]) {
+        guard let activeConnection = activeConnection else { return ([:], [:]) }
 
         let queries = [
-            "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.collations ORDER BY collation_name ASC",
+            "SELECT COLLATION_NAME, CHARACTER_SET_NAME, IS_DEFAULT FROM information_schema.collations ORDER BY collation_name ASC",
             "SHOW COLLATION"
         ]
 
@@ -1792,20 +2112,37 @@ private extension SPWindowController {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             var collationsByEncoding: [String: [String]] = [:]
+            var defaultCollationsByEncoding: [String: String] = [:]
 
             while let row = result.getRowAsDictionary() as? [String: Any] {
                 let collation = Self.displayString(for: row["COLLATION_NAME"] ?? row["Collation"])
                 let encoding = Self.displayString(for: row["CHARACTER_SET_NAME"] ?? row["Charset"])
                 guard !collation.isEmpty, !encoding.isEmpty else { continue }
                 collationsByEncoding[encoding, default: []].append(collation)
+                let isDefault = Self.displayString(for: row["IS_DEFAULT"] ?? row["Default"])
+                if isDefault.caseInsensitiveCompare("Yes") == .orderedSame {
+                    defaultCollationsByEncoding[encoding] = collation
+                }
             }
 
             if !collationsByEncoding.isEmpty {
-                return collationsByEncoding.mapValues { Self.uniqueStrings($0).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } }
+                if collationsByEncoding["utf8mb3"] == nil, let utf8Collations = collationsByEncoding["utf8"] {
+                    collationsByEncoding["utf8mb3"] = utf8Collations
+                    defaultCollationsByEncoding["utf8mb3"] = defaultCollationsByEncoding["utf8"]
+                } else if collationsByEncoding["utf8"] == nil, let utf8mb3Collations = collationsByEncoding["utf8mb3"] {
+                    collationsByEncoding["utf8"] = utf8mb3Collations
+                    defaultCollationsByEncoding["utf8"] = defaultCollationsByEncoding["utf8mb3"]
+                }
+
+                let defaultTitlesByEncoding = defaultCollationsByEncoding.mapValues {
+                    String(format: NSLocalizedString("Default (%@)", comment: "Collation Dropdown : Default ($1 = collation name)"), $0)
+                }
+                return (collationsByEncoding.mapValues { Self.uniqueStrings($0).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } },
+                        defaultTitlesByEncoding)
             }
         }
 
-        return [:]
+        return ([:], [:])
     }
 
     func lightweightTableTypeChoices() -> [SALightweightEncodingChoice] {
@@ -1883,6 +2220,150 @@ private extension SPWindowController {
         return true
     }
 
+    func validateLightweightDatabaseName(_ name: String, ignoring ignoredName: String? = nil) -> Bool {
+        guard !name.isEmpty else {
+            showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                 message: NSLocalizedString("Database must have a name.", comment: "message of panel when no db name is given"))
+            return false
+        }
+
+        let databases = activeConnection?.databases() as? [String] ?? lightweightDatabases
+        let matchesExisting = databases.contains { database in
+            guard database.caseInsensitiveCompare(ignoredName ?? "") != .orderedSame else { return false }
+            return database.caseInsensitiveCompare(name) == .orderedSame
+        }
+
+        guard !matchesExisting else {
+            showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                 message: String(format: NSLocalizedString("The name '%@' is already used.", comment: "message when trying to rename a table/view/proc/etc to an already used name"), name))
+            return false
+        }
+
+        return true
+    }
+
+    func lightweightDatabaseNameLiveValidator() -> (String) -> Bool {
+        let databases = activeConnection?.databases() as? [String] ?? lightweightDatabases
+        return { candidate in
+            !databases.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+        }
+    }
+
+    func showLightweightDatabaseRenameUnsupportedAlert(database: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Database Rename Unsupported", comment: "databsse rename unsupported message")
+        alert.informativeText = String(format: NSLocalizedString("Renaming the database '%@' is currently unsupported as it contains objects other than tables (i.e. views, procedures, functions, events, etc.).\n\nIf you would like to rename a database please use the 'Duplicate Database', move any non-table objects manually then drop the old database.", comment: "databsse rename unsupported informative message"), database)
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        _ = runLightweightModalAlert(alert)
+    }
+
+    func lightweightDatabaseRenamePreflight(from sourceDatabase: String, to targetDatabase: String, connection: SPMySQLConnection) -> SALightweightDatabaseRenamePreflightResult {
+        let databases = connection.databases() as? [String] ?? []
+        guard databases.contains(sourceDatabase) else { return .sourceMissing }
+        guard !databases.contains(targetDatabase) else { return .targetExists }
+
+        let objects = loadLightweightDatabaseRenameObjects(for: sourceDatabase, connection: connection)
+        if connection.queryErrored() {
+            let error = connection.lastErrorMessage()
+            return .failed(error?.isEmpty == false ? error! : NSLocalizedString("Unable to inspect database objects before rename.", comment: "database rename preflight failed"))
+        }
+
+        guard objects.allSatisfy({ $0.type == .table }) else { return .unsupportedObjects }
+
+        var options: [String] = []
+        if let defaults = lightweightDatabaseDefaults(for: sourceDatabase, connection: connection) {
+            if let encoding = defaults.encoding, !encoding.isEmpty {
+                options.append("DEFAULT CHARACTER SET = \(Self.backtickQuoted(encoding))")
+            }
+            if let collation = defaults.collation, !collation.isEmpty {
+                options.append("DEFAULT COLLATE = \(Self.backtickQuoted(collation))")
+            }
+        }
+
+        var statements = [
+            "CREATE DATABASE \(Self.backtickQuoted(targetDatabase)) \(options.joined(separator: " "))"
+        ]
+
+        let tableRenames = objects
+            .filter { $0.type == .table }
+            .map { table in
+                "\(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table.name)) TO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table.name))"
+            }
+        if !tableRenames.isEmpty {
+            statements.append("RENAME TABLE \(tableRenames.joined(separator: ", "))")
+        }
+
+        statements.append("DROP DATABASE \(Self.backtickQuoted(sourceDatabase))")
+        return .ready(statements)
+    }
+
+    func loadLightweightDatabaseRenameObjects(for database: String, connection: SPMySQLConnection) -> [(name: String, type: SALightweightDatabaseRenameObjectType)] {
+        var objects: [(name: String, type: SALightweightDatabaseRenameObjectType)] = []
+
+        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = row.first { key, _ in
+                    let keyString = String(describing: key).lowercased()
+                    return keyString != "table_type"
+                }.map { stringValue($0.value) } ?? ""
+                let tableType = row.first { key, _ in
+                    String(describing: key).lowercased() == "table_type"
+                }.map { stringValue($0.value).uppercased() } ?? ""
+
+                guard !name.isEmpty else { continue }
+                objects.append((name: name, type: tableType == "VIEW" ? .view : .table))
+            }
+        }
+
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["ROUTINE_NAME"] ?? row["routine_name"])
+                let routineType = stringValue(row["ROUTINE_TYPE"] ?? row["routine_type"]).uppercased()
+                guard !name.isEmpty else { continue }
+                objects.append((name: name, type: routineType == "PROCEDURE" ? .procedure : .function))
+            }
+        }
+
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["EVENT_NAME"] ?? row["event_name"])
+                guard !name.isEmpty else { continue }
+                objects.append((name: name, type: .event))
+            }
+        }
+
+        return objects
+    }
+
+    func lightweightDatabaseDefaults(for database: String, connection: SPMySQLConnection) -> (encoding: String?, collation: String?)? {
+        guard let result = connection.queryString("SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = \(Self.sqlString(database))") else {
+            return nil
+        }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        guard let row = result.getRowAsDictionary() as? [String: Any] else { return nil }
+        return (Self.displayString(for: row["DEFAULT_CHARACTER_SET_NAME"]),
+                Self.displayString(for: row["DEFAULT_COLLATION_NAME"]))
+    }
+
     func runLightweightDatabaseMutation(status: String, statement: String, completion: @escaping (Bool) -> Void) {
         runLightweightDatabaseMutation(status: status, statements: [statement], completion: completion)
     }
@@ -1911,6 +2392,224 @@ private extension SPWindowController {
                 self.lightweightContentController.clearCachedTables()
                 completion(true)
             }
+        }
+    }
+
+    func runLightweightDatabaseRenameMutation(from sourceDatabase: String, to targetDatabase: String, status: String, completion: @escaping (Bool) -> Void) {
+        guard let activeConnection = activeConnection else { return }
+
+        showLightweightPlaceholder(status)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
+            guard let self = self, let activeConnection = activeConnection else { return }
+
+            switch self.lightweightDatabaseRenamePreflight(from: sourceDatabase, to: targetDatabase, connection: activeConnection) {
+            case .ready(let statements):
+                for statement in statements {
+                    _ = activeConnection.queryString(statement)
+                    if activeConnection.queryErrored() { break }
+                }
+
+                let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
+                DispatchQueue.main.async {
+                    if let error = error, !error.isEmpty {
+                        self.showLightweightError(title: NSLocalizedString("Error", comment: "error"), message: error)
+                        completion(false)
+                        return
+                    }
+
+                    self.lightweightStructureController.clearCachedTables()
+                    self.lightweightContentController.clearCachedTables()
+                    completion(true)
+                }
+            case .sourceMissing:
+                DispatchQueue.main.async {
+                    self.showLightweightError(title: NSLocalizedString("Unable to rename database", comment: "unable to rename database message"),
+                                             message: String(format: NSLocalizedString("The database '%@' no longer exists.", comment: "database rename source missing message"), sourceDatabase))
+                    completion(false)
+                }
+            case .targetExists:
+                DispatchQueue.main.async {
+                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                             message: String(format: NSLocalizedString("The name '%@' is already used.", comment: "message when trying to rename a table/view/proc/etc to an already used name"), targetDatabase))
+                    completion(false)
+                }
+            case .unsupportedObjects:
+                DispatchQueue.main.async {
+                    self.showLightweightDatabaseRenameUnsupportedAlert(database: sourceDatabase)
+                    completion(false)
+                }
+            case .failed(let message):
+                DispatchQueue.main.async {
+                    self.showLightweightError(title: NSLocalizedString("Unable to rename database", comment: "unable to rename database message"), message: message)
+                    completion(false)
+                }
+            }
+        }
+    }
+
+    func lightweightDatabaseHasNonTableObjects(_ database: String, connection: SPMySQLConnection) -> Bool {
+        return loadLightweightDatabaseRenameObjects(for: database, connection: connection).contains { $0.type != .table }
+    }
+
+    func runLightweightDatabaseCopyMutation(from sourceDatabase: String,
+                                            to targetDatabase: String,
+                                            copyContent: Bool,
+                                            status: String,
+                                            completion: @escaping (Bool) -> Void) {
+        guard let activeConnection = activeConnection else { return }
+
+        showLightweightPlaceholder(status)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
+            guard let self = self, let activeConnection = activeConnection else { return }
+
+            let databases = activeConnection.databases() as? [String] ?? []
+            guard databases.contains(sourceDatabase), !databases.contains(targetDatabase) else {
+                DispatchQueue.main.async {
+                    self.showLightweightError(title: NSLocalizedString("Unable to copy database", comment: "unable to copy database message"),
+                                              message: String(format: NSLocalizedString("An error occurred while trying to copy the database '%@' to '%@'.", comment: "unable to copy database message informative message"), sourceDatabase, targetDatabase))
+                    completion(false)
+                }
+                return
+            }
+
+            let objects = self.loadLightweightDatabaseRenameObjects(for: sourceDatabase, connection: activeConnection)
+            if activeConnection.queryErrored() {
+                let error = activeConnection.lastErrorMessage() ?? ""
+                DispatchQueue.main.async {
+                    self.showLightweightError(title: NSLocalizedString("Unable to copy database", comment: "unable to copy database message"),
+                                              message: error.isEmpty ? String(format: NSLocalizedString("An error occurred while trying to copy the database '%@' to '%@'.", comment: "unable to copy database message informative message"), sourceDatabase, targetDatabase) : error)
+                    completion(false)
+                }
+                return
+            }
+
+            let tables = objects.filter { $0.type == .table }.map(\.name)
+            var options: [String] = []
+            if let defaults = self.lightweightDatabaseDefaults(for: sourceDatabase, connection: activeConnection) {
+                if let encoding = defaults.encoding, !encoding.isEmpty {
+                    options.append("DEFAULT CHARACTER SET = \(Self.backtickQuoted(encoding))")
+                }
+                if let collation = defaults.collation, !collation.isEmpty {
+                    options.append("DEFAULT COLLATE = \(Self.backtickQuoted(collation))")
+                }
+            }
+
+            _ = activeConnection.queryString("CREATE DATABASE \(Self.backtickQuoted(targetDatabase)) \(options.joined(separator: " "))")
+            var success = !activeConnection.queryErrored()
+            var error = success ? nil : activeConnection.lastErrorMessage()
+            var didDisableForeignKeyChecks = false
+            var didStoreSQLMode = false
+
+            if success {
+                _ = activeConnection.queryString("/*!32352 SET foreign_key_checks=0 */")
+                success = success && !activeConnection.queryErrored()
+                didDisableForeignKeyChecks = success
+                if !success { error = activeConnection.lastErrorMessage() }
+            }
+            if success {
+                _ = activeConnection.queryString("/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */")
+                success = success && !activeConnection.queryErrored()
+                didStoreSQLMode = success
+                if !success { error = activeConnection.lastErrorMessage() }
+            }
+
+            if success {
+                for table in tables {
+                    guard let createStatement = self.lightweightCreateTableCopyStatement(table: table,
+                                                                                        sourceDatabase: sourceDatabase,
+                                                                                        targetDatabase: targetDatabase,
+                                                                                        connection: activeConnection) else {
+                        success = false
+                        break
+                    }
+
+                    _ = activeConnection.queryString(createStatement)
+                    if activeConnection.queryErrored() {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+
+                    if copyContent {
+                        _ = activeConnection.queryString("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))")
+                        if activeConnection.queryErrored() {
+                            success = false
+                            error = activeConnection.lastErrorMessage()
+                            break
+                        }
+                    }
+                }
+            }
+
+            if didDisableForeignKeyChecks {
+                _ = activeConnection.queryString("/*!32352 SET foreign_key_checks=1 */")
+                if activeConnection.queryErrored(), error == nil {
+                    success = false
+                    error = activeConnection.lastErrorMessage()
+                }
+            }
+            if didStoreSQLMode {
+                _ = activeConnection.queryString("/*!40101 SET SQL_MODE=@OLD_SQL_MODE */")
+                if activeConnection.queryErrored(), error == nil {
+                    success = false
+                    error = activeConnection.lastErrorMessage()
+                }
+            }
+
+            DispatchQueue.main.async {
+                if success {
+                    self.lightweightStructureController.clearCachedTables()
+                    self.lightweightContentController.clearCachedTables()
+                    completion(true)
+                    return
+                }
+
+                self.showLightweightError(title: NSLocalizedString("Unable to copy database", comment: "unable to copy database message"),
+                                          message: error?.isEmpty == false ? error! : String(format: NSLocalizedString("An error occurred while trying to copy the database '%@' to '%@'.", comment: "unable to copy database message informative message"), sourceDatabase, targetDatabase))
+                completion(false)
+            }
+        }
+    }
+
+    func lightweightCreateTableCopyStatement(table: String, sourceDatabase: String, targetDatabase: String, connection: SPMySQLConnection) -> String? {
+        guard let result = connection.queryString("SHOW CREATE TABLE \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))") else {
+            return nil
+        }
+
+        result.returnDataAsStrings = true
+        guard let row = result.getRowAsArray(), row.count > 1 else { return nil }
+        var createStatement = Self.displayString(for: row[1])
+        let unqualifiedTable = Self.backtickQuoted(table)
+        let qualifiedTable = "\(Self.backtickQuoted(targetDatabase)).\(unqualifiedTable)"
+        for prefix in ["CREATE TABLE ", "CREATE TEMPORARY TABLE "] {
+            let needle = "\(prefix)\(unqualifiedTable)"
+            if let range = createStatement.range(of: needle, options: [.caseInsensitive]) {
+                createStatement.replaceSubrange(range, with: "\(prefix)\(qualifiedTable)")
+                return createStatement
+            }
+        }
+
+        return nil
+    }
+
+    func runLightweightDatabaseAlterMutation(database: String,
+                                             encoding: String,
+                                             collation: String?,
+                                             completion: @escaping (Bool) -> Void) {
+        var statement = "ALTER DATABASE \(Self.backtickQuoted(database)) DEFAULT CHARACTER SET \(Self.backtickQuoted(encoding))"
+        if let collation = collation, !collation.isEmpty {
+            statement += " DEFAULT COLLATE \(Self.backtickQuoted(collation))"
+        }
+
+        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Altering %@...", comment: "Altering database task string"), database),
+                                       statement: statement) { [weak self] success in
+            guard let self = self else { return }
+            guard success else {
+                completion(false)
+                return
+            }
+
+            completion(true)
         }
     }
 
@@ -2198,6 +2897,52 @@ private extension SPWindowController {
         } else {
             databaseToolbarController.reloadDatabases(databases, selectedDatabase: database)
         }
+    }
+
+    private func clearLightweightDatabaseSelection(afterRemoving database: String) {
+        saveCurrentLightweightViewState()
+        lightweightSessionState.removeDatabase(database)
+        activeLightweightDetailKey = nil
+        selectedDatabase = nil
+        selectedTable = nil
+        lightweightDatabases.removeAll { $0.caseInsensitiveCompare(database) == .orderedSame }
+        lightweightTables = []
+        filteredLightweightTables = []
+        lightweightTableTypes = [:]
+        lightweightPinnedTables = []
+        tableFilterField.stringValue = ""
+        tablesListView.reloadData()
+        resetLightweightTableHistory()
+        resetLightweightTableInfo()
+        lightweightStructureController.clearCachedTables()
+        lightweightContentController.clearCachedTables()
+        databaseToolbarController.reloadDatabases(lightweightDatabases, selectedDatabase: nil)
+        setLightweightFallbackToolbarItemsEnabled(true)
+        updateLightweightWindowTitle()
+        markLightweightResumeStateChanged()
+        showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
+        databaseListNeedsLoad = true
+        requestLightweightDatabases(forceReload: true)
+    }
+
+    private func applyLightweightDatabaseRename(from oldDatabase: String, to newDatabase: String) {
+        saveCurrentLightweightViewState()
+        lightweightSessionState.renameDatabase(from: oldDatabase, to: newDatabase)
+        activeLightweightDetailKey = nil
+        selectedDatabase = newDatabase
+        selectedTable = nil
+        lightweightDatabases = lightweightDatabases.map { database in
+            database.caseInsensitiveCompare(oldDatabase) == .orderedSame ? newDatabase : database
+        }
+        selectLightweightDatabaseInToolbar(newDatabase)
+        markLightweightResumeStateChanged()
+        databaseListNeedsLoad = true
+        requestLightweightDatabases(forceReload: true)
+        loadTables(for: newDatabase)
+    }
+
+    private func postLightweightDatabaseCreatedRemovedRenamedNotification() {
+        NotificationCenter.default.post(name: .SPDatabaseCreatedRemovedRenamed, object: nil)
     }
 
     func setLightweightFallbackToolbarItemsEnabled(_ enabled: Bool) {
@@ -2706,6 +3451,306 @@ private extension SPWindowController {
         return loadedDatabaseDocument
     }
 
+    @objc func legacyDatabaseDocumentForMenuAction() -> SPDatabaseDocument {
+        return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
+    }
+
+    @objc func showLightweightMySQLHelp() {
+        if let document = loadedDatabaseDocument {
+            document.showMySQLHelp()
+            return
+        }
+
+        guard let activeConnection = activeConnection else { return }
+        lightweightHelpViewerClient.setConnection(activeConnection)
+        lightweightHelpViewerClient.showHelp(for: "contents", addToHistory: true, calledByAutoHelp: false)
+        lightweightHelpViewerClient.helpWebViewWindow().makeKey()
+    }
+
+    @objc func addLightweightDatabase(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.addDatabase(sender)
+            return
+        }
+
+        guard let databaseDetails = promptForLightweightDatabase() else {
+            if let selectedDatabase = selectedDatabase {
+                selectLightweightDatabaseInToolbar(selectedDatabase)
+            }
+            return
+        }
+        let databaseName = databaseDetails.name
+        guard validateLightweightDatabaseName(databaseName) else { return }
+
+        if let activeConnection = activeConnection, activeConnection.encoding()?.hasPrefix("utf8") == false {
+            _ = activeConnection.setEncoding("utf8mb4")
+        }
+
+        var options: [String] = []
+        if let encoding = databaseDetails.encoding {
+            options.append("DEFAULT CHARACTER SET = \(Self.backtickQuoted(encoding))")
+        }
+        if let collation = databaseDetails.collation {
+            options.append("DEFAULT COLLATE = \(Self.backtickQuoted(collation))")
+        }
+
+        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Creating %@...", comment: "Creating database task string"), databaseName),
+                                        statement: "CREATE DATABASE \(Self.backtickQuoted(databaseName)) \(options.joined(separator: " "))") { [weak self] success in
+            guard let self = self else { return }
+            guard success else {
+                if let selectedDatabase = self.selectedDatabase {
+                    self.loadTables(for: selectedDatabase, preservingSelection: true)
+                } else {
+                    self.showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
+                }
+                return
+            }
+            self.databaseListNeedsLoad = true
+            self.requestLightweightDatabases(forceReload: true)
+            self.selectLightweightDatabaseInToolbar(databaseName)
+            self.loadTables(for: databaseName)
+            self.postLightweightDatabaseCreatedRemovedRenamedNotification()
+        }
+    }
+
+    @objc func removeLightweightDatabase(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.removeDatabase(sender)
+            return
+        }
+
+        guard let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete database '%@'?", comment: "delete database message"), selectedDatabase)
+        alert.informativeText = String(format: NSLocalizedString("Are you sure you want to delete the database '%@'? This operation cannot be undone.", comment: "delete database informative message"), selectedDatabase)
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        alert.alertStyle = .critical
+
+        guard runLightweightModalAlert(alert) == .alertFirstButtonReturn else { return }
+
+        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Deleting %@...", comment: "Deleting database task string"), selectedDatabase),
+                                        statement: "DROP DATABASE \(Self.backtickQuoted(selectedDatabase))") { [weak self] success in
+            guard let self = self else { return }
+            guard success else {
+                self.loadTables(for: selectedDatabase, preservingSelection: true)
+                return
+            }
+            self.clearLightweightDatabaseSelection(afterRemoving: selectedDatabase)
+            self.postLightweightDatabaseCreatedRemovedRenamedNotification()
+        }
+    }
+
+    @objc func copyLightweightDatabase(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.copyDatabase()
+            return
+        }
+
+        guard let activeConnection = activeConnection,
+              let selectedDatabase = selectedDatabase,
+              !selectedDatabase.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        if lightweightDatabaseHasNonTableObjects(selectedDatabase, connection: activeConnection) {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Only Partially Supported", comment: "partial copy database support message")
+            alert.informativeText = String(format: NSLocalizedString("Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?", comment: "partial copy database support informative message"), selectedDatabase)
+            alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+            guard runLightweightModalAlert(alert) != .alertSecondButtonReturn else { return }
+        }
+
+        guard let copyDetails = promptForLightweightDatabaseCopy(sourceDatabase: selectedDatabase) else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        let targetDatabase = copyDetails.name
+        guard validateLightweightDatabaseName(targetDatabase) else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        if activeConnection.encoding()?.hasPrefix("utf8") == false {
+            _ = activeConnection.setEncoding("utf8mb4")
+        }
+
+        runLightweightDatabaseCopyMutation(from: selectedDatabase,
+                                           to: targetDatabase,
+                                           copyContent: copyDetails.duplicateContent,
+                                           status: String(format: NSLocalizedString("Copying database '%@'...", comment: "Copying database task description"), selectedDatabase)) { [weak self] success in
+            guard let self = self else { return }
+            guard success else {
+                self.loadTables(for: selectedDatabase, preservingSelection: true)
+                return
+            }
+
+            self.databaseListNeedsLoad = true
+            self.requestLightweightDatabases(forceReload: true)
+            self.selectLightweightDatabaseInToolbar(targetDatabase)
+            self.loadTables(for: targetDatabase)
+            self.postLightweightDatabaseCreatedRemovedRenamedNotification()
+        }
+    }
+
+    @objc func renameLightweightDatabase(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.renameDatabase()
+            return
+        }
+
+        guard let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        guard let newDatabaseName = promptForLightweightName(title: NSLocalizedString("Rename Database", comment: "rename database sheet title"),
+                                                             message: String(format: NSLocalizedString("Rename database '%@' to:", comment: "rename database message"), selectedDatabase),
+                                                             defaultValue: selectedDatabase,
+                                                             buttonTitle: NSLocalizedString("Rename", comment: "rename button"),
+                                                             nameValidator: lightweightDatabaseNameLiveValidator()) else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        guard newDatabaseName != selectedDatabase else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        guard validateLightweightDatabaseName(newDatabaseName, ignoring: selectedDatabase) else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        runLightweightDatabaseRenameMutation(from: selectedDatabase,
+                                              to: newDatabaseName,
+                                              status: String(format: NSLocalizedString("Renaming %@...", comment: "Renaming database task string"), selectedDatabase)) { [weak self] success in
+            guard let self = self else { return }
+            guard success else {
+                self.loadTables(for: selectedDatabase, preservingSelection: true)
+                return
+            }
+            self.applyLightweightDatabaseRename(from: selectedDatabase, to: newDatabaseName)
+            self.postLightweightDatabaseCreatedRemovedRenamedNotification()
+        }
+    }
+
+    @objc func alterLightweightDatabase(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.alterDatabase()
+            return
+        }
+
+        guard let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        guard let alterDetails = promptForLightweightDatabaseAlter(database: selectedDatabase),
+              let encoding = alterDetails.encoding, !encoding.isEmpty else {
+            selectLightweightDatabaseInToolbar(selectedDatabase)
+            return
+        }
+
+        let tableToRestore = selectedTable
+        let viewModeToRestore = activeLightweightViewMode
+        runLightweightDatabaseAlterMutation(database: selectedDatabase,
+                                            encoding: encoding,
+                                            collation: alterDetails.collation) { [weak self] _ in
+            guard let self = self else { return }
+            self.loadTables(for: selectedDatabase,
+                            preservingSelection: tableToRestore != nil,
+                            restoringTable: tableToRestore,
+                            restoringViewMode: viewModeToRestore)
+        }
+    }
+
+    @objc func flushLightweightPrivileges(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.flushPrivileges()
+            return
+        }
+
+        guard let activeConnection = activeConnection else {
+            NSSound.beep()
+            return
+        }
+
+        let databaseToRestore = selectedDatabase
+        let tableToRestore = selectedTable
+        let viewModeToRestore = activeLightweightViewMode
+        showLightweightPlaceholder(NSLocalizedString("Flushing privileges...", comment: "flushing privileges task string"))
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
+            guard let self = self, let activeConnection = activeConnection else { return }
+
+            _ = activeConnection.queryString("FLUSH PRIVILEGES")
+            let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
+
+            DispatchQueue.main.async {
+                if databaseToRestore == nil, self.selectedDatabase == nil {
+                    self.showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
+                } else if let tableToRestore = tableToRestore, self.lightweightTables.contains(tableToRestore) {
+                    self.activeLightweightViewMode = viewModeToRestore
+                    self.selectLightweightTable(tableToRestore, recordsHistory: false)
+                } else if viewModeToRestore == .query {
+                    self.activeLightweightViewMode = viewModeToRestore
+                    self.showLightweightQuery()
+                } else {
+                    self.showLightweightPlaceholder(self.lightweightTables.isEmpty
+                        ? NSLocalizedString("No tables in this database.", comment: "lightweight database shell no tables")
+                        : NSLocalizedString("Select a table or choose a toolbar section.", comment: "lightweight database shell table loaded empty state"))
+                }
+
+                if let error = error, !error.isEmpty {
+                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                              message: String(format: NSLocalizedString("Couldn't flush privileges.\nMySQL said: %@", comment: "message of panel when flushing privs failed"), error))
+                    return
+                }
+
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = NSLocalizedString("Flushed Privileges", comment: "title of panel when successfully flushed privs")
+                alert.informativeText = NSLocalizedString("Successfully flushed privileges.", comment: "message of panel when successfully flushed privs")
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+                _ = self.runLightweightModalAlert(alert)
+            }
+        }
+    }
+
+    @objc func openLightweightDatabaseInNewTab(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.openDatabaseInNewTab()
+            return
+        }
+
+        guard selectedDatabase != nil,
+              let state = lightweightConnectionStateDictionary(includePasswords: true, includeSession: true, includeQuery: true)?.mutableCopy() as? NSMutableDictionary else {
+            NSSound.beep()
+            return
+        }
+
+        if let session = (state[SALightweightConnectionStateKey.lightweightSession] as? NSDictionary)?.mutableCopy() as? NSMutableDictionary {
+            session.removeObject(forKey: SALightweightWindowSessionSnapshotKey.selectedTable)
+            session[SALightweightWindowSessionSnapshotKey.viewMode] = SAViewMode.structure.rawValue
+            state[SALightweightConnectionStateKey.lightweightSession] = session
+        }
+
+        NotificationCenter.default.post(name: .SPDocumentDuplicateTab, object: nil, userInfo: [
+            "isLightweight": true,
+            "lightweightState": state
+        ])
+    }
+
     @objc func refreshLightweightTables() {
         if let document = loadedDatabaseDocument {
             document.refreshTables()
@@ -2988,7 +4033,81 @@ private extension SPWindowController {
     }
 
     @objc func showUserManager() {
-        installLegacyDatabaseDocumentIfNeeded().showUserManager()
+        if let document = loadedDatabaseDocument {
+            document.showUserManager()
+            return
+        }
+
+        guard let activeConnection = activeConnection, let window = window else {
+            NSSound.beep()
+            return
+        }
+
+        let userManager = SPUserManager()
+        userManager.connection = activeConnection
+        userManager.databaseProvider = self
+
+        guard userManager.validateUserManagementAccessShowingAlert() else { return }
+
+        lightweightUserManager = userManager
+        userManager.beginSheetModal(for: window) { [weak self, weak userManager] in
+            guard let self = self, self.lightweightUserManager === userManager else { return }
+            self.lightweightUserManager = nil
+        }
+    }
+
+    @objc func showLightweightServerVariables(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.showServerVariables()
+            return
+        }
+
+        guard let activeConnection = activeConnection, let window = window else {
+            NSSound.beep()
+            return
+        }
+
+        lightweightServerVariablesController.connection = activeConnection
+        lightweightServerVariablesController.perform(NSSelectorFromString("displayServerVariablesSheetAttachedToWindow:"), with: window)
+    }
+
+    @objc func showLightweightServerProcesses(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.showServerProcesses()
+            return
+        }
+
+        guard let activeConnection = activeConnection else {
+            NSSound.beep()
+            return
+        }
+
+        lightweightProcessListController.connection = activeConnection
+        lightweightProcessListController.displayProcessListWindow()
+        lightweightProcessListController.window?.title = String(format: NSLocalizedString("Server Processes on %@", comment: "server processes window title (var = hostname)"), lightweightConnectionDisplayName())
+    }
+
+    @objc func shutdownLightweightServer(_ sender: Any?) {
+        if let document = loadedDatabaseDocument {
+            document.shutdownServer()
+            return
+        }
+
+        guard let activeConnection = activeConnection else {
+            NSSound.beep()
+            return
+        }
+
+        NSAlert.createDefaultAlert(title: NSLocalizedString("Do you really want to shutdown the server?", comment: "shutdown server : confirmation dialog : title"),
+                                   message: NSLocalizedString("This will wait for open transactions to complete and then quit the mysql daemon. Afterwards neither you nor anyone else can connect to this database!\n\nFull management access to the server's operating system is required to restart MySQL!", comment: "shutdown server : confirmation dialog : message"),
+                                   primaryButtonTitle: NSLocalizedString("Shutdown", comment: "shutdown server : confirmation dialog : shutdown button"),
+                                   primaryButtonHandler: {
+            if !activeConnection.serverShutdown(), activeConnection.isConnected() {
+                NSAlert.createWarningAlert(title: NSLocalizedString("Shutdown failed!", comment: "shutdown server : error dialog : title"),
+                                           message: String(format: NSLocalizedString("MySQL said:\n%@", comment: "shutdown server : error dialog : message"), activeConnection.lastErrorMessage() ?? ""),
+                                           callback: nil)
+            }
+        }, cancelButtonHandler: nil)
     }
 
     @objc func showConsole() {
@@ -3388,6 +4507,20 @@ extension SPWindowController: SADatabaseDocumentProviding {
     }
 }
 
+extension SPWindowController: SPUserManagerDatabaseProviding {
+    @objc func userManagerDatabaseNames() -> [Any] {
+        if let document = loadedDatabaseDocument {
+            return document.allDatabaseNames() as? [Any] ?? []
+        }
+
+        if !lightweightDatabases.isEmpty {
+            return lightweightDatabases
+        }
+
+        return activeConnection?.databases() as? [Any] ?? []
+    }
+}
+
 extension SPWindowController: SAConnectionDelegate {
     @objc func connectionDidEstablish(_ connection: SPMySQLConnection, info: SAConnectionInfoObjC) {
         activeConnection = connection
@@ -3400,6 +4533,7 @@ extension SPWindowController: SAConnectionDelegate {
         selectedTable = nil
         databaseListNeedsLoad = true
 
+        applyLightweightDefaultEncodingPreference()
         updateLightweightWindowTitle()
         updateWindowAccessory(color: SPFavoriteColorSupport.sharedInstance().color(for: info.colorIndex),
                               isSSL: connection.isConnectedViaSSL())
@@ -3460,6 +4594,26 @@ private extension SPWindowController {
                                               database: lightweightConsoleDatabaseName())
     }
 
+    private func lightweightConnectionDisplayName() -> String {
+        if let activeConnectionName, !activeConnectionName.isEmpty {
+            return activeConnectionName
+        }
+
+        let user = activeConnectionInfo?.user.isEmpty == false ? activeConnectionInfo!.user : "anonymous"
+        let host: String
+        if activeConnectionInfo?.type == .socket {
+            host = "localhost"
+        } else if let infoHost = activeConnectionInfo?.host, !infoHost.isEmpty {
+            host = infoHost
+        } else if let connectionHost = activeConnection?.host, !connectionHost.isEmpty {
+            host = connectionHost
+        } else {
+            host = ""
+        }
+
+        return "\(user)@\(host)"
+    }
+
     private func lightweightConsoleConnectionName() -> String {
         if let activeConnectionName, !activeConnectionName.isEmpty {
             return activeConnectionName
@@ -3494,40 +4648,7 @@ extension SPWindowController: SADatabaseToolbarControllerDelegate {
     }
 
     func databaseToolbarDidRequestAddDatabase(_ controller: SADatabaseToolbarController) {
-        if let document = loadedDatabaseDocument {
-            document.addDatabase(nil)
-            return
-        }
-
-        guard let databaseDetails = promptForLightweightDatabase() else {
-            if let selectedDatabase = selectedDatabase {
-                selectLightweightDatabaseInToolbar(selectedDatabase)
-            }
-            return
-        }
-        let databaseName = databaseDetails.name
-        guard !lightweightDatabases.contains(where: { $0.caseInsensitiveCompare(databaseName) == .orderedSame }) else {
-            showLightweightError(title: NSLocalizedString("Error", comment: "error"),
-                                 message: String(format: NSLocalizedString("The name '%@' is already used.", comment: "message when trying to rename a table/view/proc/etc to an already used name"), databaseName))
-            return
-        }
-
-        var options: [String] = []
-        if let encoding = databaseDetails.encoding {
-            options.append("DEFAULT CHARACTER SET = \(Self.backtickQuoted(encoding))")
-        }
-        if let collation = databaseDetails.collation {
-            options.append("DEFAULT COLLATE = \(Self.backtickQuoted(collation))")
-        }
-
-        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Creating %@...", comment: "Creating database task string"), databaseName),
-                                       statement: "CREATE DATABASE \(Self.backtickQuoted(databaseName)) \(options.joined(separator: " "))") { [weak self] success in
-            guard let self = self, success else { return }
-            self.databaseListNeedsLoad = true
-            self.requestLightweightDatabases(forceReload: true)
-            self.selectLightweightDatabaseInToolbar(databaseName)
-            self.loadTables(for: databaseName)
-        }
+        addLightweightDatabase(nil)
     }
 
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectDatabase database: String) {

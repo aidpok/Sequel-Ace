@@ -31,9 +31,12 @@
 @class SPServerSupport;
 @class SPMySQLConnection;
 @class SPSplitView;
-@class SPDatabaseDocument;
 @class SPUserMO;
 @class SPPrivilegesMO;
+
+@protocol SPUserManagerDatabaseProviding <NSObject>
+- (NSArray *)userManagerDatabaseNames;
+@end
 
 @interface SPUserManager : NSWindowController
 {	
@@ -43,7 +46,7 @@
 	NSDictionary *privColumnToGrantMap;
 	
 	SPMySQLConnection *connection;
-	SPDatabaseDocument *__weak databaseDocument;
+	id<SPUserManagerDatabaseProviding> __weak databaseProvider;
 	SPServerSupport *serverSupport;
 
 	IBOutlet SPSplitView *splitView;
@@ -86,7 +89,7 @@
 }
 
 @property (nonatomic, strong) SPMySQLConnection *connection;
-@property (nonatomic, weak) SPDatabaseDocument *databaseDocument;
+@property (nonatomic, weak) id<SPUserManagerDatabaseProviding> databaseProvider;
 @property (nonatomic, strong) SPServerSupport *serverSupport;
 @property (nonatomic, strong) NSPersistentStoreCoordinator *persistentStoreCoordinator;
 @property (nonatomic, strong, readonly) NSManagedObjectModel *managedObjectModel;
@@ -120,6 +123,7 @@
 
 // Refresh
 - (IBAction)refresh:(id)sender;
+- (BOOL)validateUserManagementAccessShowingAlert;
 
 // Core data notifications
 - (BOOL)insertUser:(SPUserMO *)user;

@@ -35,7 +35,6 @@
 #import "SPConnectionController.h"
 #import "SPServerSupport.h"
 #import "SPSplitView.h"
-#import "SPDatabaseDocument.h"
 
 #import <SPMySQL/SPMySQL.h> 
 
@@ -74,7 +73,7 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
 @implementation SPUserManager
 
 @synthesize connection;
-@synthesize databaseDocument;
+@synthesize databaseProvider;
 @synthesize privsSupportedByServer;
 @synthesize managedObjectContext;
 @synthesize managedObjectModel;
@@ -370,7 +369,7 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
     SPLog(@"_initializeSchemaPrivs called.");
 	// Initialize Databases
 	[schemas removeAllObjects];
-	[schemas addObjectsFromArray:[databaseDocument allDatabaseNames]];
+	[schemas addObjectsFromArray:[databaseProvider userManagerDatabaseNames] ?: @[]];
 
 	[schemasTableView reloadData];
 }
@@ -527,6 +526,19 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
 	[docWindow beginSheet:self.window completionHandler:^(NSModalResponse returnCode) {
 		callback();
 	}];
+}
+
+- (BOOL)validateUserManagementAccessShowingAlert
+{
+	// Before displaying the user manager make sure the current user has access to the mysql.user table.
+	SPMySQLResult *result = [connection queryString:@"SELECT user FROM mysql.user LIMIT 1"];
+
+	if ([connection queryErrored] && ([result numberOfRows] == 0)) {
+		[NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Unable to get list of users", @"unable to get list of users message") message:NSLocalizedString(@"An error occurred while trying to get the list of users. Please make sure you have the necessary privileges to perform user management, including access to the mysql.user table.", @"unable to get list of users informative message") callback:nil];
+		return NO;
+	}
+
+	return YES;
 }
 
 #pragma mark -

@@ -53,6 +53,7 @@
 @class SPHelpViewerClient;
 @class SPDataImport;
 @class SATaskController;
+@protocol SPUserManagerDatabaseProviding;
 
 #import "SPDatabaseContentViewDelegate.h"
 #import "SPConnectionControllerDelegateProtocol.h"
@@ -65,7 +66,7 @@
 /**
  * The SPDatabaseDocument class controls the primary database view window.
  */
-@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, NSMenuDelegate, SPCountedObject, WebFrameLoadDelegate>
+@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, NSMenuDelegate, SPCountedObject, WebFrameLoadDelegate, SPUserManagerDatabaseProviding>
 {
 	// IBOutlets
 	IBOutlet SPTablesList *tablesListInstance;
