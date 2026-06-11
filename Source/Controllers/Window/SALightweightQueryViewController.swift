@@ -3396,6 +3396,18 @@ private extension SALightweightQueryViewController {
 }
 
 extension SALightweightQueryViewController {
+    func exportResultRowCount() -> Int {
+        return currentResultRowCount()
+    }
+
+    func exportDataResult(withNULLs includeNULLs: Bool, truncateDataFields truncate: Bool) -> [[Any]] {
+        return currentDataResult(withNULLs: includeNULLs, truncateDataFields: truncate)
+    }
+
+    func exportUsedQuery() -> String {
+        return usedQuery()
+    }
+
     @objc(processFieldEditorResult:contextInfo:)
     func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
         defer {

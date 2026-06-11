@@ -178,6 +178,52 @@ private final class SALightweightSaveConnectionAccessory: NSObject {
     }
 }
 
+private let SALightweightSQLImportMaximumInMemoryFileSize: Int64 = 16 * 1024 * 1024
+
+private final class SALightweightSQLImportEncodingAccessory {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 34))
+    private let popup = NSPopUpButton(frame: NSRect(x: 74, y: 4, width: 246, height: 26), pullsDown: false)
+    private let encodings: [String.Encoding] = [
+        .utf8,
+        .isoLatin1,
+        .ascii,
+        .macOSRoman,
+        .windowsCP1250,
+        .windowsCP1251,
+        .windowsCP1252,
+        .windowsCP1253,
+        .windowsCP1254,
+        .shiftJIS,
+        .japaneseEUC,
+        .iso2022JP,
+        .utf16,
+        .utf16BigEndian,
+        .utf16LittleEndian
+    ]
+
+    init(selectedEncoding: String.Encoding) {
+        let label = NSTextField(labelWithString: NSLocalizedString("Encoding:", comment: "encoding popup label"))
+        label.frame = NSRect(x: 0, y: 8, width: 68, height: 18)
+        label.alignment = .right
+        view.addSubview(label)
+
+        for encoding in encodings {
+            popup.addItem(withTitle: String.localizedName(of: encoding))
+            popup.lastItem?.tag = Int(encoding.rawValue)
+        }
+        if popup.itemArray.first(where: { $0.tag == Int(selectedEncoding.rawValue) }) == nil {
+            popup.addItem(withTitle: String.localizedName(of: selectedEncoding))
+            popup.lastItem?.tag = Int(selectedEncoding.rawValue)
+        }
+        popup.selectItem(withTag: Int(selectedEncoding.rawValue))
+        view.addSubview(popup)
+    }
+
+    var selectedEncoding: String.Encoding {
+        return String.Encoding(rawValue: UInt(popup.selectedItem?.tag ?? Int(String.Encoding.utf8.rawValue)))
+    }
+}
+
 private struct SALightweightEncodingChoice {
     let title: String
     let name: String?
@@ -289,6 +335,13 @@ private final class SALightweightLegacySheetController: NSObject, NSTextFieldDel
 
 private extension Notification.Name {
     static let lightweightResumeStateDidChange = Notification.Name("SALightweightResumeStateDidChangeNotification")
+}
+
+private enum SALightweightExportSource {
+    // Swift does not import the Objective-C SPExportSource cases by name here.
+    // Keep the bridge to Source/Other/Data/SPConstants.h in one place instead of scattering raw values.
+    static let filteredResult = SPExportSource(rawValue: 0)!
+    static let queryResult = SPExportSource(rawValue: 1)!
 }
 
 private enum SALightweightTableObjectType: Int {
@@ -654,6 +707,7 @@ final class SALightweightSessionState {
     private let lightweightConsoleLoggingLock = NSLock()
     private var lightweightConsoleQueryMode = 0
     private let lightweightConsoleLogger = SALightweightConsoleLogger()
+    private var isLightweightImportRunning = false
 
     private var selectedDatabase: String?
     private var databaseListNeedsLoad = true
@@ -681,6 +735,7 @@ final class SALightweightSessionState {
     private lazy var lightweightProcessListController = SPProcessListController()
     private var lightweightUserManager: SPUserManager?
     private lazy var lightweightGotoDatabaseController = SPGotoDatabaseController()
+    private var lightweightExportController: SPExportController?
     private lazy var lightweightFilterTableController: SPFilterTableController = {
         let controller = SPFilterTableController()
         controller.target = self
@@ -3710,6 +3765,177 @@ private extension SPWindowController {
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
     }
 
+    @objc func canExportLightweightData() -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+
+        switch activeLightweightViewMode {
+        case .content:
+            return lightweightContentController.exportResultRowCount() > 0
+        case .query:
+            return lightweightQueryController.exportResultRowCount() > 0
+        default:
+            return false
+        }
+    }
+
+    @objc func exportData() {
+        if let document = loadedDatabaseDocument {
+            document.exportData()
+            return
+        }
+
+        guard hasActiveLightweightConnection,
+              let activeConnection = activeConnection,
+              canExportLightweightData() else {
+            NSSound.beep()
+            return
+        }
+
+        let filteredSource = SALightweightExportSource.filteredResult
+        let querySource = SALightweightExportSource.queryResult
+        let source: SPExportSource = (activeLightweightViewMode == .content) ? filteredSource : querySource
+        let isContentExport = source == filteredSource
+        let isQueryExport = source == querySource
+        let contentResult = isContentExport ? lightweightContentController.exportDataResult(withNULLs: true) : []
+        let queryResult = isQueryExport ? lightweightQueryController.exportDataResult(withNULLs: true, truncateDataFields: false) : []
+        let tablesAndViews = lightweightTables.filter { table in
+            let type = lightweightTableTypes[table] ?? .table
+            return type == .table || type == .view
+        }
+        let procedures = lightweightTables.filter { lightweightTableTypes[$0] == .procedure }
+        let functions = lightweightTables.filter { lightweightTableTypes[$0] == .function }
+        let selectedTables = selectedTable.map { [$0] } ?? []
+        let controller = SPExportController()
+
+        let database = selectedDatabase ?? ""
+        let host = activeConnection.host ?? activeConnectionInfo?.host ?? ""
+        let serverVersion = activeServerVersion ?? ""
+        let selectedTableName = selectedTable ?? ""
+        let favoriteName = activeConnectionName ?? lightweightConnectionDisplayName()
+        let contentQuery = isContentExport ? lightweightContentController.exportUsedQuery() : ""
+        let queryString = isQueryExport ? lightweightQueryController.exportUsedQuery() : ""
+
+        controller.configure(forLightweightWindowController: self,
+                             connection: activeConnection,
+                             serverSupport: nil,
+                             database: database,
+                             host: host,
+                             serverVersion: serverVersion,
+                             selectedTableName: selectedTableName,
+                             favoriteName: favoriteName,
+                             tablesAndViewNames: tablesAndViews,
+                             procedureNames: procedures,
+                             functionNames: functions,
+                             selectedTableItems: selectedTables,
+                             contentResult: contentResult,
+                             contentQuery: contentQuery,
+                             queryResult: queryResult,
+                             queryString: queryString,
+                             preferredSource: source)
+        lightweightExportController = controller
+        controller.exportData()
+    }
+
+    @objc func canImportLightweightSQL() -> Bool {
+        return activeConnection != nil
+            && selectedDatabase?.isEmpty == false
+            && loadedDatabaseDocument == nil
+            && !isLightweightConnectionBusyForImport()
+    }
+
+    @objc func canImportLightweightSQLFromClipboard() -> Bool {
+        guard canImportLightweightSQL() else { return false }
+        return NSPasteboard.general.availableType(from: [.string]) != nil
+    }
+
+    @objc func importLightweightSQLFile(_ sender: Any?) {
+        guard canImportLightweightSQL() else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        switch lightweightImportRouteChoice() {
+        case .lightweight:
+            break
+        case .legacy:
+            startLegacyFileImportFlow()
+            return
+        case .cancel:
+            return
+        }
+
+        let prefs = UserDefaults.standard
+        if prefs.integer(forKey: SPLastSQLFileEncoding) == 0 {
+            prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
+        }
+
+        let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
+        let encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
+        let panel = NSOpenPanel()
+        panel.allowedFileTypes = [SPFileExtensionSQL as String]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.accessoryView = encodingAccessory.view
+        panel.message = NSLocalizedString("Lightweight windows can import SQL files. CSV import requires the full database view.", comment: "lightweight SQL import panel message")
+
+        if let openPath = prefs.string(forKey: "exportPath"), !openPath.isEmpty {
+            panel.directoryURL = URL(string: openPath) ?? URL(fileURLWithPath: openPath)
+        }
+
+        panel.beginSheetModal(for: window ?? NSApp.keyWindow ?? NSWindow()) { [weak self] response in
+            guard let self = self, response == .OK, let url = panel.url else { return }
+
+            prefs.set(panel.directoryURL?.path, forKey: "exportPath")
+            prefs.set(encodingAccessory.selectedEncoding.rawValue, forKey: SPLastSQLFileEncoding)
+
+            guard self.validateLightweightSQLImportFileSize(url: url) else { return }
+            guard self.confirmLightweightSQLImport(sourceName: url.lastPathComponent) else { return }
+            self.startLightweightSQLImport(url: url, encoding: encodingAccessory.selectedEncoding)
+        }
+    }
+
+    @objc func importLightweightSQLFromClipboard(_ sender: Any?) {
+        guard canImportLightweightSQL() else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        guard let clipboardSQL = NSPasteboard.general.string(forType: .string),
+              !clipboardSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import From Clipboard", comment: "import from clipboard title"),
+                                 message: NSLocalizedString("The clipboard does not contain SQL text to import.", comment: "lightweight import clipboard empty message"))
+            return
+        }
+
+        let clipboardSourceName = NSLocalizedString("clipboard", comment: "clipboard import source name")
+        guard confirmLightweightSQLImport(sourceName: clipboardSourceName) else { return }
+        runLightweightSQLImport(sql: clipboardSQL, sourceName: clipboardSourceName, encoding: .utf8)
+    }
+
+    @objc func canPrintLightweightDocument() -> Bool {
+        return lightweightPrintTarget() != nil
+    }
+
+    @objc func printLightweightDocument(_ sender: Any?) {
+        guard hasActiveLightweightConnection else { return }
+
+        guard let target = lightweightPrintTarget() else {
+            showLightweightPrintUnsupportedAlert()
+            return
+        }
+
+        if shouldWarnBeforePrintingLightweightContent(target) {
+            warnBeforePrintingLightweightContent(target) { [weak self] in
+                self?.runLightweightPrintOperation(for: target)
+            }
+            return
+        }
+
+        runLightweightPrintOperation(for: target)
+    }
+
     @objc func canAddLightweightConnectionToFavorites() -> Bool {
         guard hasActiveLightweightConnection,
               let connectionController = connectionController else { return false }
@@ -4974,6 +5200,335 @@ extension SPWindowController: SAConnectionDelegate {
 }
 
 private extension SPWindowController {
+    enum LightweightSQLImportErrorChoice {
+        case `continue`
+        case ignoreAll
+        case stop
+    }
+
+    enum LightweightImportRouteChoice {
+        case lightweight
+        case legacy
+        case cancel
+    }
+
+    func isLightweightConnectionBusyForImport() -> Bool {
+        return isLightweightImportRunning || processing || databaseListIsLoading
+    }
+
+    func showLightweightImportUnavailableReason() {
+        NSSound.beep()
+        if isLightweightConnectionBusyForImport() {
+            showLightweightError(title: NSLocalizedString("Import Unavailable", comment: "lightweight import unavailable title"),
+                                 message: NSLocalizedString("Wait for the current lightweight import, export, or connection task to finish before importing.", comment: "lightweight import busy message"))
+            return
+        }
+
+        showLightweightError(title: NSLocalizedString("Import Unavailable", comment: "lightweight import unavailable title"),
+                             message: NSLocalizedString("Select a database in the active lightweight connection before importing SQL.", comment: "lightweight import unavailable message"))
+    }
+
+    func lightweightImportRouteChoice() -> LightweightImportRouteChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("Import", comment: "import title")
+        alert.informativeText = NSLocalizedString("Lightweight import supports small SQL files only. Choose the full database view for CSV, compressed files, large SQL dumps, or SQL that changes SQL_MODE while importing.", comment: "lightweight import route choice message")
+        alert.addButton(withTitle: NSLocalizedString("Choose SQL File", comment: "lightweight import choose sql file button"))
+        alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+        switch runLightweightModalAlert(alert) {
+        case .alertFirstButtonReturn:
+            return .lightweight
+        case .alertSecondButtonReturn:
+            return .legacy
+        default:
+            return .cancel
+        }
+    }
+
+    func startLegacyFileImportFlow() {
+        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).importFile()
+    }
+
+    func confirmLightweightSQLImport(sourceName: String) -> Bool {
+        guard let selectedDatabase = selectedDatabase else { return false }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Import SQL", comment: "lightweight SQL import confirmation title")
+        let limitation = NSLocalizedString("Lightweight import pre-splits SQL before execution, so dumps that change SQL_MODE/NO_BACKSLASH_ESCAPES during import should use the full database view.", comment: "lightweight SQL import limitation warning")
+        if lightweightTables.isEmpty {
+            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”?", comment: "lightweight SQL import confirmation message"), sourceName, selectedDatabase) + "\n\n" + limitation
+        } else {
+            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”? The current database already has tables, so the import may overwrite data.", comment: "lightweight SQL import overwrite warning"), sourceName, selectedDatabase) + "\n\n" + limitation
+        }
+        alert.addButton(withTitle: NSLocalizedString("Import", comment: "import button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        return runLightweightModalAlert(alert) == .alertFirstButtonReturn
+    }
+
+    func validateLightweightSQLImportFileSize(url: URL) -> Bool {
+        let fileSize: Int64
+        do {
+            let values = try url.resourceValues(forKeys: [.fileSizeKey])
+            fileSize = Int64(values.fileSize ?? 0)
+        } catch {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import Error", comment: "Import Error title"),
+                                 message: NSLocalizedString("The SQL file you selected could not be inspected.", comment: "lightweight SQL import file inspection error"))
+            return false
+        }
+
+        guard fileSize <= SALightweightSQLImportMaximumInMemoryFileSize else {
+            NSSound.beep()
+            let maximumSize = ByteCountFormatter.string(fromByteCount: SALightweightSQLImportMaximumInMemoryFileSize, countStyle: .file)
+            let selectedSize = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = NSLocalizedString("Import Requires Full Database View", comment: "lightweight SQL import size gate title")
+            alert.informativeText = String(format: NSLocalizedString("This lightweight import path currently supports SQL files up to %@. The selected file is %@. Large SQL files require the full database view, which uses the legacy streaming importer.", comment: "lightweight SQL import size gate message"), maximumSize, selectedSize)
+            alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+            if runLightweightModalAlert(alert) == .alertFirstButtonReturn {
+                startLegacyFileImportFlow()
+            }
+            return false
+        }
+
+        return true
+    }
+
+    func startLightweightSQLImport(url: URL, encoding: String.Encoding) {
+        showLightweightPlaceholder(String(format: NSLocalizedString("Reading %@...", comment: "lightweight SQL import reading status"), url.lastPathComponent))
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let sql = try String(contentsOf: url, encoding: encoding)
+                DispatchQueue.main.async {
+                    self?.runLightweightSQLImport(sql: sql, sourceName: url.lastPathComponent, encoding: encoding)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    NSSound.beep()
+                    self?.showLightweightError(title: NSLocalizedString("File read error", comment: "File read error title (Import Dialog)"),
+                                               message: String(format: NSLocalizedString("The SQL file could not be read using %@.", comment: "lightweight SQL import encoding read error"), String.localizedName(of: encoding)))
+                }
+            }
+        }
+    }
+
+    func runLightweightSQLImport(sql: String, sourceName: String, encoding: String.Encoding) {
+        guard !isLightweightConnectionBusyForImport() else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        guard let connection = activeConnection, let database = selectedDatabase else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        let queries = lightweightSQLQueries(in: sql)
+        guard !queries.isEmpty else {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import SQL", comment: "lightweight SQL import confirmation title"),
+                                 message: NSLocalizedString("No SQL statements were found to import.", comment: "lightweight SQL import no statements message"))
+            return
+        }
+
+        isLightweightImportRunning = true
+        processing = true
+        showLightweightPlaceholder(String(format: NSLocalizedString("Importing %@...", comment: "lightweight SQL import status"), sourceName))
+        setLightweightConsoleQueryMode(2)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, connection] in
+            guard let self = self else { return }
+            let oldRetryQueries = connection.retryQueriesOnConnectionFailure
+            connection.retryQueriesOnConnectionFailure = false
+
+            var errors: [String] = []
+            var queriesPerformed = 0
+            var progressCancelled = false
+            var ignoreSQLErrors = false
+            var ignoreCharsetError = false
+            var connectionEncodingToRestore: String?
+            var sqlModeToRestore: String?
+
+            defer {
+                if let connectionEncodingToRestore = connectionEncodingToRestore {
+                    _ = connection.queryString("SET NAMES '\(connectionEncodingToRestore)'")
+                }
+                if let sqlModeToRestore = sqlModeToRestore {
+                    _ = connection.queryString("SET SQL_MODE=\(Self.sqlSingleQuoted(sqlModeToRestore))")
+                }
+                connection.retryQueriesOnConnectionFailure = oldRetryQueries
+
+                DispatchQueue.main.async {
+                    self.isLightweightImportRunning = false
+                    self.processing = false
+                    self.setLightweightConsoleQueryMode(0)
+                    self.requestLightweightDatabases(forceReload: true)
+                    self.loadTables(for: database, preservingSelection: true)
+
+                    if errors.isEmpty {
+                        let alert = NSAlert()
+                        alert.messageText = NSLocalizedString("Import Complete", comment: "lightweight SQL import complete title")
+                        alert.informativeText = String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), queriesPerformed, sourceName)
+                        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+                        _ = self.runLightweightModalAlert(alert)
+                    } else {
+                        self.showLightweightSQLImportErrors(errors.joined(separator: "\n"))
+                    }
+                }
+            }
+
+            _ = connection.selectDatabase(database)
+
+            if let mysqlCharset = Self.mysqlCharset(for: encoding), let currentEncoding = connection.encoding(), !currentEncoding.isEmpty {
+                connectionEncodingToRestore = currentEncoding
+                _ = connection.queryString("SET NAMES '\(mysqlCharset)'")
+            }
+
+            if let result = connection.queryString("SELECT @@sql_mode") {
+                result.returnDataAsStrings = true
+                result.defaultRowReturnType = SPMySQLResultRowAsArray
+                if let row = result.getRowAsArray() as? [Any], let sqlMode = row.first as? String {
+                    sqlModeToRestore = sqlMode
+                }
+            }
+
+            for (index, query) in queries.enumerated() {
+                if progressCancelled { break }
+
+                if !connection.isConnected() && (connection.userTriggeredDisconnect() || !connection.check()) {
+                    errors.append(NSLocalizedString("The connection to the server was lost during the import. The import is only partially complete.", comment: "Connection lost during import error message"))
+                    break
+                }
+
+                _ = connection.queryString(query, usingEncoding: encoding.rawValue, with: SPMySQLResultAsResult)
+
+                if connection.queryErrored(), connection.lastErrorMessage() != "Query was empty" {
+                    let error = connection.lastErrorMessage() ?? NSLocalizedString("Unknown MySQL error.", comment: "unknown mysql error")
+                    errors.append(String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error))
+
+                    if connection.lastErrorID() == 1115,
+                       error.range(of: "utf8mb4", options: .caseInsensitive) != nil,
+                       query.range(of: "SET NAMES", options: .caseInsensitive) != nil,
+                       !ignoreCharsetError {
+                        let shouldContinue = DispatchQueue.main.sync {
+                            self.confirmLightweightCharsetImportError()
+                        }
+                        if shouldContinue {
+                            ignoreCharsetError = true
+                        } else {
+                            errors.append(NSLocalizedString("Import cancelled!", comment: "import cancelled message"))
+                            progressCancelled = true
+                        }
+                    } else if !ignoreSQLErrors {
+                        let choice = DispatchQueue.main.sync {
+                            self.lightweightSQLImportErrorChoice(error)
+                        }
+                        switch choice {
+                        case .continue:
+                            break
+                        case .ignoreAll:
+                            ignoreSQLErrors = true
+                        case .stop:
+                            errors.append(NSLocalizedString("Import cancelled!", comment: "import cancelled message"))
+                            progressCancelled = true
+                        }
+                    }
+                }
+
+                queriesPerformed += 1
+            }
+        }
+    }
+
+    func lightweightSQLQueries(in text: String) -> [String] {
+        // Bounded lightweight imports intentionally pre-split SQL. Unlike the legacy
+        // streaming importer, this cannot adjust parser noBackslashEscapes after
+        // mid-file SQL_MODE changes; the confirmation alert routes those dumps to
+        // the full database view.
+        let parser = SPSQLParser(string: text)
+        parser.setDelimiterSupport(true)
+        guard let rawQueries = parser.splitString(byCharacter: Character(";").utf16.first!) as? [String] else { return [] }
+
+        return rawQueries.compactMap { query in
+            let normalised = parser.containsCarriageReturns() ? (SPSQLParser.normaliseQuery(forExecution: query) ?? query) : query
+            let trimmed = normalised.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    func lightweightSQLImportErrorChoice(_ error: String) -> LightweightSQLImportErrorChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("An error occurred while importing SQL", comment: "sql import error message")
+        alert.informativeText = error
+        alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
+        alert.addButton(withTitle: NSLocalizedString("Ignore All Errors", comment: "ignore errors button"))
+        alert.addButton(withTitle: NSLocalizedString("Stop", comment: "stop button"))
+
+        switch runLightweightModalAlert(alert) {
+        case .alertFirstButtonReturn:
+            return .continue
+        case .alertSecondButtonReturn:
+            return .ignoreAll
+        default:
+            return .stop
+        }
+    }
+
+    func confirmLightweightCharsetImportError() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Incompatible encoding in SQL file", comment: "sql import error message")
+        alert.informativeText = NSLocalizedString("The SQL file uses utf8mb4 encoding, but your MySQL version only supports the limited utf8 subset. You can continue the import, but any non-BMP characters in the SQL file will be unrecoverably lost.", comment: "sql import charset error detail message")
+        alert.addButton(withTitle: NSLocalizedString("Import Anyway", comment: "sql import : charset error alert : continue button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        return runLightweightModalAlert(alert) == .alertFirstButtonReturn
+    }
+
+    func showLightweightSQLImportErrors(_ errors: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Import Errors", comment: "lightweight SQL import errors title")
+        alert.informativeText = errors
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        _ = runLightweightModalAlert(alert)
+    }
+
+    static func mysqlCharset(for encoding: String.Encoding) -> String? {
+        switch encoding {
+        case .utf8:
+            return "utf8mb4"
+        case .isoLatin1:
+            return "latin1"
+        case .ascii:
+            return "ascii"
+        case .windowsCP1250:
+            return "cp1250"
+        case .windowsCP1251:
+            return "cp1251"
+        case .shiftJIS:
+            return "sjis"
+        case .japaneseEUC:
+            return "ujis"
+        case .utf16, .utf16BigEndian, .utf16LittleEndian:
+            return "utf16"
+        default:
+            return nil
+        }
+    }
+
+    static func sqlSingleQuoted(_ value: String) -> String {
+        return "'\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))'"
+    }
+}
+
+private extension SPWindowController {
     func logLightweightConsoleQuery(_ query: String?) {
         guard let query = query, !query.isEmpty else { return }
 
@@ -5291,6 +5846,400 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
     private func isLightweightTableInfoView(_ tableView: NSTableView) -> Bool {
         return tableView.identifier == NSUserInterfaceItemIdentifier("LightweightTableInfo")
+    }
+}
+
+// MARK: - Lightweight Printing
+
+private struct SALightweightPrintTarget {
+    let sourceView: NSView
+    let title: String
+}
+
+private final class SALightweightPrintableTableView: NSView {
+    private let title: String
+    private let columns: [(title: String, width: CGFloat)]
+    private let rows: [[String]]
+    private let bodyFont: NSFont
+    private let headerFont: NSFont
+    private let drawsGridlines: Bool
+    private let margin: CGFloat = 36
+    private let titleHeight: CGFloat = 28
+    private let headerHeight: CGFloat = 22
+    private let rowHeight: CGFloat
+
+    override var isFlipped: Bool { true }
+
+    init(title: String, columns: [(title: String, width: CGFloat)], rows: [[String]], bodyFont: NSFont, headerFont: NSFont, drawsGridlines: Bool) {
+        self.title = title
+        self.columns = columns
+        self.rows = rows
+        self.bodyFont = bodyFont
+        self.headerFont = headerFont
+        self.drawsGridlines = drawsGridlines
+        self.rowHeight = max(18, ceil(bodyFont.ascender - bodyFont.descender + 8))
+
+        let contentWidth = columns.reduce(0) { $0 + $1.width }
+        let width = max(640, contentWidth + (margin * 2))
+        let height = margin + titleHeight + headerHeight + (CGFloat(max(rows.count, 1)) * rowHeight) + margin
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill()
+        bounds.fill()
+
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: 15),
+            .foregroundColor: NSColor.black
+        ]
+        title.draw(in: NSRect(x: margin, y: margin - 4, width: bounds.width - (margin * 2), height: titleHeight), withAttributes: titleAttributes)
+
+        guard !columns.isEmpty else { return }
+
+        let gridColor = NSColor(calibratedWhite: 0.78, alpha: 1)
+        let headerFill = NSColor(calibratedWhite: 0.92, alpha: 1)
+        let alternateFill = NSColor(calibratedWhite: 0.975, alpha: 1)
+        let headerAttributes = paragraphAttributes(font: headerFont, color: .black)
+        let bodyAttributes = paragraphAttributes(font: bodyFont, color: .black)
+
+        var y = margin + titleHeight
+        var x = margin
+
+        headerFill.setFill()
+        NSRect(x: margin, y: y, width: bounds.width - (margin * 2), height: headerHeight).fill()
+
+        for column in columns {
+            drawString(column.title, in: NSRect(x: x + 4, y: y + 3, width: column.width - 8, height: headerHeight - 4), attributes: headerAttributes)
+            if drawsGridlines {
+                drawLine(from: NSPoint(x: x, y: y), to: NSPoint(x: x, y: y + headerHeight), color: gridColor)
+            }
+            x += column.width
+        }
+        drawLine(from: NSPoint(x: margin, y: y), to: NSPoint(x: x, y: y), color: gridColor)
+        drawLine(from: NSPoint(x: margin, y: y + headerHeight), to: NSPoint(x: x, y: y + headerHeight), color: gridColor)
+        if drawsGridlines {
+            drawLine(from: NSPoint(x: x, y: y), to: NSPoint(x: x, y: y + headerHeight), color: gridColor)
+        }
+
+        y += headerHeight
+        if rows.isEmpty {
+            let emptyText = NSLocalizedString("No rows to print.", comment: "lightweight print empty table text")
+            drawString(emptyText, in: NSRect(x: margin + 4, y: y + 3, width: bounds.width - (margin * 2) - 8, height: rowHeight - 4), attributes: bodyAttributes)
+            drawLine(from: NSPoint(x: margin, y: y + rowHeight), to: NSPoint(x: x, y: y + rowHeight), color: gridColor)
+            return
+        }
+
+        for (rowIndex, row) in rows.enumerated() {
+            if rowIndex.isMultiple(of: 2) == false {
+                alternateFill.setFill()
+                NSRect(x: margin, y: y, width: bounds.width - (margin * 2), height: rowHeight).fill()
+            }
+
+            x = margin
+            for (columnIndex, column) in columns.enumerated() {
+                let value = columnIndex < row.count ? row[columnIndex] : ""
+                drawString(value, in: NSRect(x: x + 4, y: y + 3, width: column.width - 8, height: rowHeight - 4), attributes: bodyAttributes)
+                if drawsGridlines {
+                    drawLine(from: NSPoint(x: x, y: y), to: NSPoint(x: x, y: y + rowHeight), color: gridColor)
+                }
+                x += column.width
+            }
+            if drawsGridlines {
+                drawLine(from: NSPoint(x: x, y: y), to: NSPoint(x: x, y: y + rowHeight), color: gridColor)
+            }
+            drawLine(from: NSPoint(x: margin, y: y + rowHeight), to: NSPoint(x: x, y: y + rowHeight), color: gridColor)
+            y += rowHeight
+        }
+    }
+
+    private func paragraphAttributes(font: NSFont, color: NSColor) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        return [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]
+    }
+
+    private func drawString(_ string: String, in rect: NSRect, attributes: [NSAttributedString.Key: Any]) {
+        (string as NSString).draw(in: rect, withAttributes: attributes)
+    }
+
+    private func drawLine(from start: NSPoint, to end: NSPoint, color: NSColor) {
+        color.setStroke()
+        let path = NSBezierPath()
+        path.move(to: start)
+        path.line(to: end)
+        path.lineWidth = 0.5
+        path.stroke()
+    }
+}
+
+private final class SALightweightPrintableTextView: NSView {
+    private let title: String
+    private let attributedString: NSAttributedString
+    private let margin: CGFloat = 36
+    private let titleHeight: CGFloat = 28
+    private let contentWidth: CGFloat
+
+    override var isFlipped: Bool { true }
+
+    init(title: String, attributedString: NSAttributedString, font: NSFont) {
+        self.title = title
+        self.contentWidth = 720
+
+        let mutableString = NSMutableAttributedString(attributedString: attributedString)
+        mutableString.addAttribute(.font, value: font, range: NSRange(location: 0, length: mutableString.length))
+        mutableString.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: mutableString.length)) { value, range, _ in
+            guard value == nil else { return }
+            mutableString.addAttribute(.foregroundColor, value: NSColor.black, range: range)
+        }
+        self.attributedString = mutableString
+
+        let textHeight = max(24, ceil(mutableString.boundingRect(with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
+                                                                 options: [.usesLineFragmentOrigin, .usesFontLeading]).height))
+        super.init(frame: NSRect(x: 0, y: 0, width: contentWidth + (margin * 2), height: margin + titleHeight + textHeight + margin))
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill()
+        bounds.fill()
+
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: 15),
+            .foregroundColor: NSColor.black
+        ]
+        title.draw(in: NSRect(x: margin, y: margin - 4, width: contentWidth, height: titleHeight), withAttributes: titleAttributes)
+        attributedString.draw(with: NSRect(x: margin, y: margin + titleHeight, width: contentWidth, height: bounds.height - margin - titleHeight),
+                              options: [.usesLineFragmentOrigin, .usesFontLeading])
+    }
+}
+
+private extension SPWindowController {
+    func lightweightPrintTarget() -> SALightweightPrintTarget? {
+        guard activeConnection != nil, loadedDatabaseDocument == nil else { return nil }
+
+        switch activeLightweightViewMode {
+        case .content:
+            guard let tableView = findSubview(in: lightweightContentController.view, identifier: "TableContentTableView", type: NSTableView.self),
+                  tableView.numberOfColumns > 0 else { return nil }
+
+            let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
+            return SALightweightPrintTarget(sourceView: tableView,
+                                            title: String(format: NSLocalizedString("Table Content - %@", comment: "lightweight table content print job title"), tableName))
+
+        case .query:
+            let editor = lightweightQueryController.textView
+            if isLightweightQueryEditorActive(), !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return SALightweightPrintTarget(sourceView: editor,
+                                                title: NSLocalizedString("Query Editor", comment: "lightweight query editor print job title"))
+            }
+
+            if let tableView = findSubview(in: lightweightQueryController.view, identifier: "LightweightQueryTable", type: NSTableView.self),
+               tableView.numberOfColumns > 0,
+               tableView.numberOfRows > 0 {
+                return SALightweightPrintTarget(sourceView: tableView,
+                                                title: NSLocalizedString("Query Result", comment: "lightweight query result print job title"))
+            }
+
+            if !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return SALightweightPrintTarget(sourceView: editor,
+                                                title: NSLocalizedString("Query Editor", comment: "lightweight query editor print job title"))
+            }
+
+            return nil
+
+        case .structure:
+            guard let tableView = findSubview(in: lightweightStructureController.view, identifier: "TableStructureColumnsTableView", type: NSTableView.self),
+                  tableView.numberOfColumns > 0,
+                  tableView.numberOfRows > 0 else { return nil }
+
+            let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
+            return SALightweightPrintTarget(sourceView: tableView,
+                                            title: String(format: NSLocalizedString("Table Structure - %@", comment: "lightweight table structure print job title"), tableName))
+
+        case .status:
+            guard let tableView = firstTableView(in: lightweightTableInfoController.view),
+                  tableView.numberOfColumns > 0,
+                  tableView.numberOfRows > 0 else { return nil }
+
+            let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
+            return SALightweightPrintTarget(sourceView: tableView,
+                                            title: String(format: NSLocalizedString("Table Information - %@", comment: "lightweight table info print job title"), tableName))
+
+        case .relations, .triggers:
+            return nil
+        }
+    }
+
+    func isLightweightQueryEditorActive() -> Bool {
+        guard let firstResponder = window?.firstResponder else { return false }
+
+        let editor = lightweightQueryController.textView
+        if firstResponder === editor {
+            return true
+        }
+
+        guard let firstResponderView = firstResponder as? NSView else { return false }
+        return firstResponderView === editor || firstResponderView.isDescendant(of: editor)
+    }
+
+    func shouldWarnBeforePrintingLightweightContent(_ target: SALightweightPrintTarget) -> Bool {
+        guard activeLightweightViewMode == .content,
+              let tableView = target.sourceView as? NSTableView else { return false }
+
+        let rowLimit = UserDefaults.standard.integer(forKey: SPPrintWarningRowLimit)
+        return tableView.numberOfRows > rowLimit
+    }
+
+    func warnBeforePrintingLightweightContent(_ target: SALightweightPrintTarget, primaryButtonHandler: @escaping () -> Void) {
+        let rowCount = (target.sourceView as? NSTableView)?.numberOfRows ?? 0
+        let rowCountString = NumberFormatter.decimalStyleFormatter.string(from: NSNumber(value: rowCount)) ?? "\(rowCount)"
+        let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
+        let message = String(format: NSLocalizedString("Are you sure you want to print the current content view of the table '%@'?\n\nIt currently contains %@ rows, which may take a significant amount of time to print.", comment: "continue to print informative message"), tableName, rowCountString)
+
+        NSAlert.createDefaultAlert(title: NSLocalizedString("Continue to print?", comment: "continue to print message"),
+                                   message: message,
+                                   primaryButtonTitle: NSLocalizedString("Print", comment: "print button"),
+                                   primaryButtonHandler: primaryButtonHandler,
+                                   cancelButtonHandler: nil)
+    }
+
+    func runLightweightPrintOperation(for target: SALightweightPrintTarget) {
+        target.sourceView.layoutSubtreeIfNeeded()
+        let printView = lightweightPrintableView(for: target)
+
+        let printInfo = NSPrintInfo.shared.copy() as? NSPrintInfo ?? NSPrintInfo.shared
+        printInfo.horizontalPagination = .automatic
+        printInfo.verticalPagination = .automatic
+        printInfo.isHorizontallyCentered = false
+        printInfo.isVerticallyCentered = false
+
+        let operation = NSPrintOperation(view: printView, printInfo: printInfo)
+        operation.jobTitle = target.title
+        operation.canSpawnSeparateThread = false
+
+        let printPanel = operation.printPanel
+        printPanel.options.insert([.showsOrientation, .showsScaling, .showsPaperSize])
+        operation.printPanel = printPanel
+
+        if let window = window {
+            operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+        } else {
+            operation.run()
+        }
+    }
+
+    func lightweightPrintableView(for target: SALightweightPrintTarget) -> NSView {
+        if let tableView = target.sourceView as? NSTableView {
+            return lightweightPrintableTableView(from: tableView, title: target.title)
+        }
+
+        if let textView = target.sourceView as? NSTextView {
+            let font = textView.font ?? UserDefaults.getFont()
+            let textStorage = textView.textStorage ?? NSTextStorage(string: textView.string)
+            return SALightweightPrintableTextView(title: target.title, attributedString: textStorage, font: font)
+        }
+
+        return target.sourceView
+    }
+
+    func lightweightPrintableTableView(from tableView: NSTableView, title: String) -> NSView {
+        let tableColumns = tableView.tableColumns.filter { !$0.isHidden }
+        let bodyFont = tableColumns.compactMap { ($0.dataCell as? NSCell)?.font }.first ?? UserDefaults.getFont()
+        let headerFont = tableColumns.compactMap { $0.headerCell.font }.first ?? NSFont.boldSystemFont(ofSize: bodyFont.pointSize)
+        let columns = tableColumns.map { tableColumn -> (title: String, width: CGFloat) in
+            let title = tableColumn.headerCell.stringValue.isEmpty ? tableColumn.identifier.rawValue : tableColumn.headerCell.stringValue
+            return (title: title, width: min(max(tableColumn.width, 70), 260))
+        }
+
+        let rows = (0..<tableView.numberOfRows).map { row in
+            tableColumns.map { tableColumn in
+                return printableString(for: tableView.dataSource?.tableView?(tableView, objectValueFor: tableColumn, row: row),
+                                       tableColumn: tableColumn)
+            }
+        }
+
+        return SALightweightPrintableTableView(title: title,
+                                               columns: columns,
+                                               rows: rows,
+                                               bodyFont: bodyFont,
+                                               headerFont: headerFont,
+                                               drawsGridlines: UserDefaults.standard.bool(forKey: SPDisplayTableViewVerticalGridlines))
+    }
+
+    func printableString(for value: Any?, tableColumn: NSTableColumn) -> String {
+        guard let value = value else { return "" }
+
+        if tableColumn.dataCell is NSButtonCell {
+            if let boolValue = value as? Bool {
+                return boolValue ? "✓" : ""
+            }
+            if let number = value as? NSNumber {
+                return number.boolValue ? "✓" : ""
+            }
+            let string = String(describing: value)
+            return string == "1" || string.caseInsensitiveCompare("YES") == .orderedSame ? "✓" : ""
+        }
+
+        if let attributedString = value as? NSAttributedString {
+            return attributedString.string
+        }
+
+        if value is NSNull {
+            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        }
+
+        return String(describing: value)
+    }
+
+    func showLightweightPrintUnsupportedAlert() {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Nothing printable in the current lightweight view.", comment: "lightweight print unsupported alert title")
+        alert.informativeText = NSLocalizedString("Printing is currently available for lightweight content, query editor/results, table structure, and table information views.", comment: "lightweight print unsupported alert message")
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+
+        if let window = window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    func firstTableView(in view: NSView) -> NSTableView? {
+        if let tableView = view as? NSTableView {
+            return tableView
+        }
+
+        for subview in view.subviews {
+            if let tableView = firstTableView(in: subview) {
+                return tableView
+            }
+        }
+
+        return nil
+    }
+
+    func findSubview<View: NSView>(in view: NSView, identifier: String, type: View.Type) -> View? {
+        if let matchedView = view as? View, view.identifier?.rawValue == identifier {
+            return matchedView
+        }
+
+        for subview in view.subviews {
+            if let matchedView = findSubview(in: subview, identifier: identifier, type: type) {
+                return matchedView
+            }
+        }
+
+        return nil
     }
 }
 

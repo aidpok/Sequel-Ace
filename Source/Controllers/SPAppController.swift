@@ -50,7 +50,8 @@ extension SPAppController {
     }
 
     @IBAction func export(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.exportData() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        windowController.exportData()
     }
 
     @IBAction func addConnectionToFavorites(_ sender: Any) {
@@ -74,15 +75,35 @@ extension SPAppController {
     }
 
     @IBAction func `import`(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.importFile() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.importFile()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.importLightweightSQLFile(sender)
     }
 
     @IBAction func importFromClipboard(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.importFromClipboard() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.importFromClipboard()
+            return
+        }
+
+        guard windowController.hasActiveLightweightConnection else { return }
+        windowController.importLightweightSQLFromClipboard(sender)
     }
 
     @IBAction func printDocument(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.print() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.print()
+            return
+        }
+
+        windowController.printLightweightDocument(sender)
     }
 
     // MARK: Edit menu actions
