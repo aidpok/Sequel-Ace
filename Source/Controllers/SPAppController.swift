@@ -54,11 +54,23 @@ extension SPAppController {
     }
 
     @IBAction func addConnectionToFavorites(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.addConnectionToFavorites() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.addConnectionToFavorites()
+            return
+        }
+
+        windowController.addLightweightConnectionToFavorites()
     }
 
     @IBAction func saveConnectionSheet(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.saveConnectionSheet(sender) }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.saveConnectionSheet(sender)
+            return
+        }
+
+        windowController.saveLightweightConnectionSheet(sender)
     }
 
     @IBAction func `import`(_ sender: Any) {
@@ -127,7 +139,13 @@ extension SPAppController {
     }
 
     @IBAction func toggleNavigator(_ sender: Any) {
-        performLegacyBackedDocumentAction { $0.toggleNavigator() }
+        guard let windowController = tabManager.activeWindowController else { return }
+        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
+            document.toggleNavigator()
+            return
+        }
+
+        windowController.toggleLightweightNavigator()
     }
 
     // MARK: Database menu actions

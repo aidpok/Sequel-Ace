@@ -104,6 +104,80 @@ private enum SALightweightConnectionDictionaryKey {
     static let connectionSSHKeychainItemAccount = "connectionSSHKeychainItemAccount"
 }
 
+private struct SALightweightSaveConnectionOptions {
+    let encrypt: Bool
+    let encryptionPassword: String
+    let autoConnect: Bool
+    let savePassword: Bool
+    let includeSession: Bool
+    let includeQuery: Bool
+}
+
+private final class SALightweightSaveConnectionAccessory: NSObject {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 118))
+    private let encryptButton = NSButton(checkboxWithTitle: NSLocalizedString("Encrypt", comment: "encrypt checkbox"), target: nil, action: nil)
+    private let passwordField = NSSecureTextField(frame: .zero)
+    private let autoConnectButton = NSButton(checkboxWithTitle: NSLocalizedString("Automatically connect", comment: "automatically connect checkbox"), target: nil, action: nil)
+    private let savePasswordButton = NSButton(checkboxWithTitle: NSLocalizedString("Save password", comment: "save password checkbox"), target: nil, action: nil)
+    private let includeSessionButton = NSButton(checkboxWithTitle: NSLocalizedString("Save session", comment: "save session checkbox"), target: nil, action: nil)
+    private let includeQueryButton = NSButton(checkboxWithTitle: NSLocalizedString("Save query editor content", comment: "save query editor content checkbox"), target: nil, action: nil)
+
+    init(includeQueryEnabled: Bool) {
+        super.init()
+
+        let sessionData = (NSApp.delegate as? SPAppController)?.spfSessionDocData() as? [AnyHashable: Any] ?? [:]
+        encryptButton.state = Self.boolValue(sessionData["encrypted"]) ? .on : .off
+        autoConnectButton.state = Self.boolValue(sessionData["auto_connect"]) ? .on : .off
+        savePasswordButton.state = Self.boolValue(sessionData["save_password"]) ? .on : .off
+        includeSessionButton.state = Self.boolValue(sessionData["include_session"], defaultValue: true) ? .on : .off
+        includeQueryButton.state = Self.boolValue(sessionData["save_editor_content"]) ? .on : .off
+        includeQueryButton.isEnabled = includeQueryEnabled
+        if !includeQueryEnabled {
+            includeQueryButton.state = .off
+        }
+
+        encryptButton.target = self
+        encryptButton.action = #selector(updatePasswordFieldState)
+        passwordField.placeholderString = NSLocalizedString("Encryption password", comment: "encryption password placeholder")
+
+        let stack = NSStackView(views: [encryptButton, passwordField, autoConnectButton, savePasswordButton, includeSessionButton, includeQueryButton])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        passwordField.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor)
+        ])
+        updatePasswordFieldState()
+    }
+
+    func options() -> SALightweightSaveConnectionOptions {
+        return SALightweightSaveConnectionOptions(
+            encrypt: encryptButton.state == .on,
+            encryptionPassword: passwordField.stringValue,
+            autoConnect: autoConnectButton.state == .on,
+            savePassword: savePasswordButton.state == .on,
+            includeSession: includeSessionButton.state == .on,
+            includeQuery: includeQueryButton.isEnabled && includeQueryButton.state == .on
+        )
+    }
+
+    @objc private func updatePasswordFieldState() {
+        passwordField.isEnabled = encryptButton.state == .on
+    }
+
+    private static func boolValue(_ value: Any?, defaultValue: Bool = false) -> Bool {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber { return number.boolValue }
+        return defaultValue
+    }
+}
+
 private struct SALightweightEncodingChoice {
     let title: String
     let name: String?
@@ -1090,6 +1164,176 @@ private extension SPWindowController {
             lightweightQueryController.saveCurrentSessionState()
         default:
             break
+        }
+    }
+
+    func lightweightQueryText() -> String {
+        lightweightQueryController.saveCurrentSessionState()
+        return lightweightQueryController.textView.string
+    }
+
+    func lightweightQueryCount() -> Int {
+        let text = lightweightQueryText().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return 0 }
+
+        let count = text
+            .split(separator: ";")
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .count
+        return max(count, 1)
+    }
+
+    func saveLightweightQuerySheet() {
+        let queryText = lightweightQueryText()
+        guard !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.allowsOtherFileTypes = false
+        panel.canSelectHiddenExtension = true
+        panel.allowedFileTypes = [SPFileExtensionSQL as String]
+        panel.nameFieldStringValue = UserDefaults.standard.string(forKey: "lastSqlFileName") ?? ""
+        panel.beginSheetModal(for: window ?? NSApp.keyWindow ?? NSApp.mainWindow ?? NSWindow()) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try queryText.write(to: url, atomically: true, encoding: .utf8)
+                UserDefaults.standard.set(url.lastPathComponent, forKey: "lastSqlFileName")
+                UserDefaults.standard.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
+                NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+        }
+    }
+
+    func saveLightweightSession(to url: URL, options: SALightweightSaveConnectionOptions) {
+        let userInfo: [String: Any] = [
+            "contextInfo": "saveSession",
+            "encrypted": options.encrypt,
+            "saveConnectionEncryptString": options.encryptionPassword,
+            "auto_connect": options.autoConnect,
+            "save_password": options.savePassword,
+            "include_session": options.includeSession,
+            "save_editor_content": options.includeQuery
+        ]
+        NotificationCenter.default.post(name: .SPDocumentSaveToSPF, object: url.path, userInfo: userInfo)
+    }
+
+    func saveLightweightConnection(to url: URL, options: SALightweightSaveConnectionOptions) {
+        guard let state = lightweightLegacyStateDictionary(includePasswords: options.savePassword,
+                                                           includeSession: options.includeSession,
+                                                           includeQuery: options.includeQuery) else { return }
+
+        let spfStructure = NSMutableDictionary()
+        spfStructure[SPFVersionKey] = 1
+        spfStructure[SPFFormatKey] = SPFConnectionContentType
+        spfStructure["rdbms_type"] = "mysql"
+        if let activeServerVersion = activeServerVersion, !activeServerVersion.isEmpty {
+            spfStructure["rdbms_version"] = activeServerVersion
+        }
+        spfStructure["auto_connect"] = options.autoConnect
+        spfStructure["encrypted"] = options.encrypt
+
+        if options.encrypt {
+            let dataToEncrypt = NSMutableData()
+            let archiver = NSKeyedArchiver(forWritingWith: dataToEncrypt)
+            archiver.encode(state, forKey: "data")
+            archiver.finishEncoding()
+            spfStructure["data"] = (dataToEncrypt as Data as NSData).dataEncrypted(withPassword: options.encryptionPassword)
+        } else {
+            spfStructure["data"] = state
+        }
+
+        do {
+            let data = try PropertyListSerialization.data(fromPropertyList: spfStructure,
+                                                          format: .xml,
+                                                          options: 0)
+            try data.write(to: url, options: .atomic)
+            (NSApp.delegate as? SPAppController)?.setSpfSessionDocData([
+                "encrypted": options.encrypt,
+                "e_string": options.encryptionPassword,
+                "auto_connect": options.autoConnect,
+                "save_password": options.savePassword,
+                "include_session": options.includeSession,
+                "save_editor_content": options.includeQuery
+            ])
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            markLightweightResumeStateChanged()
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    func lightweightLegacyStateDictionary(includePasswords: Bool, includeSession: Bool, includeQuery: Bool) -> NSDictionary? {
+        guard let activeConnectionInfo = activeConnectionInfo else { return nil }
+
+        let state = NSMutableDictionary()
+        state["connection"] = lightweightConnectionDictionary(for: activeConnectionInfo, includePasswords: includePasswords)
+        let session = NSMutableDictionary()
+        if includeSession {
+            if let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty {
+                session["database"] = selectedDatabase
+            }
+            if let selectedTable = selectedTable, !selectedTable.isEmpty {
+                session["table"] = selectedTable
+            }
+            session["view"] = lightweightLegacyViewName()
+            if let encoding = activeConnection?.encoding(), !encoding.isEmpty {
+                session["connectionEncoding"] = encoding
+            }
+            state["lightweightSession"] = lightweightSessionSnapshotDictionary(includeQueryText: includeQuery, includeContentState: includeSession)
+        }
+        if includeQuery {
+            let queryText = lightweightQueryText()
+            if !queryText.isEmpty {
+                session["queries"] = queryText
+            }
+        }
+        if session.count > 0 {
+            state["session"] = session
+        }
+        return state
+    }
+
+    func lightweightLegacyViewName() -> String {
+        switch activeLightweightViewMode {
+        case .structure:
+            return "SP_VIEW_STRUCTURE"
+        case .content:
+            return "SP_VIEW_CONTENT"
+        case .query:
+            return "SP_VIEW_CUSTOMQUERY"
+        case .status:
+            return "SP_VIEW_STATUS"
+        case .relations:
+            return "SP_VIEW_RELATIONS"
+        case .triggers:
+            return "SP_VIEW_TRIGGERS"
+        }
+    }
+
+    func lightweightNavigatorDatabaseNames() -> [String] {
+        let databases = !lightweightDatabases.isEmpty
+            ? lightweightDatabases
+            : (activeConnection?.databases() as? [String] ?? [])
+        var seen = Set<String>()
+        return databases.filter { database in
+            let key = database.lowercased()
+            guard !seen.contains(key) else { return false }
+            seen.insert(key)
+            return true
+        }
+    }
+
+    func lightweightNavigatorTableTypeNumber(for type: SALightweightTableObjectType?) -> NSNumber {
+        switch type {
+        case .view:
+            return 1
+        case .procedure:
+            return 2
+        case .function:
+            return 3
+        default:
+            return 0
         }
     }
 
@@ -3464,6 +3708,166 @@ private extension SPWindowController {
 
     @objc func legacyDatabaseDocumentForMenuAction() -> SPDatabaseDocument {
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
+    }
+
+    @objc func canAddLightweightConnectionToFavorites() -> Bool {
+        guard hasActiveLightweightConnection,
+              let connectionController = connectionController else { return false }
+
+        return connectionController.selectedFavorite() == nil || connectionController.isEditingConnection
+    }
+
+    @objc func addLightweightConnectionToFavorites() {
+        guard canAddLightweightConnectionToFavorites(),
+              let connectionController = connectionController,
+              let activeConnectionInfo = activeConnectionInfo else { return }
+
+        connectionController.applyConnectionInfo(activeConnectionInfo)
+        connectionController.addFavoriteUsingCurrentDetails(self)
+    }
+
+    @objc func saveLightweightConnectionSheet(_ sender: Any?) {
+        guard hasActiveLightweightConnection else { return }
+
+        let tag = (sender as? NSMenuItem)?.tag ?? Int(SPMainMenuFileSaveConnection.rawValue)
+        if tag == Int(SPMainMenuFileSaveQuery.rawValue) || tag == 0 {
+            saveLightweightQuerySheet()
+            return
+        }
+
+        let isSessionSave = tag == Int(SPMainMenuFileSaveSession.rawValue)
+        let panel = NSSavePanel()
+        panel.allowsOtherFileTypes = false
+        panel.canSelectHiddenExtension = true
+        panel.allowedFileTypes = [isSessionSave ? (SPBundleFileExtension as String) : (SPFileExtensionDefault as String)]
+
+        let accessory = SALightweightSaveConnectionAccessory(includeQueryEnabled: !lightweightQueryText().isEmpty)
+        panel.accessoryView = accessory.view
+        panel.nameFieldStringValue = isSessionSave
+            ? NSLocalizedString("Session", comment: "Initial filename for 'Save session' file")
+            : lightweightConnectionDisplayName()
+
+        panel.beginSheetModal(for: window ?? NSApp.keyWindow ?? NSApp.mainWindow ?? NSWindow()) { [weak self] response in
+            guard response == .OK, let self = self, let url = panel.url else { return }
+            let options = accessory.options()
+            if isSessionSave {
+                self.saveLightweightSession(to: url, options: options)
+            } else {
+                self.saveLightweightConnection(to: url, options: options)
+            }
+        }
+    }
+
+    @objc func validateLightweightSaveConnectionMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+
+        if menuItem.tag == Int(SPMainMenuFileSaveQuery.rawValue) || menuItem.tag == 0 {
+            let count = lightweightQueryCount()
+            menuItem.title = count == 1
+                ? NSLocalizedString("Save Query…", comment: "Save Query…")
+                : NSLocalizedString("Save Queries…", comment: "Save Queries…")
+            return count > 0
+        }
+
+        return true
+    }
+
+    @objc func toggleLightweightNavigator() {
+        guard hasActiveLightweightConnection else { return }
+
+        let navigator = SPNavigatorController.shared()
+        let isNavigatorVisible = navigator?.window?.isVisible ?? false
+        navigator?.window?.setIsVisible(!isNavigatorVisible)
+        if !isNavigatorVisible {
+            navigator?.updateEntries(forLightweightWindowController: self)
+        }
+    }
+
+    @objc func lightweightNavigatorConnectionID() -> String {
+        guard hasActiveLightweightConnection,
+              let info = activeConnectionInfo else { return "_" }
+
+        let user = info.user.isEmpty ? "anonymous" : info.user
+        let port = info.port.isEmpty ? "" : ":\(info.port)"
+        switch info.type {
+        case .socket:
+            return "\(user)@localhost\(port)"
+        case .sshTunnel:
+            let sshUser = info.sshUser.isEmpty ? "anonymous" : info.sshUser
+            let sshPort = info.sshPort.isEmpty ? "22" : info.sshPort
+            return "\(user)@\(info.host)\(port)&SSH&\(sshUser)@\(info.sshHost):\(sshPort)"
+        case .awsIAM:
+            let profile = info.awsProfile.isEmpty ? "default" : info.awsProfile
+            let region = info.awsRegion.isEmpty ? "auto" : info.awsRegion
+            return "\(user)@\(info.host)\(port)&AWSIAM&\(profile)&\(region)"
+        case .tcpIP:
+            return "\(user)@\(info.host)\(port)"
+        @unknown default:
+            return "\(user)@\(info.host)\(port)"
+        }
+    }
+
+    @objc func lightweightNavigatorSelectedPath() -> String {
+        let connectionID = lightweightNavigatorConnectionID()
+        guard connectionID != "_" else { return "" }
+
+        var path = connectionID
+        if let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty {
+            path += SPUniqueSchemaDelimiter + selectedDatabase
+        }
+        if let selectedTable = selectedTable, !selectedTable.isEmpty {
+            path += SPUniqueSchemaDelimiter + selectedTable
+        }
+        return path
+    }
+
+    @objc func lightweightNavigatorSchemaData() -> NSDictionary {
+        let connectionID = lightweightNavigatorConnectionID()
+        let structure = NSMutableDictionary()
+        let databases = lightweightNavigatorDatabaseNames()
+        for database in databases {
+            let databaseKey = connectionID + SPUniqueSchemaDelimiter + database
+            if selectedDatabase == database {
+                let databaseDictionary = NSMutableDictionary()
+                for table in lightweightTables {
+                    let tableKey = databaseKey + SPUniqueSchemaDelimiter + table
+                    let tableDictionary = NSMutableDictionary()
+                    tableDictionary["  struct_type  "] = lightweightNavigatorTableTypeNumber(for: lightweightTableTypes[table])
+                    databaseDictionary[tableKey] = tableDictionary
+                }
+                structure[databaseKey] = databaseDictionary
+            } else {
+                // Match SPDatabaseStructure's unloaded-database shape. Using an empty dictionary for
+                // every database makes NSDictionary's allKeysForObject: treat each row as equal, so
+                // the Navigator labels collapse to the first database name.
+                structure[databaseKey] = database
+            }
+        }
+        return structure
+    }
+
+    @objc func lightweightNavigatorAllSchemaKeys() -> [String] {
+        let connectionID = lightweightNavigatorConnectionID()
+        var keys: [String] = []
+        for database in lightweightNavigatorDatabaseNames() {
+            let databaseKey = connectionID + SPUniqueSchemaDelimiter + database
+            keys.append(databaseKey)
+            if selectedDatabase == database {
+                for table in lightweightTables {
+                    keys.append(databaseKey + SPUniqueSchemaDelimiter + table)
+                }
+            }
+        }
+        return keys
+    }
+
+    @objc func selectLightweightNavigatorDatabase(_ database: String, item: String?) {
+        guard hasActiveLightweightConnection else { return }
+        if let item = item, !item.isEmpty {
+            loadTables(for: database, restoringTable: item)
+        } else {
+            loadTables(for: database)
+        }
     }
 
     @objc func showLightweightMySQLHelp() {

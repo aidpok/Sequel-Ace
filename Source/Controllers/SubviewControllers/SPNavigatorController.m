@@ -41,6 +41,7 @@
 #import "SPDatabaseStructure.h"
 #import "SPThreadAdditions.h"
 #import "SPFunctions.h"
+#import "sequel-ace-Swift.h"
 
 #import <objc/message.h>
 #import <SPMySQL/SPMySQL.h>
@@ -362,6 +363,27 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 		if([pathArray count] > 1) {
 
 			SPDatabaseDocument *doc = [SPAppDelegate frontDocument];
+			SPWindowController *windowController = [[SPAppDelegate tabManager] activeWindowController];
+			if(!doc && [windowController hasActiveLightweightConnection]) {
+				if([windowController isProcessing]) {
+					[SPTooltip showWithObject:NSLocalizedString(@"Active connection window is busy. Please wait and try again.", @"active connection window is busy. please wait and try again. tooltip")
+							atLocation:pos
+							ofType:@"text"];
+					return;
+				}
+				if([[windowController lightweightNavigatorConnectionID] isEqualToString:[pathArray objectAtIndex:0]]) {
+					NSInteger oldState = [syncButton state];
+					[syncButton setState:NSControlStateValueOff];
+					[windowController selectLightweightNavigatorDatabase:[pathArray objectAtIndex:1] item:[pathArray safeObjectAtIndex:2]];
+					if(oldState == NSControlStateValueOn)
+						[self performSelector:@selector(_setSyncButtonOn) withObject:nil afterDelay:0.1];
+				} else {
+					[SPTooltip showWithObject:NSLocalizedString(@"The connection of the active connection window is not identical.", @"the connection of the active connection window is not identical tooltip")
+							atLocation:pos
+							ofType:@"text"];
+				}
+				return;
+			}
 			if([doc isWorking]) {
 				[SPTooltip showWithObject:NSLocalizedString(@"Active connection window is busy. Please wait and try again.", @"active connection window is busy. please wait and try again. tooltip") 
 						atLocation:pos 
@@ -390,6 +412,53 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 			}
 		}
 	}
+}
+
+- (void)updateEntriesForLightweightWindowController:(SPWindowController *)windowController
+{
+	if(ignoreUpdate) {
+		ignoreUpdate = NO;
+		return;
+	}
+
+	if([[self window] isVisible]) {
+		[self saveSelectedItems];
+		[infoArray removeAllObjects];
+		[cachedSortedKeys removeAllObjects];
+	}
+
+	if (windowController && [windowController hasActiveLightweightConnection]) {
+		NSString *connectionID = [windowController lightweightNavigatorConnectionID];
+		if(!connectionID || [connectionID isEqualToString:@"_"]) return;
+
+		[updatingConnections addObject:connectionID];
+
+		NSDictionary *structureData = [windowController lightweightNavigatorSchemaData];
+		if(structureData && [structureData isKindOfClass:NSDictionaryClass]) {
+			[schemaData setObject:[NSMutableDictionary dictionaryWithDictionary:structureData] forKey:connectionID];
+			NSArray *keys = [windowController lightweightNavigatorAllSchemaKeys];
+			[allSchemaKeys setObject:(keys ? keys : @[]) forKey:connectionID];
+		} else {
+			[schemaData setObject:@{} forKey:[NSString stringWithFormat:@"%@&DEL&no data loaded yet", connectionID]];
+			[allSchemaKeys setObject:@[] forKey:connectionID];
+		}
+
+		[updatingConnections removeObject:connectionID];
+
+		if([[self window] isVisible]) {
+			[outlineSchema2 reloadData];
+			[self restoreExpandStatus];
+			[self restoreSelectedItems];
+		}
+	}
+
+	if([[self window] isVisible])
+		[self syncButtonAction:self];
+
+	if(isFiltered && [[self window] isVisible])
+		[self filterTree:self];
+
+	[[NSNotificationCenter defaultCenter] postNotificationName:@"SPNavigatorStructureWasUpdated" object:self];
 }
 
 - (void)updateNavigator:(NSNotification *)aNotification
@@ -727,6 +796,14 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 				[key appendString:[doc table]];
 			}
 			[self selectPath:key];
+		} else {
+			SPWindowController *windowController = [[SPAppDelegate tabManager] activeWindowController];
+			if([windowController hasActiveLightweightConnection]) {
+				NSString *key = [windowController lightweightNavigatorSelectedPath];
+				if([key length]) {
+					[self selectPath:key];
+				}
+			}
 		}
 	}
 }
