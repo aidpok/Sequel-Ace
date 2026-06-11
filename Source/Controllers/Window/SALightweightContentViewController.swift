@@ -2401,6 +2401,38 @@ private extension SALightweightContentViewController {
                                                  value: { self.contentDisplayValue(row: $0, tableColumn: $1) })
     }
 
+    @objc(currentResultRowCount)
+    func currentResultRowCount() -> Int {
+        return rows.count
+    }
+
+    @objc(currentDataResultWithNULLs:)
+    func currentDataResult(withNULLs includeNULLs: Bool) -> [[Any]] {
+        var result: [[Any]] = [tableView.tableColumns.map { columnName(for: $0) }]
+
+        for row in rows {
+            result.append(tableView.tableColumns.map { tableColumn in
+                guard let columnIndex = Int(tableColumn.identifier.rawValue), columnIndex < row.values.count else { return "" }
+                if includeNULLs, case .null = row.values[columnIndex] {
+                    return NSNull()
+                }
+
+                return displayString(for: row.values[columnIndex], columnIndex: columnIndex, truncate: false)
+            })
+        }
+
+        return result
+    }
+
+    @objc(usedQuery)
+    func usedQuery() -> String {
+        return contentQuery(offset: pageIndex * pageSize,
+                            limit: pageSize,
+                            whereClause: ruleFilterStringForCurrentState(showError: false).whereClause,
+                            columnInfo: columnInfo,
+                            limitResults: limitResults)
+    }
+
     func xmlStringForCurrentContent() -> String {
         return SALightweightResultGrid.xmlString(rowCount: rows.count,
                                                  tableColumns: tableView.tableColumns,
@@ -2720,6 +2752,18 @@ private extension SALightweightContentViewController {
 }
 
 extension SALightweightContentViewController {
+    func exportResultRowCount() -> Int {
+        return currentResultRowCount()
+    }
+
+    func exportDataResult(withNULLs includeNULLs: Bool) -> [[Any]] {
+        return currentDataResult(withNULLs: includeNULLs)
+    }
+
+    func exportUsedQuery() -> String {
+        return usedQuery()
+    }
+
     @objc(processFieldEditorResult:contextInfo:)
     func processFieldEditorResult(_ data: Any?, contextInfo: NSDictionary?) {
         defer {

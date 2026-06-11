@@ -160,6 +160,22 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 #pragma mark - Shared Private
 
 - (void)_hideExportProgress;
+- (BOOL)_isLightweightExport;
+- (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source;
+- (BOOL)_canStartLightweightExportWithCurrentOptions;
+- (BOOL)_lightweightSupportsExportType:(SPExportType)type;
+- (NSArray *)_lightweightResultForSource:(SPExportSource)source;
+- (void)_enforceLightweightExportUIState;
+- (NSString *)_exportHostName;
+- (NSString *)_exportDatabaseName;
+- (NSString *)_exportTableName;
+- (NSString *)_exportServerVersion;
+- (NSString *)_exportFavoriteName;
+- (NSString *)_exportQueryForSource:(SPExportSource)source;
+- (NSWindow *)_exportParentWindow;
+- (void)_setExportQueryMode:(NSInteger)queryMode;
+- (void)_restorePreviousConnectionEncoding;
+- (void)_showLightweightExportUnavailableAlert;
 
 @end
 
@@ -183,7 +199,7 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 - (instancetype)init
 {
 	if ((self = [super initWithWindowNibName:@"ExportDialog"])) {
-		
+
 		[self setExportCancelled:NO];
 		[self setExportToMultipleFiles:YES];
 
@@ -193,13 +209,13 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 		exportSource = SPTableExport;
 		exportTableCount = 0;
 		currentTableExportIndex = 0;
-		
+
 		exportFilename = [[NSMutableString alloc] init];
 		exportTypeLabel = @"";
-		
+
 		createCustomFilename = NO;
 		previousConnectionEncodingViaLatin1 = NO;
-		
+
 		tables = [[NSMutableArray alloc] init];
 		exporters = [[NSMutableArray alloc] init];
 		exportFiles = [[NSMutableArray alloc] init];
@@ -212,9 +228,9 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 
 		heightOffset1 = 0;
 		heightOffset2 = 0;
-		
+
 		prefs = [NSUserDefaults standardUserDefaults];
-		
+
 		localizedTokenNames = @{
 			SPFileNameHostTokenName:       NSLocalizedString(@"Host", @"export filename host token"),
 			SPFileNameDatabaseTokenName:   NSLocalizedString(@"Database", @"export filename database token"),
@@ -228,8 +244,45 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 			SPFileNameFavoriteTokenName:   NSLocalizedString(@"Favorite", @"export filename favorite name token")
 		};
 	}
-	
+
 	return self;
+}
+
+- (void)configureForLightweightWindowController:(SPWindowController *)windowController
+                                     connection:(SPMySQLConnection *)aConnection
+                                  serverSupport:(SPServerSupport *)aServerSupport
+                                       database:(NSString *)database
+                                           host:(NSString *)host
+                                  serverVersion:(NSString *)serverVersion
+                              selectedTableName:(NSString *)selectedTableName
+                                   favoriteName:(NSString *)favoriteName
+                             tablesAndViewNames:(NSArray *)tablesAndViews
+                                 procedureNames:(NSArray *)procedures
+                                  functionNames:(NSArray *)functions
+                             selectedTableItems:(NSArray *)selectedTables
+                                  contentResult:(NSArray *)contentResult
+                                   contentQuery:(NSString *)contentQuery
+                                    queryResult:(NSArray *)queryResult
+                                    queryString:(NSString *)queryString
+                                preferredSource:(SPExportSource)source
+{
+	lightweightWindowController = windowController;
+	self.connection = aConnection;
+	self.serverSupport = aServerSupport;
+	lightweightDatabaseName = [database copy];
+	lightweightHostName = [host copy];
+	lightweightServerVersion = [serverVersion copy];
+	lightweightSelectedTableName = [selectedTableName copy];
+	lightweightFavoriteName = [favoriteName copy];
+	lightweightTablesAndViews = [tablesAndViews copy] ?: @[];
+	lightweightProcedures = [procedures copy] ?: @[];
+	lightweightFunctions = [functions copy] ?: @[];
+	lightweightSelectedTableItems = [selectedTables copy] ?: @[];
+	lightweightContentResult = [contentResult copy] ?: @[];
+	lightweightContentQuery = [contentQuery copy];
+	lightweightQueryResult = [queryResult copy] ?: @[];
+	lightweightQueryString = [queryString copy];
+	lightweightPreferredSource = source;
 }
 
 /**
@@ -242,23 +295,23 @@ static inline void SetOnOff(NSNumber *ref,id obj);
     [super awakeFromNib];
 
 	mainNibLoaded = YES;
-	
+
 	windowMinWidth = [[self window] minSize].width;
 	windowMinHeigth = [[self window] minSize].height;
 
 	// Select the 'selected tables' option
 	[exportInputPopUpButton selectItemAtIndex:SPTableExport];
-	
+
 	// Select the SQL tab
 	[[exportTypeTabBar tabViewItemAtIndex:0] setView:exporterView];
 	[exportTypeTabBar selectTabViewItemAtIndex:0];
-	
+
 	// By default a new SQL INSERT statement should be created every 250KiB of data
 	[exportSQLInsertNValueTextField setIntegerValue:250];
-	
+
 	// Prevents the background colour from changing when clicked
 	[[exportCustomFilenameViewLabelButton cell] setHighlightsBy:NSNoCellMask];
-	
+
 	// Set the progress indicator's max value
 	[exportProgressIndicator setMaxValue:(NSInteger)[exportProgressIndicator bounds].size.width];
 
@@ -283,31 +336,33 @@ static inline void SetOnOff(NSNumber *ref,id obj);
  */
 - (void)exportTables:(NSArray *)exportTables asFormat:(SPExportType)format usingSource:(SPExportSource)source
 {
+	[self window];
+
 	// set some defaults
 	[exportCSVNULLValuesAsTextField setStringValue:[prefs stringForKey:SPNullValue]];
 	[exportXMLNULLValuesAsTextField setStringValue:[prefs stringForKey:SPNullValue]];
 
 	// MARK: removed default export location
-	
+
 	// initially popuplate the tables list
 	[self refreshTableList:nil];
-		
+
 	// overwrite defaults with user settings from last export
 	[self applySettingsFromDictionary:[prefs objectForKey:SPLastExportSettings] error:NULL];
-	
+
 	// overwrite those with settings for the current export
-	
+
 	// Select the correct tab
 	if(format != SPAnyExportType) [exportTypeTabBar selectTabViewItemAtIndex:format];
-	
+
 	[self updateDisplayedExportFilename];
-	
+
 	[exporters removeAllObjects];
 	[exportFiles removeAllObjects];
-			
+
 	// If tables were supplied, select them
 	if (exportTables) {
-		
+
 		// Disable all tables
 		for (NSMutableArray *table in tables)
 		{
@@ -315,7 +370,7 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 			[table safeReplaceObjectAtIndex:2 withObject:@NO];
 			[table safeReplaceObjectAtIndex:3 withObject:@NO];
 		}
-		
+
 		// Select the supplied tables
 		for (NSMutableArray *table in tables)
 		{
@@ -328,18 +383,18 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 				}
 			}
 		}
-		
+
 		[exportTableList reloadData];
 	}
-	
+
 	// Ensure interface validation
 	[self _switchTab];
 	[self _updateExportAdvancedOptionsLabel];
 	[self setExportInput:source];
 
 
-    // Display the actual export sheet
-    [self performSelector:@selector(_openExportSheet) withObject:nil afterDelay:0.1];
+	// Display the actual export sheet
+	[self performSelector:@selector(_openExportSheet) withObject:nil afterDelay:0.1];
 }
 
 /**
@@ -352,7 +407,7 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	[errorsTextView setString:@""];
 	[errorsTextView setString:errors];
 
-	[[tableDocumentInstance parentWindowControllerWindow] beginSheet:errorsWindow completionHandler:nil];
+	[[self _exportParentWindow] beginSheet:errorsWindow completionHandler:nil];
 }
 
 /**
@@ -374,10 +429,10 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 
 /**
  * Opens the export dialog selecting the appropriate export type and source based on the current context.
- * For example, if either the table content view or custom query editor views are active and there is 
- * data available, these options will be selected as the export source ('Filtered' or 'Query Result'). If 
- * either of these views are not active then the default source are the currently selected tables. If no 
- * tables are currently selected then all tables are checked. Note that in this instance the default export 
+ * For example, if either the table content view or custom query editor views are active and there is
+ * data available, these options will be selected as the export source ('Filtered' or 'Query Result'). If
+ * either of these views are not active then the default source are the currently selected tables. If no
+ * tables are currently selected then all tables are checked. Note that in this instance the default export
  * type is SQL where as in the case of filtered or query result export the default type is CSV.
  *
  * @param sender The caller (can be anything or nil as it is not currently used).
@@ -386,18 +441,31 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	SPExportType selectedExportType = SPAnyExportType;
 	SPExportSource selectedExportSource = SPTableExport;
 
+	if ([self _isLightweightExport]) {
+		SPExportSource preferredSource = lightweightPreferredSource;
+		if (![self _lightweightResultAvailableForSource:preferredSource]) {
+			[self _showLightweightExportUnavailableAlert];
+			return;
+		}
+
+		selectedExportType = SPCSVExport;
+		selectedExportSource = preferredSource;
+		[self exportTables:nil asFormat:selectedExportType usingSource:selectedExportSource];
+		return;
+	}
+
     // if they are exporting and haven't selected a table
     // loadTableValues will fail, so select the last table
     if([tablesListInstance selectedTableItems].count == 0){
         [tablesListInstance selectTableAtIndex:@(tablesListInstance.tables.count-1)];
     }
-	
+
 	NSArray *selectedTables = [tablesListInstance selectedTableItems];
-	
-	BOOL isCustomQuerySelected = ([tableDocumentInstance isCustomQuerySelected] && ([[customQueryInstance currentResult] count] > 1)); 
+
+	BOOL isCustomQuerySelected = ([tableDocumentInstance isCustomQuerySelected] && ([[customQueryInstance currentResult] count] > 1));
 	BOOL isContentSelected     = ([[tableDocumentInstance selectedToolbarItemIdentifier] isEqualToString:SPMainToolbarTableContent] && ([[tableContentInstance currentResult] count] > 1));
-	
-	if (isContentSelected) {		
+
+	if (isContentSelected) {
 		selectedTables = nil;
 		selectedExportType = SPCSVExport;
 		selectedExportSource = SPFilteredExport;
@@ -408,9 +476,9 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 		selectedExportSource = SPQueryExport;
 	}
 	else {
-		selectedTables = ([selectedTables count]) ? selectedTables : nil; 
+		selectedTables = ([selectedTables count]) ? selectedTables : nil;
 	}
-	
+
 	[self exportTables:selectedTables asFormat:selectedExportType usingSource:selectedExportSource];
 }
 
@@ -419,7 +487,7 @@ static inline void SetOnOff(NSNumber *ref,id obj);
  */
 - (IBAction)closeSheet:(id)sender
 {
-	
+
 	// if they clicked export
 	// Cancel tag = 0
 	// Export tag = 1
@@ -428,43 +496,43 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 		if([exportPathField stringValue] == nil || [[exportPathField stringValue] isEqualToString:@""] ){
 			NSLog(@"ERROR: no path!");
 			NSLog(@"sender title: %@, sender tag: %ld", [(NSButton*)sender title], (long)[(NSButton*)sender tag]);
-			
+
 			NSAlert *alert = [[NSAlert alloc] init];
 			[alert setAlertStyle:NSAlertStyleCritical];
 			[alert setMessageText:NSLocalizedString(@"No directory selected.", @"No directory selected.")];
 			[alert setInformativeText:NSLocalizedString(@"Please select a new export location and try again.", @"Please select a new export location and try again")];
-			
-			[alert beginSheetModalForWindow:[tableDocumentInstance parentWindowControllerWindow] completionHandler:^(NSInteger returnCode) {
+
+			[alert beginSheetModalForWindow:[self _exportParentWindow] completionHandler:^(NSInteger returnCode) {
 				[self performSelector:@selector(_openExportSheet) withObject:nil afterDelay:0.1];
 			}];
-			
+
 			// we don't want to close the sheet so return here
 			return;
 		}
 	}
-	
+
 	if ([sender window] == [self window]) {
-		
+
 		// Close the advanced options view if it's open
 		[exportAdvancedOptionsView setHidden:YES];
 		[exportAdvancedOptionsViewButton setState:NSControlStateValueOff];
 		showAdvancedView = NO;
-		
+
 		// Close the customize filename view if it's open
 		[exportCustomFilenameView setHidden:YES];
 		[exportCustomFilenameViewButton setState:NSControlStateValueOff];
 		showCustomFilenameView = NO;
-		
+
 		// If open close the advanced options view and custom filename view
 		[self _resizeWindowForAdvancedOptionsViewByHeightDelta:0];
 		[self _resizeWindowForCustomFilenameViewByHeightDelta:0];
 	}
-	
+
 	// should we reliquish access here?
 	// user clicked cancel, they may just click export again
 	// without selecting a folder again..
 	// tried it ... doesn't give good UX.
-	
+
 	[NSApp endSheet:[sender window] returnCode:[(NSButton*)sender tag]];
 	[[sender window] orderOut:self];
 }
@@ -475,6 +543,17 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	// Dot will always be a TableExport
 	if(exportType == SPDotExport) {
 		actualInput = SPTableExport;
+	}
+	else if ([self _isLightweightExport] && (input == SPTableExport || ![[exportInputPopUpButton itemAtIndex:input] isEnabled])) {
+		if ([self _lightweightResultAvailableForSource:lightweightPreferredSource]) {
+			actualInput = lightweightPreferredSource;
+		}
+		else if ([self _lightweightResultAvailableForSource:SPFilteredExport]) {
+			actualInput = SPFilteredExport;
+		}
+		else if ([self _lightweightResultAvailableForSource:SPQueryExport]) {
+			actualInput = SPQueryExport;
+		}
 	}
 	//check if the type actually is valid
 	else if(![[exportInputPopUpButton itemAtIndex:input] isEnabled]) {
@@ -491,19 +570,23 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	}
 set_input:
 	exportSource = actualInput;
-	
+
 	[exportInputPopUpButton selectItemAtIndex:exportSource];
-	
+
 	BOOL isSelectedTables = (exportSource == SPTableExport);
-	
+
 	[exportFilePerTableCheck setHidden:(!isSelectedTables) || (exportType == SPSQLExport)];
 	[exportTableList setEnabled:isSelectedTables];
 	[exportSelectAllTablesButton setEnabled:isSelectedTables];
 	[exportDeselectAllTablesButton setEnabled:isSelectedTables];
 	[exportRefreshTablesButton setEnabled:isSelectedTables];
-	
+
+	if ([self _isLightweightExport]) {
+		[self _enforceLightweightExportUIState];
+	}
+
 	[self updateAvailableExportFilenameTokens]; // will also update the filename itself
-	
+
 	return (actualInput == input);
 }
 
@@ -538,25 +621,25 @@ set_input:
     }
 
 	[self setExportCancelled:YES];
-	
+
 	[exportProgressIndicator setIndeterminate:YES];
 	[exportProgressIndicator setUsesThreadedAnimation:YES];
 	[exportProgressIndicator startAnimation:self];
-	
+
 	[exportProgressTitle setStringValue:NSLocalizedString(@"Cancelling...", @"cancelling task status message")];
 	[exportProgressText setStringValue:NSLocalizedString(@"Cleaning up...", @"cancelling export cleaning up message")];
-	
+
 	// Disable the cancel button
     if ([sender isKindOfClass:[NSButton class]]) {
         [sender setEnabled:NO];
     }
-	
+
 	// should we reliquish access here?
 	// user clicked cancel, they may just click export again
 	// without selecting a folder again..
 	// let's try it
 	// No, bad UX.
-	
+
 	// Cancel all of the currently running operations
 	[operationQueue cancelAllOperations]; // async call
 
@@ -582,17 +665,17 @@ set_input:
 	{
 		[file delete];
 	}
-	
+
 	[self _hideExportProgress];
 
 	// Restore the connection encoding to it's pre-export value
-	[tableDocumentInstance setConnectionEncoding:[NSString stringWithFormat:@"%@%@", previousConnectionEncoding, (previousConnectionEncodingViaLatin1) ? @"-" : @""] reloadingViews:NO];
+	[self _restorePreviousConnectionEncoding];
 
 	// Re-enable the cancel button for future exports
     if ([sender isKindOfClass:[NSButton class]]) {
         [sender setEnabled:YES];
     }
-	
+
 	// Finally get rid of all the exporters and files
 	[exportFiles removeAllObjects];
 	[exporters removeAllObjects];
@@ -609,6 +692,127 @@ set_input:
 	[exportProgressIndicator setUsesThreadedAnimation:NO];
 }
 
+- (BOOL)_isLightweightExport
+{
+	return lightweightWindowController != nil;
+}
+
+- (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source
+{
+	return [[self _lightweightResultForSource:source] count] > 1;
+}
+
+- (BOOL)_canStartLightweightExportWithCurrentOptions
+{
+	if (![self _isLightweightExport]) return YES;
+	if (![self _lightweightSupportsExportType:exportType]) return NO;
+	if (exportSource == SPTableExport) return NO;
+	return [self _lightweightResultAvailableForSource:exportSource];
+}
+
+- (BOOL)_lightweightSupportsExportType:(SPExportType)type
+{
+	return type == SPCSVExport || type == SPXMLExport;
+}
+
+- (void)_enforceLightweightExportUIState
+{
+	if (![self _isLightweightExport]) return;
+
+	[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:NO];
+	[exportFilePerTableCheck setHidden:YES];
+	[exportFilePerTableCheck setState:NSControlStateValueOff];
+	[exportTableList setEnabled:NO];
+	[exportSelectAllTablesButton setEnabled:NO];
+	[exportDeselectAllTablesButton setEnabled:NO];
+	[exportRefreshTablesButton setEnabled:NO];
+}
+
+- (NSArray *)_lightweightResultForSource:(SPExportSource)source
+{
+	if (source == SPFilteredExport) return lightweightContentResult ?: @[];
+	if (source == SPQueryExport) return lightweightQueryResult ?: @[];
+	return @[];
+}
+
+- (NSString *)_exportHostName
+{
+	return [self _isLightweightExport] ? (lightweightHostName ?: @"") : [tableDocumentInstance host];
+}
+
+- (NSString *)_exportDatabaseName
+{
+	return [self _isLightweightExport] ? (lightweightDatabaseName ?: @"") : [tableDocumentInstance database];
+}
+
+- (NSString *)_exportTableName
+{
+	return [self _isLightweightExport] ? (lightweightSelectedTableName ?: @"") : [tableDocumentInstance table];
+}
+
+- (NSString *)_exportServerVersion
+{
+	return [self _isLightweightExport] ? (lightweightServerVersion ?: @"") : [tableDocumentInstance mySQLVersion];
+}
+
+- (NSString *)_exportFavoriteName
+{
+	return [self _isLightweightExport] ? (lightweightFavoriteName ?: @"") : [tableDocumentInstance name];
+}
+
+- (NSString *)_exportQueryForSource:(SPExportSource)source
+{
+	if ([self _isLightweightExport]) {
+		return (source == SPFilteredExport) ? lightweightContentQuery : lightweightQueryString;
+	}
+	return (source == SPFilteredExport) ? [tableContentInstance usedQuery] : [customQueryInstance usedQuery];
+}
+
+- (NSWindow *)_exportParentWindow
+{
+	return [self _isLightweightExport] ? [lightweightWindowController window] : [tableDocumentInstance parentWindowControllerWindow];
+}
+
+- (void)_setExportQueryMode:(NSInteger)queryMode
+{
+	if ([self _isLightweightExport]) {
+		[lightweightWindowController setLightweightConsoleQueryMode:queryMode];
+		return;
+	}
+	[tableDocumentInstance setQueryMode:queryMode];
+}
+
+- (void)_restorePreviousConnectionEncoding
+{
+	if (![previousConnectionEncoding length]) return;
+
+	NSString *encoding = [NSString stringWithFormat:@"%@%@", previousConnectionEncoding, (previousConnectionEncodingViaLatin1) ? @"-" : @""];
+	if ([self _isLightweightExport]) {
+		NSString *mysqlEncoding = [encoding hasSuffix:@"-"] ? [encoding substringToIndex:([encoding length] - 1)] : encoding;
+		[connection setEncoding:mysqlEncoding];
+		[connection setEncodingUsesLatin1Transport:[encoding hasSuffix:@"-"]];
+		return;
+	}
+	[tableDocumentInstance setConnectionEncoding:encoding reloadingViews:NO];
+}
+
+- (void)_showLightweightExportUnavailableAlert
+{
+	NSAlert *alert = [[NSAlert alloc] init];
+	[alert setAlertStyle:NSAlertStyleInformational];
+	[alert setMessageText:NSLocalizedString(@"Export is unavailable for this lightweight view.", @"lightweight export unavailable title")];
+	[alert setInformativeText:NSLocalizedString(@"Load a Content or Query result first. Full table, SQL and Dot export still require the legacy database view and are not opened automatically.", @"lightweight export unavailable message")];
+	[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+
+	NSWindow *parentWindow = [self _exportParentWindow];
+	if (parentWindow) {
+		[alert beginSheetModalForWindow:parentWindow completionHandler:nil];
+	}
+	else {
+		[alert runModal];
+	}
+}
+
 // NSOpenSavePanelDelegate - not sure why this wasn't enabled before...
 - (BOOL)panel:(id)sender shouldEnableURL:(NSURL *)url{
 	return YES;
@@ -618,12 +822,12 @@ set_input:
  * Opens the open panel when user selects to change the output path.
  */
 - (IBAction)changeExportOutputPath:(id)sender
-{	
+{
 	self.changeExportOutputPathPanel = [NSOpenPanel openPanel]; 	// need to retain, so we can relinquish access via stopAccessingSecurityScopedResource
 																	// I'm not sure though, haven't written non-ARC code for years.
-	
+
 	changeExportOutputPathPanel.delegate = self;
-	
+
 	[changeExportOutputPathPanel setCanChooseFiles:NO];
 	[changeExportOutputPathPanel setCanChooseDirectories:YES];
 	[changeExportOutputPathPanel setCanCreateDirectories:YES];
@@ -657,7 +861,7 @@ set_input:
                     [[SPAppDelegate preferenceController] window];
                     helpView = [[[SPAppDelegate preferenceController] generalPreferencePane] modifyAndReturnBookmarkHelpView];
                 });
-                
+
                 NSString *alertMessage = [NSString stringWithFormat:NSLocalizedString(@"The selected file is not a valid file.\n\nPlease try again.\n\nClass: %@", @"error while selecting file message"),
                                           classStr];
 
@@ -703,9 +907,9 @@ set_input:
  * Refreshes the table list.
  */
 - (IBAction)refreshTableList:(id)sender
-{		
+{
 	NSMutableDictionary *tableDict = [[NSMutableDictionary alloc] init];
-	
+
 	// Before refreshing the list, preserve the user's table selection, but only if it was triggered by the UI.
 	if (sender) {
 		for (NSMutableArray *item in tables)
@@ -715,13 +919,50 @@ set_input:
 								  [item safeObjectAtIndex:2],
 								  [item safeObjectAtIndex:3],
 								  [item safeObjectAtIndex:4],
-								  nil] 
+								  nil]
 						  forKey:[item firstObject]];
 		}
 	}
-	
+
 	[tables removeAllObjects];
-	
+
+	if ([self _isLightweightExport]) {
+		for (id itemName in lightweightTablesAndViews) {
+			[tables safeAddObject:[NSMutableArray arrayWithObjects:
+								   itemName,
+								   @NO,
+								   @NO,
+								   @NO,
+								   [NSNumber numberWithInt:SPTableTypeTable],
+								   nil]];
+		}
+
+		if (exportType == SPSQLExport) {
+			for (id procName in lightweightProcedures) {
+				[tables safeAddObject:[NSMutableArray arrayWithObjects:
+									   procName,
+									   @NO,
+									   @NO,
+									   @NO,
+									   [NSNumber numberWithInt:SPTableTypeProc],
+									   nil]];
+			}
+
+			for (id funcName in lightweightFunctions) {
+				[tables safeAddObject:[NSMutableArray arrayWithObjects:
+									   funcName,
+									   @NO,
+									   @NO,
+									   @NO,
+									   [NSNumber numberWithInt:SPTableTypeFunc],
+									   nil]];
+			}
+		}
+
+		[exportTableList reloadData];
+		return;
+	}
+
 	// For all modes, retrieve table and view names
 	{
         NSOrderedSet *tablesAndViews = [[NSOrderedSet alloc] initWithArray:[[tablesListInstance allTableAndViewNames] sortedArrayUsingSelector:@selector(compare:)]];
@@ -736,7 +977,7 @@ set_input:
 			                    nil]];
 		}
 	} // The purpose of this extra { } is to limit visibility and thus catch copy&paste errors
-	
+
 	// For SQL only, add procedures and functions
 	if (exportType == SPSQLExport) {
 		// Procedures
@@ -768,24 +1009,24 @@ set_input:
 			}
 		}
 	}
-	
+
 	if (sender) {
 		// Restore the user's table selection
 		for (NSUInteger i = 0; i < [tables count]; i++)
 		{
 			NSMutableArray *oldSelection = [tableDict objectForKey:[[tables safeObjectAtIndex:i] firstObject]];
-			
+
 			if (oldSelection) {
-				
+
 				NSMutableArray *newItem = [[NSMutableArray alloc] initWithArray:oldSelection];
-				
+
 				[newItem insertObject:[[tables safeObjectAtIndex:i] firstObject] atIndex:0];
-				
+
 				[tables safeReplaceObjectAtIndex:i withObject:newItem];
 			}
 		}
 	}
-	
+
 	[exportTableList reloadData];
 }
 
@@ -808,12 +1049,12 @@ set_input:
 	for (NSMutableArray *table in tables)
 	{
 		if (toggleStructure) [table safeReplaceObjectAtIndex:1 withObject:[NSNumber numberWithBool:[(NSButton*)sender tag]]];
-		
+
 		[table safeReplaceObjectAtIndex:2 withObject:[NSNumber numberWithBool:[(NSButton*)sender tag]]];
-		
+
 		if (toggleDropTable) [table safeReplaceObjectAtIndex:3 withObject:[NSNumber numberWithBool:[(NSButton*)sender tag]]];
 	}
-	
+
 	[exportTableList reloadData];
 
 	[self _updateExportFormatInformation];
@@ -897,13 +1138,13 @@ set_input:
 	{
 		[exportSQLIncludeDropSyntaxCheck setState:NSControlStateValueOff];
 	}
-	
+
 	[exportSQLIncludeDropSyntaxCheck setEnabled:[sender state]];
 	[exportSQLIncludeAutoIncrementValueButton setEnabled:[sender state]];
-	
+
 	[[exportTableList tableColumnWithIdentifier:SPTableViewDropColumnID] setHidden:(![sender state])];
 	[[exportTableList tableColumnWithIdentifier:SPTableViewStructureColumnID] setHidden:(![sender state])];
-	
+
 	[self _toggleExportButtonOnBackgroundThread];
 }
 
@@ -954,7 +1195,7 @@ set_input:
 - (IBAction)toggleSQLIncludeContent:(NSButton *)sender
 {
 	[[exportTableList tableColumnWithIdentifier:SPTableViewContentColumnID] setHidden:(![sender state])];
-	
+
 	[self _toggleExportButtonOnBackgroundThread];
 }
 
@@ -964,7 +1205,7 @@ set_input:
 - (IBAction)toggleSQLIncludeDropSyntax:(NSButton *)sender
 {
 	[[exportTableList tableColumnWithIdentifier:SPTableViewDropColumnID] setHidden:(![sender state])];
-	
+
 	[self _toggleExportButtonOnBackgroundThread];
 }
 
@@ -981,12 +1222,12 @@ set_input:
  * Opens the export sheet, selecting custom query as the export source.
  */
 - (IBAction)exportCustomQueryResultAsFormat:(id)sender
-{	
+{
 	[self exportTables:nil asFormat:[(NSMenuItem*)sender tag] usingSource:SPQueryExport];
 }
 
 #pragma mark -
-#pragma mark Other 
+#pragma mark Other
 
 - (void)tableListChangedAlertDidEnd:(NSWindow *)sheet returnCode:(NSInteger)returnCode contextInfo:(void *)contextInfo
 {
@@ -999,9 +1240,9 @@ set_input:
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
 	if ([menuItem action] == @selector(exportCustomQueryResultAsFormat:)) {
-		return (([customQueryInstance currentResultRowCount] > 0) && (![tableDocumentInstance isProcessing]));		
+		return (([customQueryInstance currentResultRowCount] > 0) && (![tableDocumentInstance isProcessing]));
 	}
-	
+
 	return YES;
 }
 
@@ -1012,43 +1253,57 @@ set_input:
  * Changes the selected export format and updates the UI accordingly.
  */
 - (void)_switchTab
-{		
+{
 	// Selected export format
 	NSString *type = [[[exportTypeTabBar selectedTabViewItem] identifier] lowercaseString];
-	
+
 	// Determine the export type
 	exportType = [exportTypeTabBar indexOfTabViewItemWithIdentifier:type];
-	
+
+	if ([self _isLightweightExport] && ![self _lightweightSupportsExportType:exportType]) {
+		NSBeep();
+		[exportTypeTabBar selectTabViewItemAtIndex:SPCSVExport];
+		type = [[[exportTypeTabBar selectedTabViewItem] identifier] lowercaseString];
+		exportType = [exportTypeTabBar indexOfTabViewItemWithIdentifier:type];
+	}
+
 	// Determine what data to use (filtered result, custom query result or selected table(s)) for the export operation
 	exportSource = (exportType == SPDotExport) ? SPTableExport : [exportInputPopUpButton indexOfSelectedItem];
-		
+
 	[exportOptionsTabBar selectTabViewItemWithIdentifier:type];
-	
+
 	BOOL isSQL  = (exportType == SPSQLExport);
 	BOOL isCSV  = (exportType == SPCSVExport);
 	BOOL isXML  = (exportType == SPXMLExport);
 	//BOOL isHTML = (exportType == SPHTMLExport);
 	//BOOL isPDF  = (exportType == SPPDFExport);
 	BOOL isDot  = (exportType == SPDotExport);
-	
+
 	BOOL enable = (isCSV || isXML /* || isHTML || isPDF  */ || isDot);
-	
-	[exportFilePerTableCheck setHidden:(isSQL || isDot)];		
+
+	[exportFilePerTableCheck setHidden:(isSQL || isDot)];
 	[exportTableList setEnabled:(!isDot)];
 	[exportSelectAllTablesButton setEnabled:(!isDot)];
 	[exportDeselectAllTablesButton setEnabled:(!isDot)];
 	[exportRefreshTablesButton setEnabled:(!isDot)];
-	
+
 	[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:(!isDot)];
-	
+
 	[exportInputPopUpButton setEnabled:(!isDot)];
-	
+
 	// When exporting to SQL, only the selected tables option should be enabled
-	if (isSQL) {
+	if ([self _isLightweightExport]) {
+		[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:NO];
+		[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPFilteredExport])];
+		[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPQueryExport])];
+		[self setExportInput:(SPExportSource)[exportInputPopUpButton indexOfSelectedItem]];
+		[self _enforceLightweightExportUIState];
+	}
+	else if (isSQL) {
 		// Programmatically changing the selected item of a popup button does not fire it's action, so update
 		// the selected export source manually.
 		exportSource = SPTableExport;
-		
+
 		[exportInputPopUpButton selectItemAtIndex:SPTableExport];
 		[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:NO];
 		[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:NO];
@@ -1059,38 +1314,39 @@ set_input:
 		[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:((enable) && ([[tableContentInstance currentResult] count] > 1))];
 		[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:((enable) && ([[customQueryInstance currentResult] count] > 1))];
 	}
-	
+
 	[[exportTableList tableColumnWithIdentifier:SPTableViewStructureColumnID] setHidden:(isSQL) ? (![exportSQLIncludeStructureCheck state]) : YES];
 	[[exportTableList tableColumnWithIdentifier:SPTableViewDropColumnID] setHidden:(isSQL) ? (![exportSQLIncludeDropSyntaxCheck state]) : YES];
-	
-	[[[exportTableList tableColumnWithIdentifier:SPTableViewContentColumnID] headerCell] setStringValue:(enable) ? @"" : @"C"]; 
-	
+
+	[[[exportTableList tableColumnWithIdentifier:SPTableViewContentColumnID] headerCell] setStringValue:(enable) ? @"" : @"C"];
+
 	// Set the tooltip
 	[[exportTableList tableColumnWithIdentifier:SPTableViewContentColumnID] setHeaderToolTip:(enable) ? @"" : NSLocalizedString(@"Include content", @"include content table column tooltip")];
-	
+
 	// When switching to Dot export, ensure the server's lower_case_table_names value is checked the first time
 	// to set the export's link case sensitivity setting
 	if (isDot && serverLowerCaseTableNameValue == NSNotFound) {
-		
+
 		SPMySQLResult *caseResult = [connection queryString:@"SHOW VARIABLES LIKE 'lower_case_table_names'"];
-		
+
 		[caseResult setReturnDataAsStrings:YES];
-		
+
 		if ([caseResult numberOfRows] == 1) {
 			serverLowerCaseTableNameValue = [[[caseResult getRowAsDictionary] objectForKey:@"Value"] integerValue];
-		} 
+		}
 		else {
 			serverLowerCaseTableNameValue = 0;
 		}
-		
+
 		[exportDotForceLowerTableNamesCheck setState:(serverLowerCaseTableNameValue == 0)?NSControlStateValueOff:NSControlStateValueOn];
 	}
-	
+
 	[self _displayExportTypeOptions:(isSQL || isCSV || isXML || isDot)];
 	[self updateAvailableExportFilenameTokens];
-	
+
 	[self updateDisplayedExportFilename];
 	[self _updateExportFormatInformation];
+	[self _toggleExportButtonOnBackgroundThread];
 }
 
 /**
@@ -1099,17 +1355,17 @@ set_input:
 - (void)_checkForDatabaseChanges
 {
 	NSUInteger i = [tables count];
-	
+
 	[tablesListInstance updateTables:self];
 
 	NSUInteger j = [[[NSOrderedSet alloc] initWithArray:[tablesListInstance allTableAndViewNames]] count];
-	
+
 	// If this is an SQL export, include procs and functions
 	if (exportType == SPSQLExport) {
 		j += [[[NSOrderedSet alloc] initWithArray:[tablesListInstance allProcedureNames]] count];
 		j += [[[NSOrderedSet alloc] initWithArray:[tablesListInstance allFunctionNames]] count];
 	}
-		
+
 	if (j > i) {
 		NSUInteger diff = j - i;
 		[NSAlert createDefaultAlertWithTitle:NSLocalizedString(@"The list of tables has changed", @"table list change alert message") message:[NSString stringWithFormat:NSLocalizedString(@"The number of tables in this database has changed since the export dialog was opened. There are now %lu additional table(s), most likely added by an external application.\n\nHow would you like to proceed?", @"table list change alert informative message"), (unsigned long)diff] primaryButtonTitle:NSLocalizedString(@"Continue", @"continue button") primaryButtonHandler:^{
@@ -1135,18 +1391,18 @@ set_input:
 	NSRect windowFrame = [[exportTablelistScrollView window] frame];
 	NSRect viewFrame   = [exportTablelistScrollView frame];
 	NSRect barFrame    = [exportTableListButtonBar frame];
-	
+
 	NSUInteger padding = (2 * SPExportUIPadding);
-	
+
 	CGFloat width  = (!display) ? (windowFrame.size.width - (padding + 2)) : (windowFrame.size.width - ([exportOptionsTabBar frame].size.width + (padding + 4)));
-	
+
 	[NSAnimationContext beginGrouping];
 	[[NSAnimationContext currentContext] setDuration:0.3];
-	
+
 	[[exportOptionsTabBar animator] setHidden:(!display)];
 	[[exportTablelistScrollView animator] setFrame:NSMakeRect(viewFrame.origin.x, viewFrame.origin.y, width, viewFrame.size.height)];
 	[[exportTableListButtonBar animator] setFrame:NSMakeRect(barFrame.origin.x, barFrame.origin.y, width, barFrame.size.height)];
-	
+
 	[NSAnimationContext endGrouping];
 }
 
@@ -1161,14 +1417,14 @@ set_input:
 	switch (exportType) {
 		case SPCSVExport:
 			if ([exportFilePerTableCheck state]) break;
-			
+
 			NSUInteger numberOfTables = 0;
-			
-			for (NSMutableArray *eachTable in tables) 
+
+			for (NSMutableArray *eachTable in tables)
 			{
 				if ([[eachTable safeObjectAtIndex:2] boolValue]) numberOfTables++;
 			}
-			
+
 			if (numberOfTables <= 1) break;
 		case SPXMLExport:
 		case SPDotExport:
@@ -1195,17 +1451,17 @@ set_input:
 
 	if ([exportProcessLowMemoryButton state]) {
 		[optionsSummary addObject:NSLocalizedString(@"Low memory", @"Low memory export summary")];
-	} 
+	}
 	else {
 		[optionsSummary addObject:NSLocalizedString(@"Standard memory", @"Standard memory export summary")];
 	}
 
 	if ([exportOutputCompressionFormatPopupButton indexOfSelectedItem] == SPNoCompression) {
 		[optionsSummary addObject:NSLocalizedString(@"no compression", @"No compression export summary - within a sentence")];
-	} 
+	}
 	else if ([exportOutputCompressionFormatPopupButton indexOfSelectedItem] == SPGzipCompression) {
 		[optionsSummary addObject:NSLocalizedString(@"Gzip compression", @"Gzip compression export summary - within a sentence")];
-	} 
+	}
 	else if ([exportOutputCompressionFormatPopupButton indexOfSelectedItem] == SPBzip2Compression) {
 		[optionsSummary addObject:NSLocalizedString(@"bzip2 compression", @"bzip2 compression export summary - within a sentence")];
 	}
@@ -1214,7 +1470,7 @@ set_input:
 }
 
 /**
- * Enables or disables the export button based on the state of various interface controls. 
+ * Enables or disables the export button based on the state of various interface controls.
  *
  * @param uiStateDict A dictionary containing the state of various UI controls.
  */
@@ -1232,6 +1488,12 @@ set_input:
 		BOOL structureEnabled = [[uiStateDict objectForKey:SPSQLExportStructureEnabled] boolValue];
 		BOOL contentEnabled   = [[uiStateDict objectForKey:SPSQLExportContentEnabled] boolValue];
 		BOOL dropEnabled      = [[uiStateDict objectForKey:SPSQLExportDropEnabled] boolValue];
+
+		if ([self _isLightweightExport]) {
+			enable = [self _canStartLightweightExportWithCurrentOptions];
+			[self performSelectorOnMainThread:@selector(_toggleExportButtonWithBool:) withObject:@(enable) waitUntilDone:NO];
+			return;
+		}
 
 		if (isCSV || isXML || isHTML || isPDF || (isSQL && ((!structureEnabled) || (!dropEnabled)))) {
 			enable = NO;
@@ -1286,7 +1548,7 @@ set_input:
 - (void)_toggleExportButtonOnBackgroundThread
 {
 	NSMutableDictionary *uiStateDict = [[NSMutableDictionary alloc] init];
-		
+
 	[uiStateDict setObject:[NSNumber numberWithInteger:[exportSQLIncludeStructureCheck state]] forKey:SPSQLExportStructureEnabled];
 	[uiStateDict setObject:[NSNumber numberWithInteger:[exportSQLIncludeContentCheck state]] forKey:SPSQLExportContentEnabled];
 	[uiStateDict setObject:[NSNumber numberWithInteger:[exportSQLIncludeDropSyntaxCheck state]] forKey:SPSQLExportDropEnabled];
@@ -1301,7 +1563,11 @@ set_input:
  */
 - (void)_toggleExportButtonWithBool:(NSNumber *)enable
 {
-	[exportButton setEnabled:[enable boolValue]];
+	BOOL shouldEnable = [enable boolValue];
+	if ([self _isLightweightExport] && ![self _canStartLightweightExportWithCurrentOptions]) {
+		shouldEnable = NO;
+	}
+	[exportButton setEnabled:shouldEnable];
 }
 
 #pragma mark - SPExportInitializer
@@ -1323,7 +1589,7 @@ set_input:
 
 	// If it's not already displayed, open the progress sheet
 	if (![exportProgressWindow isVisible]) {
-		[[tableDocumentInstance parentWindowControllerWindow] beginSheet:exportProgressWindow completionHandler:nil];
+		[[self _exportParentWindow] beginSheet:exportProgressWindow completionHandler:nil];
 	}
 
 	// cache the current connection encoding so the exporter can do what it wants.
@@ -1354,15 +1620,15 @@ set_input:
 		SPLog(@"hide instantly");
 		[self _hideExportProgress];
 	}
-	
+
 	// Restore query mode
-	[tableDocumentInstance setQueryMode:SPInterfaceQueryMode];
+	[self _setExportQueryMode:SPInterfaceQueryMode];
 
 	// Display export finished notification
 	[self displayExportFinishedNotification];
 
 	// Restore the connection encoding to it's pre-export value
-	[tableDocumentInstance setConnectionEncoding:[NSString stringWithFormat:@"%@%@", previousConnectionEncoding, (previousConnectionEncodingViaLatin1) ? @"-" : @""] reloadingViews:NO];
+	[self _restorePreviousConnectionEncoding];
 }
 
 /**
@@ -1386,10 +1652,10 @@ set_input:
 	switch (exportSource)
 	{
 		case SPFilteredExport:
-			dataArray = [tableContentInstance currentDataResultWithNULLs:YES hideBLOBs:NO];
+			dataArray = [self _isLightweightExport] ? [self _lightweightResultForSource:SPFilteredExport] : [tableContentInstance currentDataResultWithNULLs:YES hideBLOBs:NO];
 			break;
 		case SPQueryExport:
-			dataArray = [customQueryInstance currentDataResultWithNULLs:YES truncateDataFields:NO];
+			dataArray = [self _isLightweightExport] ? [self _lightweightResultForSource:SPQueryExport] : [customQueryInstance currentDataResultWithNULLs:YES truncateDataFields:NO];
 			break;
 		case SPTableExport:
 			// Create an array of tables to export
@@ -1401,27 +1667,27 @@ set_input:
 						// Check the overall export settings
 						if ([[table safeObjectAtIndex:1] boolValue] && (![exportSQLIncludeStructureCheck state])) {
 							[table safeReplaceObjectAtIndex:1 withObject:@NO];
-						}
+					}
 
 						if ([[table safeObjectAtIndex:2] boolValue] && (![exportSQLIncludeContentCheck state])) {
 							[table safeReplaceObjectAtIndex:2 withObject:@NO];
-						}
+					}
 
 						if ([[table safeObjectAtIndex:3] boolValue] && (![exportSQLIncludeDropSyntaxCheck state])) {
 							[table safeReplaceObjectAtIndex:3 withObject:@NO];
-						}
+					}
 
 						[exportTables safeAddObject:table];
-					}
 				}
+			}
 				else if (exportType == SPDotExport) {
 					[exportTables safeAddObject:[table firstObject]];
-				}
+			}
 				else {
 					if ([[table safeObjectAtIndex:2] boolValue]) {
 						[exportTables safeAddObject:[table firstObject]];
-					}
 				}
+			}
 			}
 
 			break;
@@ -1477,7 +1743,7 @@ set_input:
 	SPExportFile *singleExportFile = nil, *file = nil;
 
 	// Change query logging mode
-	[tableDocumentInstance setQueryMode:SPImportExportQueryMode];
+	[self _setExportQueryMode:SPImportExportQueryMode];
 
 	// Setup the progress sheet
 	[exportProgressTitle setStringValue:[NSString stringWithFormat:NSLocalizedString(@"Exporting %@", @"text showing that the application is importing a supplied format"), exportTypeLabel]];
@@ -1487,8 +1753,8 @@ set_input:
 	[exportProgressIndicator setUsesThreadedAnimation:YES];
 
 	// Open the progress sheet
-	[[tableDocumentInstance parentWindowControllerWindow] beginSheet:exportProgressWindow completionHandler:^(NSModalResponse returnCode) {
-		[self->tableDocumentInstance refreshTables];
+	[[self _exportParentWindow] beginSheet:exportProgressWindow completionHandler:^(NSModalResponse returnCode) {
+		if (![self _isLightweightExport]) [self->tableDocumentInstance refreshTables];
 	}];
 
 	// CSV export
@@ -1532,10 +1798,10 @@ set_input:
 						[exportFiles safeAddObject:singleExportFile];
 
 						singleFileHandleSet = YES;
-					}
+				}
 
 					[csvExporter setExportOutputFile:singleExportFile];
-				}
+			}
 
 				[exporters addObject:csvExporter];
 			}
@@ -1558,9 +1824,9 @@ set_input:
 
 		SPSQLExporter *sqlExporter = [[SPSQLExporter alloc] initWithDelegate:self];
 
-		[sqlExporter setSqlDatabaseHost:[tableDocumentInstance host]];
-		[sqlExporter setSqlDatabaseName:[tableDocumentInstance database]];
-		[sqlExporter setSqlDatabaseVersion:[tableDocumentInstance mySQLVersion]];
+			[sqlExporter setSqlDatabaseHost:[self _exportHostName]];
+			[sqlExporter setSqlDatabaseName:[self _exportDatabaseName]];
+			[sqlExporter setSqlDatabaseVersion:[self _exportServerVersion]];
 
 		[sqlExporter setSqlOutputIncludeUTF8BOM:[exportUseUTF8BOMButton state]];
 		[sqlExporter setSqlOutputEncodeBLOBasHex:[exportSQLBLOBFieldsAsHexCheck state]];
@@ -1630,10 +1896,10 @@ set_input:
 						[exportFiles safeAddObject:singleExportFile];
 
 						singleFileHandleSet = YES;
-					}
+				}
 
 					[xmlExporter setExportOutputFile:singleExportFile];
-				}
+			}
 
 				[exporters addObject:xmlExporter];
 			}
@@ -1660,9 +1926,9 @@ set_input:
 
 		[dotExporter setDotTableData:tableDataInstance];
 		[dotExporter setDotForceLowerTableNames:[exportDotForceLowerTableNamesCheck state]];
-		[dotExporter setDotDatabaseHost:[tableDocumentInstance host]];
-		[dotExporter setDotDatabaseName:[tableDocumentInstance database]];
-		[dotExporter setDotDatabaseVersion:[tableDocumentInstance mySQLVersion]];
+			[dotExporter setDotDatabaseHost:[self _exportHostName]];
+			[dotExporter setDotDatabaseName:[self _exportDatabaseName]];
+			[dotExporter setDotDatabaseVersion:[self _exportServerVersion]];
 
 		[dotExporter setDotExportTables:exportTables];
 
@@ -1671,7 +1937,7 @@ set_input:
 			[exportFilename setString:[self expandCustomFilenameFormatUsingTableName:nil]];
 		}
 		else {
-			[exportFilename setString:[tableDocumentInstance database]];
+				[exportFilename setString:[self _exportDatabaseName]];
 		}
 
 		// Only append the extension if necessary
@@ -1779,13 +2045,13 @@ set_input:
 				NSArray *representedObjects = [exportCustomFilenameTokenField objectValue];
 				for (id representedObject in representedObjects) {
 					if ([representedObject isKindOfClass:[SPExportFileNameTokenObject class]] && [[representedObject tokenId] isEqualToString:SPFileNameTableTokenName]) tableNameInTokens = YES;
-				}
+			}
 				[exportFilename setString:(tableNameInTokens ? exportFilename : [exportFilename stringByAppendingFormat:@"_%@", table])];
 			}
 		}
 		else {
 			BOOL isSingleTableExport = (exportSource == SPTableExport && exportTableCount == 1);
-			[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [tableDocumentInstance database] : table)];
+				[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [self _exportDatabaseName] : table)];
 		}
 
 		// Only append the extension if necessary
@@ -1842,13 +2108,13 @@ set_input:
 				NSArray *representedObjects = [exportCustomFilenameTokenField objectValue];
 				for (id representedObject in representedObjects) {
 					if ([representedObject isKindOfClass:[SPExportFileNameTokenObject class]] && [[representedObject tokenId] isEqualToString:SPFileNameTableTokenName]) tableNameInTokens = YES;
-				}
+			}
 				[exportFilename setString:(tableNameInTokens ? exportFilename : [exportFilename stringByAppendingFormat:@"_%@", table])];
 			}
 		}
 		else {
 			BOOL isSingleTableExport = (exportSource == SPTableExport && exportTableCount == 1);
-			[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [tableDocumentInstance database] : table)];
+				[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [self _exportDatabaseName] : table)];
 		}
 
 		// Only append the extension if necessary
@@ -1895,9 +2161,9 @@ set_input:
 	// Write the file header and the first table name
 	[file writeData:[[NSMutableString stringWithFormat:@"%@: %@   %@: %@    %@: %@%@%@%@ %@%@%@",
 					  NSLocalizedString(@"Host", @"export header host label"),
-					  [tableDocumentInstance host],
+					  [self _exportHostName],
 					  NSLocalizedString(@"Database", @"export header database label"),
-					  [tableDocumentInstance database],
+					  [self _exportDatabaseName],
 					  NSLocalizedString(@"Generation Time", @"export header generation time label"),
 					  [NSDate date],
 					  lineEnding,
@@ -1922,8 +2188,8 @@ set_input:
 	[header appendString:@"- Sequel Ace XML dump\n"];
 	[header appendFormat:@"- %@ %@\n-\n", NSLocalizedString(@"Version", @"export header version label"), [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]];
 	[header appendFormat:@"- %@\n- %@\n-\n", SPLOCALIZEDURL_HOMEPAGE, SPDevURL];
-	[header appendFormat:@"- %@: %@ (MySQL %@)\n", NSLocalizedString(@"Host", @"export header host label"), [tableDocumentInstance host], [tableDocumentInstance mySQLVersion]];
-	[header appendFormat:@"- %@: %@\n", NSLocalizedString(@"Database", @"export header database label"), [tableDocumentInstance database]];
+	[header appendFormat:@"- %@: %@ (MySQL %@)\n", NSLocalizedString(@"Host", @"export header host label"), [self _exportHostName], [self _exportServerVersion]];
+	[header appendFormat:@"- %@: %@\n", NSLocalizedString(@"Database", @"export header database label"), [self _exportDatabaseName]];
 	[header appendFormat:@"- %@ Time: %@\n", NSLocalizedString(@"Generation Time", @"export header generation time label"), [NSDate date]];
 	[header appendString:@"-\n-->\n\n"];
 
@@ -1932,10 +2198,10 @@ set_input:
 		NSString *tag;
 
 		if (exportSource == SPTableExport) {
-			tag = [NSString stringWithFormat:@"<mysqldump xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n<database name=\"%@\">\n\n", [[tableDocumentInstance database] HTMLEscapeString]];
+			tag = [NSString stringWithFormat:@"<mysqldump xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n<database name=\"%@\">\n\n", [[self _exportDatabaseName] HTMLEscapeString]];
 		}
 		else {
-			NSString *queryString = (exportSource == SPFilteredExport) ? [tableContentInstance usedQuery] : [customQueryInstance usedQuery];
+			NSString *queryString = [self _exportQueryForSource:exportSource];
 			NSString *escapedQueryString = [(queryString ?: @"") HTMLEscapeString];
 			tag = [NSString stringWithFormat:@"<resultset statement=\"%@\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n", escapedQueryString];
 		}
@@ -1943,7 +2209,7 @@ set_input:
 		[header appendString:tag];
 	}
 	else {
-		[header appendFormat:@"<%@>\n\n", [[tableDocumentInstance database] HTMLEscapeString]];
+		[header appendFormat:@"<%@>\n\n", [[self _exportDatabaseName] HTMLEscapeString]];
 	}
 
 	[file writeData:[header dataUsingEncoding:NSUTF8StringEncoding]];
@@ -1989,7 +2255,7 @@ set_input:
 			{
 				if ([[exporter exportOutputFile] isEqualTo:file]) {
 					[exportersToRemove addObject:exporter];
-				}
+			}
 			}
 
 			[exporters removeObjectsInArray:exportersToRemove];
@@ -2108,7 +2374,7 @@ set_input:
 				if ([[exporter exportOutputFile] isEqualTo:file]) {
 					[exporters safeRemoveObjectAtIndex:i];
 					i--;
-				}
+			}
 			}
 		}
 
@@ -2136,11 +2402,11 @@ set_input:
 
 					if ([file exportFileNeedsCSVHeader]) {
 						[self writeCSVHeaderToExportFile:file];
-					}
+				}
 					else if ([file exportFileNeedsXMLHeader]) {
 						[self writeXMLHeaderToExportFile:file];
-					}
 				}
+			}
 			}
 		}
 
@@ -2170,26 +2436,31 @@ set_input:
  * Re-open the export sheet without resetting the interface - for use on error.
  */
 - (void)_openExportSheet {
-    [[tableDocumentInstance parentWindowControllerWindow] beginSheet:self.window completionHandler:^(NSModalResponse returnCode) {
-        // Perform the export
-        if (returnCode == NSModalResponseOK) {
+	[[self _exportParentWindow] beginSheet:self.window completionHandler:^(NSModalResponse returnCode) {
+		// Perform the export
+		if (returnCode == NSModalResponseOK) {
 
-            [self->prefs setObject:[self currentSettingsAsDictionary] forKey:SPLastExportSettings];
+			if ([self _isLightweightExport] && ![self _canStartLightweightExportWithCurrentOptions]) {
+				[self _showLightweightExportUnavailableAlert];
+				return;
+			}
 
-            // If we are about to perform a table export, cache the current number of tables within the list,
-            // refresh the list and then compare the numbers to accommodate situations where new tables are
-            // added by external applications.
-            if ((self->exportSource == SPTableExport) && (self->exportType != SPDotExport)) {
+			[self->prefs setObject:[self currentSettingsAsDictionary] forKey:SPLastExportSettings];
 
-                // Give the export sheet a chance to close
-                [self performSelector:@selector(_checkForDatabaseChanges) withObject:nil afterDelay:0.5];
-            }
-            else {
-                // Initialize the export after a short delay to give the alert a chance to close
-                [self performSelector:@selector(initializeExportUsingSelectedOptions) withObject:nil afterDelay:0.5];
-            }
-        }
-    }];
+			// If we are about to perform a table export, cache the current number of tables within the list,
+			// refresh the list and then compare the numbers to accommodate situations where new tables are
+			// added by external applications.
+			if ((self->exportSource == SPTableExport) && (self->exportType != SPDotExport)) {
+
+				// Give the export sheet a chance to close
+				[self performSelector:@selector(_checkForDatabaseChanges) withObject:nil afterDelay:0.5];
+			}
+			else {
+				// Initialize the export after a short delay to give the alert a chance to close
+				[self performSelector:@selector(initializeExportUsingSelectedOptions) withObject:nil afterDelay:0.5];
+			}
+		}
+	}];
 }
 
 #pragma mark - SPExportFilenameUtilities
@@ -2207,7 +2478,7 @@ set_input:
 		NSString *extension = [self currentDefaultExportFileExtension];
 
 		//note that there will be no tableName if the export is done from a query result without a database selected (or empty).
-		filename = [self expandCustomFilenameFormatUsingTableName:[[tablesListInstance tables] safeObjectAtIndex:1]];
+		filename = [self expandCustomFilenameFormatUsingTableName:([self _isLightweightExport] ? [self _exportTableName] : [[tablesListInstance tables] safeObjectAtIndex:1])];
 
 		if (![[self customFilenamePathExtension] length] && [extension length] > 0) filename = [filename stringByAppendingPathExtension:extension];
 	}
@@ -2335,21 +2606,21 @@ set_input:
 	NSString *extension = [self currentDefaultExportFileExtension];
 
 	// Determine what the file name should be
-	switch (exportSource)
+		switch (exportSource)
 	{
 		case SPFilteredExport:
-			filename = [NSString stringWithFormat:@"%@_view", [tableDocumentInstance table]];
+			filename = [NSString stringWithFormat:@"%@_view", [self _exportTableName]];
 			break;
 		case SPQueryExport:
 			filename = @"query_result";
 			break;
 		case SPTableExport:
 			filename = [NSString stringWithFormat:@"%@_%@",
-						[tableDocumentInstance database],
+						[self _exportDatabaseName],
 						[[NSDate date] stringWithFormat:@"yyyy-MM-dd"
 												 locale:[NSLocale autoupdatingCurrentLocale]
 											   timeZone:[NSTimeZone localTimeZone]]];
-			
+
 			;
 			break;
 	}
@@ -2425,11 +2696,11 @@ set_input:
 			NSString *tokenContent = [filenamePart tokenId];
 
 			if ([tokenContent isEqualToString:SPFileNameHostTokenName]) {
-				[string appendStringOrNil:[tableDocumentInstance host]];
+				[string appendStringOrNil:[self _exportHostName]];
 
 			}
 			else if ([tokenContent isEqualToString:SPFileNameDatabaseTokenName]) {
-				[string appendStringOrNil:[tableDocumentInstance database]];
+				[string appendStringOrNil:[self _exportDatabaseName]];
 
 			}
 			else if ([tokenContent isEqualToString:SPFileNameTableTokenName]) {
@@ -2454,7 +2725,7 @@ set_input:
 				[string appendString:[[NSDate date] stringWithFormat:@"HH:mm:ss" locale:[NSLocale autoupdatingCurrentLocale] timeZone:[NSTimeZone localTimeZone]]];
 			}
 			else if ([tokenContent isEqualToString:SPFileNameFavoriteTokenName]) {
-				[string appendStringOrNil:[tableDocumentInstance name]];
+				[string appendStringOrNil:[self _exportFavoriteName]];
 			}
 		}
 		else {
@@ -2642,6 +2913,20 @@ set_input:
 #pragma mark -
 #pragma mark Tabview delegate methods
 
+- (BOOL)tabView:(NSTabView *)tabView shouldSelectTabViewItem:(NSTabViewItem *)tabViewItem
+{
+	if ([self _isLightweightExport] && tabView == exportTypeTabBar) {
+		SPExportType requestedType = (SPExportType)[exportTypeTabBar indexOfTabViewItem:tabViewItem];
+		if (![self _lightweightSupportsExportType:requestedType]) {
+			[self _enforceLightweightExportUIState];
+			NSBeep();
+			return NO;
+		}
+	}
+
+	return YES;
+}
+
 - (void)tabView:(NSTabView *)tabView didSelectTabViewItem:(NSTabViewItem *)tabViewItem
 {
 	[tabViewItem setView:exporterView];
@@ -2701,7 +2986,7 @@ set_input:
 				if(name) {
 					SPExportFileNameTokenObject *tok = [SPExportFileNameTokenObject tokenWithId:name];
 					[res safeAddObject:tok];
-				}
+			}
 			}
 			else {
 				[NSException raise:NSInternalInconsistencyException format:@"pasteboard %@ contains unexpected object %@",pboard,item];
@@ -2863,16 +3148,16 @@ set_input:
 
 	NSUInteger start = 0;
 	for(id obj in [exportCustomFilenameTokenField objectValue]) {
-		
+
 		SPLog(@"obj = %@", obj);
-		
+
 		NSUInteger length;
 		BOOL isText = NO;
 		if(IS_STRING(obj)) {
 			NSString *objString = (NSString *)obj;
 			length = [objString length];
 			isText = YES;
-			
+
 			// only attempt tokenization if string contains a { or }
 			if([objString containsString:@"{"] == NO && [objString containsString:@"}"] == NO){
 				SPLog(@"string does not contain token delimiters");
@@ -3139,7 +3424,7 @@ set_input:
 				if([allowedTokens containsObject:token]) {
 					[tokenListOut addObject:token];
 					continue;
-				}
+			}
 			}
 			SPLog(@"Ignoring an invalid or unknown token with tokenId=%@",tokenId);
 		}
@@ -3237,7 +3522,7 @@ set_input:
 
 	[exporters removeAllObjects];
 	[exportFiles removeAllObjects];
-	
+
 	id o;
 	// if we have some bookmarks, populate the last used export path
 	// look up that bookmark and request access
@@ -3249,7 +3534,7 @@ set_input:
         // ret value can be nil
         userChosenDirectory = [SecureBookmarkManager.sharedInstance bookmarkForFilename:fileURLString];
 	}
-	
+
 	SPExportType et;
 	if((o = [dict safeObjectForKey:@"exportType"]) && [[self class] copyExportTypeForDescription:o to:&et]) {
 		[exportTypeTabBar selectTabViewItemAtIndex:et];
@@ -3411,7 +3696,7 @@ set_input:
                                                                                 @"SQLIncludeGenerated": IsOn(exportSQLIncludeGeneratedColumnsCheck),
 																				@"SQLInsertNValue":     @([exportSQLInsertNValueTextField integerValue]),
 																				@"SQLInsertDivider":    [[self class] describeSQLExportInsertDivider:(SPSQLExportInsertDivider)[exportSQLInsertDividerPopUpButton indexOfSelectedItem]]
-																				}];
+																			}];
 
 	if(includeStructure) {
 		[dict addEntriesFromDictionary:@{
@@ -3574,15 +3859,15 @@ set_input:
 
 				if (structure && [[table safeObjectAtIndex:1] boolValue]) {
 					[flags safeAddObject:@"structure"];
-				}
+			}
 
 				if (content && [[table safeObjectAtIndex:2] boolValue]) {
 					[flags safeAddObject:@"content"];
-				}
+			}
 
 				if (drop && [[table safeObjectAtIndex:3] boolValue]) {
 					[flags safeAddObject:@"drop"];
-				}
+			}
 
 				return flags;
 			}
@@ -3788,7 +4073,7 @@ set_input:
 				string = (exportSource == SPTableExport) ? @"</database>\n</mysqldump>\n" : @"</resultset>\n";;
 			}
 			else if ([exporter xmlFormat] == SPXMLExportPlainFormat) {
-				string = [NSString stringWithFormat:@"</%@>\n", [[tableDocumentInstance database] HTMLEscapeString]];
+				string = [NSString stringWithFormat:@"</%@>\n", [[self _exportDatabaseName] HTMLEscapeString]];
 			}
 
 			[[exporter exportOutputFile] writeData:[string dataUsingEncoding:[connection stringEncoding]]];
@@ -3809,7 +4094,7 @@ set_input:
 			string = (exportSource == SPTableExport) ? @"</database>\n</mysqldump>\n" : @"</resultset>\n";;
 		}
 		else if ([exporter xmlFormat] == SPXMLExportPlainFormat) {
-			string = [NSString stringWithFormat:@"</%@>\n", [[tableDocumentInstance database] HTMLEscapeString]];
+			string = [NSString stringWithFormat:@"</%@>\n", [[self _exportDatabaseName] HTMLEscapeString]];
 		}
 
 		[[exporter exportOutputFile] writeData:[string dataUsingEncoding:[connection stringEncoding]]];
@@ -3924,7 +4209,7 @@ set_input:
 	[changeExportOutputPathPanel.URL stopAccessingSecurityScopedResource];
 
 	[self setServerSupport:nil];
-	
+
 }
 
 @end

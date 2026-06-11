@@ -1005,6 +1005,16 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     if ([activeWindowController hasActiveLightweightConnection]) {
+        if (action == @selector(export:)) {
+            isValid = [activeWindowController canExportLightweightData];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(printDocument:)) {
+            isValid = [activeWindowController canPrintLightweightDocument];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(saveConnectionSheet:)) {
             isValid = [activeWindowController validateLightweightSaveConnectionMenuItem:menuItem];
             goto validateMenuItemDone;
@@ -1012,6 +1022,16 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
         if (action == @selector(addConnectionToFavorites:)) {
             isValid = [activeWindowController canAddLightweightConnectionToFavorites];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(import:)) {
+            isValid = [activeWindowController canImportLightweightSQL];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(importFromClipboard:)) {
+            isValid = [activeWindowController canImportLightweightSQLFromClipboard];
             goto validateMenuItemDone;
         }
 
@@ -1049,6 +1069,11 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
             isValid = [activeWindowController hasSelectedLightweightDatabase];
             goto validateMenuItemDone;
         }
+    }
+
+    if (action == @selector(printDocument:)) {
+        isValid = NO;
+        goto validateMenuItemDone;
     }
 
     if (action == @selector(showGotoDatabase:) ||

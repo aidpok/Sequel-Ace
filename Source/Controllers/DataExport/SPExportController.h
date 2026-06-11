@@ -38,6 +38,7 @@
 @class SPCSVExporter;
 @class SPXMLExporter;
 @class SPExportFile;
+@class SPWindowController;
 
 /**
  * @class SPExportController SPExportController.h
@@ -54,7 +55,22 @@
 	IBOutlet SPCustomQuery *customQueryInstance;
 	IBOutlet SPTablesList *tablesListInstance;
 	IBOutlet SPTableData *tableDataInstance;
-	
+	__weak SPWindowController *lightweightWindowController;
+	NSString *lightweightDatabaseName;
+	NSString *lightweightHostName;
+	NSString *lightweightServerVersion;
+	NSString *lightweightSelectedTableName;
+	NSString *lightweightFavoriteName;
+	NSString *lightweightContentQuery;
+	NSString *lightweightQueryString;
+	NSArray *lightweightTablesAndViews;
+	NSArray *lightweightProcedures;
+	NSArray *lightweightFunctions;
+	NSArray *lightweightSelectedTableItems;
+	NSArray *lightweightContentResult;
+	NSArray *lightweightQueryResult;
+	SPExportSource lightweightPreferredSource;
+
 	// Export window
 	IBOutlet NSView *exporterView;
 	IBOutlet NSButton *exportButton;
@@ -261,6 +277,24 @@
 @property (readwrite, strong) NSURL *userChosenDirectory;
 @property (readwrite, strong) NSOpenPanel *changeExportOutputPathPanel;
 @property (readwrite, strong) NSMutableArray<NSDictionary<NSString *, id> *> *bookmarks;
+
+- (void)configureForLightweightWindowController:(SPWindowController *)windowController
+                                     connection:(SPMySQLConnection *)aConnection
+                                  serverSupport:(SPServerSupport *)aServerSupport
+                                       database:(NSString *)database
+                                           host:(NSString *)host
+                                  serverVersion:(NSString *)serverVersion
+                              selectedTableName:(NSString *)selectedTableName
+                                   favoriteName:(NSString *)favoriteName
+                              tablesAndViewNames:(NSArray *)tablesAndViews
+                                 procedureNames:(NSArray *)procedures
+                                  functionNames:(NSArray *)functions
+                             selectedTableItems:(NSArray *)selectedTables
+                                  contentResult:(NSArray *)contentResult
+                                   contentQuery:(NSString *)contentQuery
+                                    queryResult:(NSArray *)queryResult
+                                    queryString:(NSString *)queryString
+                                preferredSource:(SPExportSource)source;
 
 - (void)exportTables:(NSArray *)table asFormat:(SPExportType)format usingSource:(SPExportSource)source;
 - (void)openExportErrorsSheetWithString:(NSString *)errors;

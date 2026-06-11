@@ -77,6 +77,8 @@
 #import "SPGotoDatabaseController.h"
 #import "SPFilterTableController.h"
 #import "SPNavigatorController.h"
+#import "SPServerSupport.h"
+#import "SPExportController.h"
 #import "SPDataAdditions.h"
 #import <SPMySQL/SPMySQL.h>
 #import <SPMySQL/SPMySQLConstants.h>
