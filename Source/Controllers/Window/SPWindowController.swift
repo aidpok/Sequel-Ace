@@ -1569,19 +1569,22 @@ private extension SPWindowController {
                                         defaultValue: String = "",
                                         buttonTitle: String,
                                         nameValidator: ((String) -> Bool)? = nil) -> SALightweightLegacySheetResult? {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 314, height: 102),
-                              styleMask: .titled,
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 314, height: 112),
+                              styleMask: [.titled, .resizable],
                               backing: .buffered,
                               defer: false)
         window.title = title
+        window.minSize = NSSize(width: 292, height: 112)
+        window.maxSize = NSSize(width: 650, height: 112)
         let controller = SALightweightLegacySheetController(window: window)
         let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
         window.contentView = contentView
 
-        let messageField = legacyLabel(message, frame: NSRect(x: 20, y: 64, width: 274, height: 18), alignment: .left)
-        let nameField = legacyTextField(frame: NSRect(x: 20, y: 42, width: 274, height: 19), value: defaultValue)
-        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 122, y: 12, width: 86, height: 28), keyEquivalent: "\u{1b}")
-        let okButton = legacyButton(title: buttonTitle, frame: NSRect(x: 207, y: 12, width: 92, height: 28), keyEquivalent: "\r")
+        let messageField = legacyLabel(message, frame: NSRect(x: 17, y: 78, width: 280, height: 14), alignment: .left)
+        messageField.lineBreakMode = .byTruncatingMiddle
+        let nameField = legacyTextField(frame: NSRect(x: 20, y: 52, width: 274, height: 18), value: defaultValue)
+        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 15, y: 13, width: 99, height: 28), keyEquivalent: "\u{1b}")
+        let okButton = legacyButton(title: buttonTitle, frame: NSRect(x: 186, y: 13, width: 113, height: 28), keyEquivalent: "\r")
 
         contentView.addSubview(messageField)
         contentView.addSubview(nameField)
@@ -1623,27 +1626,33 @@ private extension SPWindowController {
     }
 
     func promptForLightweightDatabaseCopy(sourceDatabase: String) -> SALightweightLegacySheetResult? {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 314, height: 127),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 379, height: 154),
                               styleMask: .titled,
                               backing: .buffered,
                               defer: false)
         window.title = NSLocalizedString("Duplicate Database", comment: "copy database sheet title")
+        window.minSize = NSSize(width: 379, height: 154)
+        window.maxSize = NSSize(width: 379, height: 154)
 
         let controller = SALightweightLegacySheetController(window: window)
         let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
         window.contentView = contentView
 
-        let messageField = legacyLabel(sourceDatabase, frame: NSRect(x: 20, y: 89, width: 274, height: 18), alignment: .center)
-        let nameField = legacyTextField(frame: NSRect(x: 20, y: 67, width: 274, height: 19), value: sourceDatabase)
+        let titleField = legacyLabel(NSLocalizedString("Duplicate database:", comment: "duplicate database title label"), frame: NSRect(x: 104, y: 120, width: 258, height: 14), alignment: .left)
+        let sourceLabel = legacyLabel(NSLocalizedString("Source:", comment: "source database label"), frame: NSRect(x: -3, y: 98, width: 105, height: 14), alignment: .right)
+        let sourceField = legacyLabel(sourceDatabase, frame: NSRect(x: 104, y: 98, width: 258, height: 14), alignment: .left)
+        sourceField.font = .boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+        let destinationLabel = legacyLabel(NSLocalizedString("Destination:", comment: "destination database label"), frame: NSRect(x: -3, y: 74, width: 105, height: 14), alignment: .right)
+        let nameField = legacyTextField(frame: NSRect(x: 107, y: 72, width: 252, height: 18), value: sourceDatabase)
         let duplicateContent = NSButton(checkboxWithTitle: NSLocalizedString("Duplicate database content", comment: "duplicate database content checkbox"), target: nil, action: nil)
-        duplicateContent.frame = NSRect(x: 20, y: 42, width: 274, height: 18)
+        duplicateContent.frame = NSRect(x: 105, y: 48, width: 256, height: 18)
         duplicateContent.controlSize = .small
         duplicateContent.font = .messageFont(ofSize: 11)
         duplicateContent.state = .on
-        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 122, y: 12, width: 86, height: 28), keyEquivalent: "\u{1b}")
-        let duplicateButton = legacyButton(title: NSLocalizedString("Duplicate", comment: "duplicate database button"), frame: NSRect(x: 207, y: 12, width: 92, height: 28), keyEquivalent: "\r")
+        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 172, y: 13, width: 93, height: 28), keyEquivalent: "\u{1b}")
+        let duplicateButton = legacyButton(title: NSLocalizedString("Duplicate", comment: "duplicate database button"), frame: NSRect(x: 261, y: 13, width: 103, height: 28), keyEquivalent: "\r")
 
-        [messageField, nameField, duplicateContent, cancelButton, duplicateButton].forEach(contentView.addSubview)
+        [titleField, sourceLabel, sourceField, destinationLabel, nameField, duplicateContent, cancelButton, duplicateButton].forEach(contentView.addSubview)
 
         controller.nameField = nameField
         controller.okButton = duplicateButton
@@ -1665,11 +1674,13 @@ private extension SPWindowController {
     func promptForLightweightDatabaseAlter(database: String) -> SALightweightLegacySheetResult? {
         guard let activeConnection = activeConnection else { return nil }
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 384, height: 104),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 384, height: 119),
                               styleMask: .titled,
                               backing: .buffered,
                               defer: false)
         window.title = NSLocalizedString("Alter Database", comment: "alter database sheet title")
+        window.minSize = NSSize(width: 384, height: 119)
+        window.maxSize = NSSize(width: 600, height: 119)
 
         let controller = SALightweightLegacySheetController(window: window)
         controller.requiresName = false
@@ -1682,18 +1693,18 @@ private extension SPWindowController {
         let encodingChoices = lightweightEncodingChoices(defaultTitle: NSLocalizedString("Default", comment: "default encoding title")).filter { $0.name != nil }
         let selectedEncodingTitle = encodingChoices.first { $0.name?.caseInsensitiveCompare(currentEncoding) == .orderedSame }?.title ?? encodingChoices.first?.title ?? currentEncoding
 
-        let encodingButton = legacyPopup(frame: NSRect(x: 143, y: 66, width: 224, height: 22),
+        let encodingButton = legacyPopup(frame: NSRect(x: 143, y: 78, width: 224, height: 22),
                                          choices: encodingChoices,
                                          defaultTitle: selectedEncodingTitle)
-        let collationButton = legacyPopup(frame: NSRect(x: 143, y: 41, width: 224, height: 22),
-                                          choices: [SALightweightEncodingChoice(title: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation, name: currentCollation.isEmpty ? nil : currentCollation)],
-                                          defaultTitle: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation)
-        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 205, y: 13, width: 86, height: 28), keyEquivalent: "\u{1b}")
-        let alterButton = legacyButton(title: NSLocalizedString("Alter", comment: "alter database button"), frame: NSRect(x: 289, y: 13, width: 80, height: 28), keyEquivalent: "\r")
+        let collationButton = legacyPopup(frame: NSRect(x: 143, y: 53, width: 224, height: 22),
+                                           choices: [SALightweightEncodingChoice(title: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation, name: currentCollation.isEmpty ? nil : currentCollation)],
+                                           defaultTitle: currentCollation.isEmpty ? NSLocalizedString("Default", comment: "default collation title") : currentCollation)
+        let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 174, y: 13, width: 96, height: 28), keyEquivalent: "\u{1b}")
+        let alterButton = legacyButton(title: NSLocalizedString("Apply", comment: "apply button"), frame: NSRect(x: 268, y: 13, width: 101, height: 28), keyEquivalent: "\r")
 
-        contentView.addSubview(legacyLabel(NSLocalizedString("Database Encoding:", comment: "database encoding label"), frame: NSRect(x: 5, y: 71, width: 134, height: 14), alignment: .right))
+        contentView.addSubview(legacyLabel(NSLocalizedString("Database Encoding:", comment: "database encoding label"), frame: NSRect(x: 17, y: 83, width: 122, height: 14), alignment: .right))
         contentView.addSubview(encodingButton)
-        contentView.addSubview(legacyLabel(NSLocalizedString("Database Collation:", comment: "database collation label"), frame: NSRect(x: 5, y: 46, width: 134, height: 14), alignment: .right))
+        contentView.addSubview(legacyLabel(NSLocalizedString("Database Collation:", comment: "database collation label"), frame: NSRect(x: 17, y: 58, width: 122, height: 14), alignment: .right))
         contentView.addSubview(collationButton)
         contentView.addSubview(cancelButton)
         contentView.addSubview(alterButton)
