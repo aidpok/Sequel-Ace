@@ -37,7 +37,7 @@ let SALightweightResultGridCopyAsSQLNoAutoIncTag = 2004
 protocol SALightweightResultGridTableViewDelegate: AnyObject {
     func resultGridTableViewCopyRows(_ sender: Any?)
     func resultGridTableViewCopyRowsAsSQL(_ sender: Any?)
-    func resultGridTableViewCanCopyRows(_ tableView: NSTableView) -> Bool
+    func resultGridTableView(_ tableView: NSTableView, canCopyRowsFor item: NSValidatedUserInterfaceItem) -> Bool
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent)
 }
 
@@ -73,6 +73,10 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
     weak var resultGridDelegate: SALightweightResultGridTableViewDelegate?
     var lightweightAccessibilityLabel: String?
 
+    @objc var supportsDataTableBundleCommands: Bool {
+        false
+    }
+
     @objc(copy:)
     override func copy(_ sender: Any?) {
         if let menuItem = sender as? NSMenuItem,
@@ -86,7 +90,7 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(copy(_:)) {
-            return resultGridDelegate?.resultGridTableViewCanCopyRows(self) ?? false
+            return resultGridDelegate?.resultGridTableView(self, canCopyRowsFor: item) ?? false
         }
 
         return super.validateUserInterfaceItem(item)

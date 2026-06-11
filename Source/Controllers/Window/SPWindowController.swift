@@ -704,6 +704,7 @@ final class SALightweightSessionState {
     private var connectionController: SPConnectionController?
     private var activeConnection: SPMySQLConnection?
     private var activeConnectionInfo: SAConnectionInfoObjC?
+    private var lightweightBundleProcessID: String?
     private let lightweightConsoleLoggingLock = NSLock()
     private var lightweightConsoleQueryMode = 0
     private let lightweightConsoleLogger = SALightweightConsoleLogger()
@@ -936,6 +937,10 @@ extension SPWindowController {
 
     @objc var hasSelectedLightweightDatabase: Bool {
         return activeConnection != nil && selectedDatabase?.isEmpty == false && loadedDatabaseDocument == nil
+    }
+
+    @objc var hasSelectedLightweightTable: Bool {
+        return hasActiveLightweightConnection && selectedTable?.isEmpty == false
     }
 
     @objc func chooseLightweightEncoding(_ sender: Any) {
@@ -3761,8 +3766,247 @@ private extension SPWindowController {
         return loadedDatabaseDocument
     }
 
+    @objc func assignLightweightBundleProcessID(_ processID: String) {
+        guard hasActiveLightweightConnection else { return }
+
+        lightweightBundleProcessID = processID
+    }
+
+    @objc func lightweightBundleProcessIDValue() -> String? {
+        guard hasActiveLightweightConnection else { return nil }
+
+        return lightweightBundleProcessID
+    }
+
+    @objc func registerActivity(_ commandDict: NSDictionary) {
+        guard hasActiveLightweightConnection else { return }
+
+        (NSApp.delegate as? SPAppController)?.registerActivity(commandDict as? [AnyHashable: Any])
+    }
+
+    @objc func removeRegisteredActivity(_ pid: Int) {
+        guard hasActiveLightweightConnection else { return }
+
+        (NSApp.delegate as? SPAppController)?.removeRegisteredActivity(pid)
+    }
+
+    @objc func lightweightShellVariables() -> NSDictionary {
+        guard hasActiveLightweightConnection else { return [:] }
+
+        let env = NSMutableDictionary()
+
+        if let selectedDatabase = selectedDatabase, !selectedDatabase.isEmpty {
+            env[SPBundleShellVariableSelectedDatabase] = selectedDatabase
+        }
+
+        if let selectedTable = selectedTable, !selectedTable.isEmpty {
+            env[SPBundleShellVariableSelectedTable] = selectedTable
+            env[SPBundleShellVariableSelectedTables] = selectedTable
+        }
+
+        if !lightweightDatabases.isEmpty {
+            env[SPBundleShellVariableAllDatabases] = lightweightDatabases.joined(separator: "\t")
+        }
+
+        env[SPBundleShellVariableAllTables] = lightweightTables
+            .filter { (lightweightTableTypes[$0] ?? .table) == .table }
+            .joined(separator: "\t")
+        env[SPBundleShellVariableAllViews] = lightweightTables
+            .filter { lightweightTableTypes[$0] == .view }
+            .joined(separator: "\t")
+        env[SPBundleShellVariableAllFunctions] = lightweightTables
+            .filter { lightweightTableTypes[$0] == .function }
+            .joined(separator: "\t")
+        env[SPBundleShellVariableAllProcedures] = lightweightTables
+            .filter { lightweightTableTypes[$0] == .procedure }
+            .joined(separator: "\t")
+
+        if let user = activeConnectionInfo?.user, !user.isEmpty {
+            env[SPBundleShellVariableCurrentUser] = user
+        }
+
+        if activeConnectionInfo?.type == .socket {
+            env[SPBundleShellVariableCurrentHost] = "localhost"
+        } else if let host = activeConnectionInfo?.host, !host.isEmpty {
+            env[SPBundleShellVariableCurrentHost] = host
+        } else if let host = activeConnection?.host, !host.isEmpty {
+            env[SPBundleShellVariableCurrentHost] = host
+        }
+
+        if let port = activeConnectionInfo?.port, !port.isEmpty {
+            env[SPBundleShellVariableCurrentPort] = port
+        } else if let port = activeConnection?.port, port > 0 {
+            env[SPBundleShellVariableCurrentPort] = String(port)
+        }
+
+        if let encoding = activeConnection?.encoding(), !encoding.isEmpty {
+            env[SPBundleShellVariableDatabaseEncoding] = encoding
+        }
+
+        env[SPBundleShellVariableRDBMSType] = "mysql"
+
+        if let serverVersion = activeServerVersion, !serverVersion.isEmpty {
+            env[SPBundleShellVariableRDBMSVersion] = serverVersion
+        } else if let serverVersion = activeConnection?.serverVersionString(), !serverVersion.isEmpty {
+            env[SPBundleShellVariableRDBMSVersion] = serverVersion
+        }
+
+        return env
+    }
+
+    @objc func handleLightweightSchemeCommand(_ commandDict: NSDictionary) -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+        guard let params = commandDict["parameter"] as? [String], !params.isEmpty else {
+            NSLog("No URL scheme command passed")
+            NSSound.beep()
+            return true
+        }
+
+        let command = params[0]
+
+        if command == "SelectDocumentView" {
+            guard params.count == 2 else { return true }
+
+            switch params[1].lowercased() {
+            case let view where view.hasPrefix("str"):
+                viewStructure()
+            case let view where view.hasPrefix("con"):
+                viewContent()
+            case let view where view.hasPrefix("que"):
+                viewQuery()
+            case let view where view.hasPrefix("tab"):
+                viewStatus()
+            case let view where view.hasPrefix("rel"):
+                viewRelations()
+            case let view where view.hasPrefix("tri"):
+                viewTriggers()
+            default:
+                break
+            }
+
+            return true
+        }
+
+        if command == "SelectTable" {
+            guard params.count == 2, !params[1].isEmpty else { return true }
+
+            selectLightweightTableInSidebar(params[1])
+            selectLightweightTable(params[1])
+            return true
+        }
+
+        if command == "SelectTables" {
+            guard params.count > 1, let table = params.dropFirst().first, !table.isEmpty else { return true }
+
+            selectLightweightTableInSidebar(table)
+            selectLightweightTable(table)
+            return true
+        }
+
+        if command == "SelectDatabase" {
+            guard params.count > 1, !params[1].isEmpty else { return true }
+
+            loadTables(for: params[1], restoringTable: params.count > 2 ? params[2] : nil)
+            return true
+        }
+
+        if command == "SelectTableRows" {
+            guard params.count > 1 else { return true }
+
+            if let tableView = (window?.firstResponder ?? NSApp.keyWindow?.firstResponder) as? SPCopyTable {
+                tableView.selectRows(Array(params.dropFirst()))
+            } else {
+                NSSound.beep()
+            }
+            return true
+        }
+
+        let callbackID = (commandDict["id"] as? String) ?? ""
+        guard !callbackID.isEmpty, callbackID == (lightweightBundleProcessID ?? "") else {
+            NSAlert.createWarningAlert(title: NSLocalizedString("Remote Error", comment: "remote error"),
+                                       message: NSLocalizedString("URL scheme command couldn't authenticated", comment: "URL scheme command couldn't authenticated"),
+                                       callback: nil)
+            return true
+        }
+
+        if command == "SetSelectedTextRange" {
+            guard params.count > 1,
+                  let textView = window?.firstResponder as? NSTextView else {
+                NSSound.beep()
+                return true
+            }
+
+            let requestedRange = NSRangeFromString(params[1])
+            let validRange = NSIntersectionRange(requestedRange, NSRange(location: 0, length: textView.string.count))
+            if validRange.location != NSNotFound {
+                textView.setSelectedRange(validRange)
+            }
+            return true
+        }
+
+        if command == "InsertText" {
+            guard params.count > 1,
+                  let textView = window?.firstResponder as? NSTextView else {
+                NSSound.beep()
+                return true
+            }
+
+            textView.insertText(params[1], replacementRange: textView.selectedRange())
+            return true
+        }
+
+        if command == "SetText" {
+            guard params.count > 1,
+                  let textView = window?.firstResponder as? NSTextView else {
+                NSSound.beep()
+                return true
+            }
+
+            textView.string = params[1]
+            return true
+        }
+
+        NSAlert.createWarningAlert(title: NSLocalizedString("Remote Error", comment: "remote error"),
+                                   message: String(format: NSLocalizedString("URL scheme command “%@” unsupported", comment: "URL scheme command “%@” unsupported"), command),
+                                   callback: nil)
+        return true
+    }
+
+    @objc func doPerformLightweightQueryService(_ query: String) {
+        guard hasActiveLightweightConnection else { return }
+
+        viewQuery()
+        lightweightQueryController.doPerformQueryService(query)
+    }
+
     @objc func legacyDatabaseDocumentForMenuAction() -> SPDatabaseDocument {
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
+    }
+
+    @objc func canCopyActiveLightweightSelection(_ menuItem: NSMenuItem?) -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+
+        switch activeLightweightViewMode {
+        case .content:
+            return lightweightContentController.canCopySelectedContentRows(menuItem)
+        case .query:
+            return lightweightQueryController.canCopySelectedResultRows(menuItem)
+        default:
+            return false
+        }
+    }
+
+    @objc func copyActiveLightweightSelection(_ sender: Any?) {
+        guard hasActiveLightweightConnection else { return }
+
+        switch activeLightweightViewMode {
+        case .content:
+            lightweightContentController.copySelectedContentRowsForMenu(sender)
+        case .query:
+            lightweightQueryController.copySelectedResultRowsForMenu(sender)
+        default:
+            NSSound.beep()
+        }
     }
 
     @objc func canExportLightweightData() -> Bool {

@@ -2752,6 +2752,27 @@ private extension SALightweightContentViewController {
 }
 
 extension SALightweightContentViewController {
+    func canCopySelectedContentRows(_ sender: Any?) -> Bool {
+        let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
+        let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag || skipAutoIncrement
+
+        guard !isLoading, tableView.numberOfSelectedRows > 0 else { return false }
+        guard copiesAsSQL else { return true }
+
+        return !sqlInsertColumnIndexes(rowIndexes: tableView.selectedRowIndexes, skipAutoIncrement: skipAutoIncrement).isEmpty
+    }
+
+    @objc func copySelectedContentRowsForMenu(_ sender: Any?) {
+        let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag
+            || (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
+
+        if copiesAsSQL {
+            copySelectedContentRowsAsSQL(sender)
+        } else {
+            copySelectedContentRows(sender)
+        }
+    }
+
     func exportResultRowCount() -> Int {
         return currentResultRowCount()
     }
@@ -3019,12 +3040,10 @@ extension SALightweightContentViewController: NSMenuItemValidation {
 
         switch action {
         case #selector(copySelectedContentRows(_:)):
-            return !isLoading && tableView.numberOfSelectedRows > 0
+            return canCopySelectedContentRows(menuItem)
 
         case #selector(copySelectedContentRowsAsSQL(_:)):
-            return !isLoading
-                && tableView.numberOfSelectedRows > 0
-                && !sqlInsertColumnIndexes(rowIndexes: tableView.selectedRowIndexes, skipAutoIncrement: menuItem.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag).isEmpty
+            return canCopySelectedContentRows(menuItem)
 
         case #selector(exportContentResultAsCSV(_:)), #selector(exportContentResultAsXML(_:)):
             return !isLoading && !rows.isEmpty
@@ -3059,8 +3078,8 @@ extension SALightweightContentViewController: SALightweightResultGridTableViewDe
         copySelectedContentRowsAsSQL(sender)
     }
 
-    func resultGridTableViewCanCopyRows(_ tableView: NSTableView) -> Bool {
-        return tableView.numberOfSelectedRows > 0
+    func resultGridTableView(_ tableView: NSTableView, canCopyRowsFor item: NSValidatedUserInterfaceItem) -> Bool {
+        return canCopySelectedContentRows(item as? NSMenuItem)
     }
 
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {

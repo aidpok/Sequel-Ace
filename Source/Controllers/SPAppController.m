@@ -99,6 +99,15 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 - (void)scheduleLightweightResumeStateSave;
 - (void)savePendingLightweightResumeStateIfNeeded;
 - (void)cancelScheduledLightweightResumeStateSave;
+- (BOOL)bundleCommandScope:(NSString *)scope canRunWithFirstResponder:(id)firstResponder;
+- (BOOL)bundleCommandMenuItemCanRun:(NSMenuItem *)menuItem;
+- (SPDatabaseDocument *)connectedDatabaseDocumentForWindowController:(SPWindowController *)windowController;
+- (BOOL)windowControllerHasActiveConnectionTarget:(SPWindowController *)windowController;
+- (SPWindowController *)keyWindowControllerWithActiveConnectionTarget;
+- (SPWindowController *)bundleEnvironmentWindowController;
+- (SPWindowController *)windowControllerForBundleProcessID:(NSString *)processID;
+- (NSDictionary *)shellEnvironmentForWindowController:(SPWindowController *)windowController;
+- (void)addBundleCallbackEnvironmentToDictionary:(NSMutableDictionary *)environment processID:(NSString *)processID;
 
 @property (readwrite, strong) NSFileManager *fileManager;
 
@@ -957,6 +966,37 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:fileName]];
 }
 
+- (BOOL)bundleCommandScope:(NSString *)scope canRunWithFirstResponder:(id)firstResponder
+{
+    if ([scope isEqualToString:SPBundleScopeGeneral]) {
+        return YES;
+    }
+
+    if ([scope isEqualToString:SPBundleScopeInputField]) {
+        return [firstResponder respondsToSelector:@selector(executeBundleItemForInputField:)];
+    }
+
+    if ([scope isEqualToString:SPBundleScopeDataTable]) {
+        if ([firstResponder respondsToSelector:@selector(supportsDataTableBundleCommands)] && ![firstResponder supportsDataTableBundleCommands]) {
+            return NO;
+        }
+
+        return [firstResponder respondsToSelector:@selector(executeBundleItemForDataTable:)];
+    }
+
+    return NO;
+}
+
+- (BOOL)bundleCommandMenuItemCanRun:(NSMenuItem *)menuItem
+{
+    NSString *scope = [[menuItem representedObject] objectForKey:@"scope"];
+    if (![scope length]) {
+        scope = SPBundleScopeGeneral;
+    }
+
+    return [self bundleCommandScope:scope canRunWithFirstResponder:[[NSApp keyWindow] firstResponder]];
+}
+
 /**
  * Menu item validation.
  */
@@ -974,7 +1014,7 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         goto validateMenuItemDone;
     }
     if (action == @selector(duplicateTab:)) {
-        isValid = ([[self frontDocument] getConnection] != nil);
+        isValid = [self windowControllerHasActiveConnectionTarget:activeWindowController];
         goto validateMenuItemDone;
     }
     if (action == @selector(openAboutPanel:) || action == @selector(openPreferences:) || action == @selector(visitWebsite:) || action == @selector(checkForNewVersionFromMenu)) {
@@ -1001,6 +1041,11 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     activeDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
     if (activeDocument) {
         isValid = [activeDocument validateMenuItem:menuItem];
+        goto validateMenuItemDone;
+    }
+
+    if (action == @selector(bundleCommandDispatcher:)) {
+        isValid = [self bundleCommandMenuItemCanRun:menuItem];
         goto validateMenuItemDone;
     }
 
@@ -1035,6 +1080,11 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
             goto validateMenuItemDone;
         }
 
+        if (action == @selector(copy:)) {
+            isValid = [activeWindowController canCopyActiveLightweightSelection:menuItem];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(toggleNavigator:)) {
             [menuItem setTitle:([[[SPNavigatorController sharedNavigatorController] window] isVisible]) ? NSLocalizedString(@"Hide Navigator", @"hide navigator") : NSLocalizedString(@"Show Navigator", @"show navigator")];
             isValid = YES;
@@ -1059,6 +1109,13 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
             goto validateMenuItemDone;
         }
 
+        if (action == @selector(copyCreateTableSyntax:) ||
+            action == @selector(showCreateTableSyntax:))
+        {
+            isValid = [activeWindowController hasSelectedLightweightTable];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(removeDatabase:) ||
             action == @selector(copyDatabase:) ||
             action == @selector(renameDatabase:) ||
@@ -1072,6 +1129,11 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     if (action == @selector(printDocument:)) {
+        isValid = NO;
+        goto validateMenuItemDone;
+    }
+
+    if (action == @selector(copy:)) {
         isValid = NO;
         goto validateMenuItemDone;
     }
@@ -1090,7 +1152,9 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         action == @selector(openDatabaseInNewTab:) ||
         action == @selector(showServerVariables:) ||
         action == @selector(showServerProcesses:) ||
-        action == @selector(shutdownServer:))
+        action == @selector(shutdownServer:) ||
+        action == @selector(copyCreateTableSyntax:) ||
+        action == @selector(showCreateTableSyntax:))
     {
         isValid = NO;
         goto validateMenuItemDone;
@@ -1627,27 +1691,22 @@ validateMenuItemDone:
         return;
     }
 
-    NSString *activeProcessID = [[self frontDocument] processID];
-
+    SPWindowController *processWindowController = nil;
     SPDatabaseDocument *processDocument = nil;
 
     // Try to find the SPDatabaseDocument which sent the the url scheme command
     // For speed check the front most first otherwise iterate through all
     if (passedProcessID && [passedProcessID length]) {
-        if ([activeProcessID isEqualToString:passedProcessID]) {
-            processDocument = [self frontDocument];
-        } else {
-            SPWindowController *windowController = [self.tabManager windowControllerWithDocumentWithProcessID:passedProcessID];
-            if (windowController) {
-                processDocument = windowController.databaseDocument;
-            }
-        }
+        processWindowController = [self windowControllerForBundleProcessID:passedProcessID];
+        processDocument = [self connectedDatabaseDocumentForWindowController:processWindowController];
     }
 
     // if no processDoc found and no passedProcessID was passed execute
-    // command at front most doc
-    if(!processDocument && !passedProcessID)
-        processDocument = [self frontDocument];
+    // command at front most active window
+    if(!processWindowController && !passedProcessID) {
+        processWindowController = [self bundleEnvironmentWindowController];
+        processDocument = [self connectedDatabaseDocumentForWindowController:processWindowController];
+    }
 
     if(processDocument && command) {
         if([command isEqualToString:@"passToDoc"]) {
@@ -1683,6 +1742,40 @@ validateMenuItemDone:
 
     }
 
+    if(processWindowController && [processWindowController hasActiveLightweightConnection] && command) {
+        if([command isEqualToString:@"passToDoc"]) {
+            NSMutableDictionary *cmdDict = [NSMutableDictionary dictionary];
+            [cmdDict setObject:parameter forKey:@"parameter"];
+            [cmdDict setObject:(passedProcessID)?:@"" forKey:@"id"];
+            if ([processWindowController handleLightweightSchemeCommand:cmdDict]) {
+                return;
+            }
+        } else {
+            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"sequelace URL Scheme Error", @"sequelace url Scheme Error") message:[NSString stringWithFormat:@"%@ “%@”:\n%@", NSLocalizedString(@"Error for", @"error for message"), [command description], NSLocalizedString(@"sequelace URL scheme command not supported.", @"sequelace URL scheme command not supported.")] callback:nil];
+
+            // If command failed notify the file handle hand shake mechanism
+            NSString *out = @"1";
+            NSString *anUUID = @"";
+            if(command && passedProcessID && [passedProcessID length])
+                anUUID = passedProcessID;
+            else
+                anUUID = command;
+
+            [out writeToFile:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultStatusPathHeader stringByExpandingTildeInPath], anUUID]
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:nil];
+
+            out = @"Error";
+            [out writeToFile:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultPathHeader stringByExpandingTildeInPath], anUUID]
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:nil];
+        }
+
+        return;
+    }
+
     if(passedProcessID && [passedProcessID length]) {
         // If command failed notify the file handle hand shake mechanism
         NSString *out = @"1";
@@ -1709,6 +1802,8 @@ validateMenuItemDone:
 
     if(processDocument)
         SPLog(@"process doc ID: %@\n%@", [processDocument processID], [processDocument tabTitleForTooltip]);
+    else if(processWindowController)
+        SPLog(@"process lightweight ID: %@", [processWindowController lightweightBundleProcessIDValue]);
     else
         SPLog(@"No corresponding doc found");
     SPLog(@"param: %@", parameter);
@@ -1797,14 +1892,158 @@ validateMenuItemDone:
  * Return of certain shell variables mainly for usage in JavaScript support inside the
  * HTML output window to allow to ask on run-time
  */
+- (SPDatabaseDocument *)connectedDatabaseDocumentForWindowController:(SPWindowController *)windowController
+{
+    SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
+    return ([databaseDocument getConnection]) ? databaseDocument : nil;
+}
+
+- (BOOL)windowControllerHasActiveConnectionTarget:(SPWindowController *)windowController
+{
+    return ([self connectedDatabaseDocumentForWindowController:windowController] != nil || [windowController hasActiveLightweightConnection]);
+}
+
+- (SPWindowController *)keyWindowControllerWithActiveConnectionTarget
+{
+    SPWindowController *windowController = (SPWindowController *)[[NSApp keyWindow] windowController];
+    if (![windowController isKindOfClass:[SPWindowController class]]) {
+        return nil;
+    }
+
+    return [self windowControllerHasActiveConnectionTarget:windowController] ? windowController : nil;
+}
+
+- (SPWindowController *)bundleEnvironmentWindowController
+{
+    SPWindowController *keyWindowController = [self keyWindowControllerWithActiveConnectionTarget];
+    if (keyWindowController) {
+        return keyWindowController;
+    }
+
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
+    if ([self windowControllerHasActiveConnectionTarget:activeWindowController]) {
+        return activeWindowController;
+    }
+
+    for (NSWindow *window in [NSApp orderedWindows]) {
+        SPWindowController *windowController = (SPWindowController *)[window windowController];
+        if (![windowController isKindOfClass:[SPWindowController class]]) {
+            continue;
+        }
+
+        if ([self windowControllerHasActiveConnectionTarget:windowController]) {
+            return windowController;
+        }
+    }
+
+    for (SPWindowController *windowController in [self.tabManager windowControllers]) {
+        if ([self windowControllerHasActiveConnectionTarget:windowController]) {
+            return windowController;
+        }
+    }
+
+    return activeWindowController;
+}
+
+- (SPWindowController *)windowControllerForBundleProcessID:(NSString *)processID
+{
+    if (![processID length]) {
+        return nil;
+    }
+
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
+    SPDatabaseDocument *activeDocument = [self connectedDatabaseDocumentForWindowController:activeWindowController];
+    if ([[activeDocument processID] isEqualToString:processID] || [[activeWindowController lightweightBundleProcessIDValue] isEqualToString:processID]) {
+        return activeWindowController;
+    }
+
+    for (SPWindowController *windowController in [self.tabManager windowControllers]) {
+        SPDatabaseDocument *databaseDocument = [self connectedDatabaseDocumentForWindowController:windowController];
+        if ([[databaseDocument processID] isEqualToString:processID] || [[windowController lightweightBundleProcessIDValue] isEqualToString:processID]) {
+            return windowController;
+        }
+    }
+
+    return nil;
+}
+
+- (void)addBundleCallbackEnvironmentToDictionary:(NSMutableDictionary *)environment processID:(NSString *)processID
+{
+    if (![processID length]) {
+        return;
+    }
+
+    [environment setObject:processID forKey:SPBundleShellVariableProcessID];
+    [environment setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryInputPathHeader stringByExpandingTildeInPath], processID] forKey:SPBundleShellVariableQueryFile];
+    [environment setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultPathHeader stringByExpandingTildeInPath], processID] forKey:SPBundleShellVariableQueryResultFile];
+    [environment setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultStatusPathHeader stringByExpandingTildeInPath], processID] forKey:SPBundleShellVariableQueryResultStatusFile];
+    [environment setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultMetaPathHeader stringByExpandingTildeInPath], processID] forKey:SPBundleShellVariableQueryResultMetaFile];
+}
+
+- (NSDictionary *)shellEnvironmentForWindowController:(SPWindowController *)windowController
+{
+    if (!windowController) {
+        return @{};
+    }
+
+    SPDatabaseDocument *databaseDocument = [self connectedDatabaseDocumentForWindowController:windowController];
+    if (databaseDocument) {
+        return [databaseDocument shellVariables] ?: @{};
+    }
+
+    if ([windowController hasActiveLightweightConnection]) {
+        return [windowController lightweightShellVariables] ?: @{};
+    }
+
+    return @{};
+}
+
+- (void)prepareBundleEnvironment:(NSMutableDictionary *)environment withProcessID:(NSString *)processID
+{
+    if (!environment || ![processID length]) {
+        return;
+    }
+
+    SPWindowController *windowController = [self bundleEnvironmentWindowController];
+    SPDatabaseDocument *databaseDocument = [self connectedDatabaseDocumentForWindowController:windowController];
+    if (databaseDocument) {
+        [databaseDocument setProcessID:processID];
+        [self addBundleCallbackEnvironmentToDictionary:environment processID:processID];
+        [environment addEntriesFromDictionary:[databaseDocument shellVariables] ?: @{}];
+    }
+    else if ([windowController hasActiveLightweightConnection]) {
+        [windowController assignLightweightBundleProcessID:processID];
+        [self addBundleCallbackEnvironmentToDictionary:environment processID:processID];
+        [environment addEntriesFromDictionary:[windowController lightweightShellVariables] ?: @{}];
+    }
+
+    if([environment objectForKey:SPBundleShellVariableCurrentEditedColumnName] && [[environment objectForKey:SPBundleShellVariableDataTableSource] isEqualToString:@"content"])
+        [environment setObject:[environment objectForKey:SPBundleShellVariableSelectedTable] forKey:SPBundleShellVariableCurrentEditedTable];
+}
+
+- (id)activeBundleCommandCaller
+{
+    SPWindowController *windowController = [self bundleEnvironmentWindowController];
+    SPDatabaseDocument *databaseDocument = [self connectedDatabaseDocumentForWindowController:windowController];
+    if (databaseDocument) {
+        return databaseDocument;
+    }
+
+    if ([windowController hasActiveLightweightConnection]) {
+        return windowController;
+    }
+
+    return nil;
+}
+
 - (NSDictionary*)shellEnvironmentForDocument:(NSString*)docUUID {
     NSMutableDictionary *env = [NSMutableDictionary dictionary];
     if (docUUID == nil) {
-        [self frontDocument];
+        [env addEntriesFromDictionary:[self shellEnvironmentForWindowController:[self bundleEnvironmentWindowController]]];
     } else {
-        SPWindowController *windowController = [self.tabManager windowControllerWithDocumentWithProcessID:docUUID];
+        SPWindowController *windowController = [self windowControllerForBundleProcessID:docUUID];
         if (windowController) {
-            [env addEntriesFromDictionary:[windowController.databaseDocument shellVariables]];
+            [env addEntriesFromDictionary:[self shellEnvironmentForWindowController:windowController]];
         }
     }
 
@@ -1980,15 +2219,23 @@ validateMenuItemDone:
         return;
     }
 
-    // Check if at least one document exists
-    if (![self frontDocument]) {
+    SPWindowController *windowController = [self bundleEnvironmentWindowController];
+    SPDatabaseDocument *databaseDocument = [self connectedDatabaseDocumentForWindowController:windowController];
+
+    // Check if at least one connection target exists
+    if (!databaseDocument && ![windowController hasActiveLightweightConnection]) {
         *error = @"No Documents open!";
 
         return;
     }
 
-    // Pass query to front document
-    [[self frontDocument] doPerformQueryService:pboardString];
+    // Pass query to front connection target
+    if (databaseDocument) {
+        [databaseDocument doPerformQueryService:pboardString];
+    }
+    else {
+        [windowController doPerformLightweightQueryService:pboardString];
+    }
 
     return;
 }

@@ -1696,7 +1696,7 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 
     NSString *output = [SPBundleCommandRunner runBashCommand:cmd withEnvironment:env
                                     atCurrentDirectoryPath:nil
-                                    callerInstance:[SPAppDelegate frontDocument]
+                                    callerInstance:[SPAppDelegate activeBundleCommandCaller]
                                     contextInfo:[NSDictionary dictionaryWithObjectsAndKeys:
                                             ([cmdData objectForKey:SPBundleFileNameKey])?:@"-", @"name",
                                             NSLocalizedString(@"Data Table", @"data table menu item label"), @"scope",

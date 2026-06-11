@@ -29,9 +29,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPBundleCommandRunner.h"
-#import "SPDatabaseDocument.h"
 #import "SPAppController.h"
-#import "SPWindow.h"
 #import "sequel-ace-Swift.h"
 #import <sys/syslimits.h>
 
@@ -273,48 +271,10 @@ static NSString * const SPBundlePythonRuntimeRemovalURL = @"https://developer.ap
 	[theEnv setObject:[NSBundle mainBundle].saURLScheme forKey:SPBundleShellVariableAppCallbackURL];
 
 
-	// Create and set an unique process ID for each SPDatabaseDocument which has to passed
-	// for each sequelace:// scheme command as user to be able to identify the url scheme command.
-	// Furthermore this id is used to communicate with the called command as file name.
-    SPDatabaseDocument *databaseDocument = [SPAppDelegate frontDocument];
-	// Check if connected
-    if ([databaseDocument getConnection] == nil) {
-        databaseDocument = nil;
-    } else {
-        for (SPWindow *window in [NSApp orderedWindows]) {
-            if ([[window windowController] isKindOfClass:[SPWindowController class]]) {
-                // Check if connected
-                SPDatabaseDocument *document = [(SPWindowController *)[window windowController] loadedDatabaseDocumentIfAvailable];
-                if ([document getConnection]) {
-                    databaseDocument = document;
-                } else {
-                    databaseDocument = nil;
-                }
-
-                if (databaseDocument) {
-                    break;
-                }
-            }
-		}
-	}
-
-	if (databaseDocument != nil) {
-		[databaseDocument setProcessID:uuid];
-
-		[theEnv setObject:uuid forKey:SPBundleShellVariableProcessID];
-		[theEnv setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryInputPathHeader stringByExpandingTildeInPath], uuid] forKey:SPBundleShellVariableQueryFile];
-		[theEnv setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultPathHeader stringByExpandingTildeInPath], uuid] forKey:SPBundleShellVariableQueryResultFile];
-		[theEnv setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultStatusPathHeader stringByExpandingTildeInPath], uuid] forKey:SPBundleShellVariableQueryResultStatusFile];
-		[theEnv setObject:[NSString stringWithFormat:@"%@%@", [SPURLSchemeQueryResultMetaPathHeader stringByExpandingTildeInPath], uuid] forKey:SPBundleShellVariableQueryResultMetaFile];
-
-        if ([databaseDocument shellVariables]) {
-			[theEnv addEntriesFromDictionary:[databaseDocument shellVariables]];
-        }
-
-		if([theEnv objectForKey:SPBundleShellVariableCurrentEditedColumnName] && [[theEnv objectForKey:SPBundleShellVariableDataTableSource] isEqualToString:@"content"])
-			[theEnv setObject:[theEnv objectForKey:SPBundleShellVariableSelectedTable] forKey:SPBundleShellVariableCurrentEditedTable];
-
-	}
+	// Create and set a unique process ID for the active connection target. Legacy
+	// documents keep their SPDatabaseDocument process ID; lightweight windows keep
+	// the ID on SPWindowController so URL callbacks do not need to load DBView.
+	[SPAppDelegate prepareBundleEnvironment:theEnv withProcessID:uuid];
 
     if(theEnv != nil && [theEnv count]) {
 		[bashTask setEnvironment:theEnv];

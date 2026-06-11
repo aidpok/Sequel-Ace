@@ -95,6 +95,8 @@
 - (void)registerActivity:(NSDictionary *)commandDict;
 - (void)removeRegisteredActivity:(NSInteger)pid;
 - (NSArray *)runningActivities;
+- (id)activeBundleCommandCaller;
+- (void)prepareBundleEnvironment:(NSMutableDictionary *)environment withProcessID:(NSString *)processID;
 - (void)defaultsChanged:(NSNotification *)notification;
 - (void)switchAppearance;
 
