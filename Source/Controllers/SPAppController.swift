@@ -121,6 +121,13 @@ extension SPAppController {
         windowController.focusActiveLightweightContentFilter()
     }
 
+    @IBAction func copy(_ sender: Any) {
+        guard let windowController = tabManager.activeWindowController,
+              windowController.loadedDatabaseDocumentIfAvailable() == nil else { return }
+
+        windowController.copyActiveLightweightSelection(sender)
+    }
+
     // MARK: View menu actions
 
     @IBAction func viewStructure(_ sender: Any) {

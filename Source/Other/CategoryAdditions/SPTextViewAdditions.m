@@ -649,7 +649,7 @@
 
     NSString *output = [SPBundleCommandRunner runBashCommand:cmd withEnvironment:env
                                     atCurrentDirectoryPath:nil
-                                    callerInstance:[SPAppDelegate frontDocument]
+                                    callerInstance:[SPAppDelegate activeBundleCommandCaller]
                                     contextInfo:[NSDictionary dictionaryWithObjectsAndKeys:
                                             ([cmdData objectForKey:SPBundleFileNameKey])?:@"-", @"name",
                                             NSLocalizedString(@"Input Field", @"input field menu item label"), @"scope",

@@ -574,6 +574,15 @@ final class SALightweightQueryViewController: NSViewController {
         updateControls()
     }
 
+    func doPerformQueryService(_ query: String) {
+        doPerformLoadQueryService(query)
+        runQueries(splitQueries(in: queryTextView.string))
+    }
+
+    func doPerformLoadQueryService(_ query: String) {
+        replaceEditorText(query)
+    }
+
     func saveCurrentSessionState() {
         saveCurrentQueryTextIfNeeded()
     }
@@ -2145,15 +2154,6 @@ private extension SALightweightQueryViewController {
         favoritesButton.selectItem(at: 0)
     }
 
-    func doPerformQueryService(_ query: String) {
-        doPerformLoadQueryService(query)
-        runQueries(splitQueries(in: queryTextView.string))
-    }
-
-    func doPerformLoadQueryService(_ query: String) {
-        replaceEditorText(query)
-    }
-
     @objc func exportQueryResultAsCSV(_ sender: Any?) {
         exportQueryResult(fileExtension: "csv", content: csvStringForCurrentResult())
         exportButton.selectItem(at: 0)
@@ -3396,6 +3396,27 @@ private extension SALightweightQueryViewController {
 }
 
 extension SALightweightQueryViewController {
+    func canCopySelectedResultRows(_ sender: Any?) -> Bool {
+        let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
+        let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag || skipAutoIncrement
+
+        guard !isRunning, tableView.numberOfSelectedRows > 0 else { return false }
+        guard copiesAsSQL else { return true }
+
+        return !sqlInsertColumnIndexes(skipAutoIncrement: skipAutoIncrement).isEmpty
+    }
+
+    @objc func copySelectedResultRowsForMenu(_ sender: Any?) {
+        let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag
+            || (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
+
+        if copiesAsSQL {
+            copySelectedResultRowsAsSQL(sender)
+        } else {
+            copySelectedResultRows(sender)
+        }
+    }
+
     func exportResultRowCount() -> Int {
         return currentResultRowCount()
     }
@@ -3552,10 +3573,10 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
 
         switch action {
         case #selector(copySelectedResultRows(_:)):
-            return !isRunning && tableView.numberOfSelectedRows > 0
+            return canCopySelectedResultRows(menuItem)
 
         case #selector(copySelectedResultRowsAsSQL(_:)):
-            return !isRunning && tableView.numberOfSelectedRows > 0 && !sqlInsertColumnIndexes(skipAutoIncrement: menuItem.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag).isEmpty
+            return canCopySelectedResultRows(menuItem)
 
         case #selector(exportQueryResultAsCSV(_:)), #selector(exportQueryResultAsXML(_:)):
             return !isRunning && !rows.isEmpty
@@ -3594,8 +3615,8 @@ extension SALightweightQueryViewController: SALightweightResultGridTableViewDele
         copySelectedResultRowsAsSQL(sender)
     }
 
-    func resultGridTableViewCanCopyRows(_ tableView: NSTableView) -> Bool {
-        return tableView.numberOfSelectedRows > 0
+    func resultGridTableView(_ tableView: NSTableView, canCopyRowsFor item: NSValidatedUserInterfaceItem) -> Bool {
+        return canCopySelectedResultRows(item as? NSMenuItem)
     }
 
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {
