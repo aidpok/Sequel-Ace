@@ -1240,13 +1240,33 @@ private extension SALightweightContentViewController {
         alert.messageText = selectedIndexes.count == 1
             ? NSLocalizedString("Delete selected row?", comment: "delete selected row message")
             : NSLocalizedString("Delete rows?", comment: "delete rows message")
-        alert.informativeText = NSLocalizedString("This action cannot be undone.", comment: "delete rows informative text")
+        alert.informativeText = selectedIndexes.count == 1
+            ? NSLocalizedString("Are you sure you want to delete the selected row from this table? This action cannot be undone.", comment: "delete selected row informative message")
+            : String(format: NSLocalizedString("Are you sure you want to delete the selected %ld rows from this table? This action cannot be undone.", comment: "delete rows informative message"), selectedIndexes.count)
         alert.addButton(withTitle: selectedIndexes.count == 1
             ? NSLocalizedString("Delete Selected Row", comment: "delete selected row button")
             : NSLocalizedString("Delete Selected Rows", comment: "delete selected rows button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
         guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
+
+        if UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
+           UserDefaults.standard.bool(forKey: SPShowWarningBeforeDeleteQuery) {
+            let doubleCheckAlert = NSAlert()
+            doubleCheckAlert.window.animationBehavior = .none
+            doubleCheckAlert.messageText = NSLocalizedString("Double Check", comment: "Double Check")
+            doubleCheckAlert.informativeText = NSLocalizedString("Double checking as you have 'Show warning before executing a query' set in Preferences", comment: "Double check delete query")
+            doubleCheckAlert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))
+            doubleCheckAlert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel"))
+            doubleCheckAlert.showsSuppressionButton = true
+            doubleCheckAlert.suppressionButton?.title = NSLocalizedString("Do not show this message again", comment: "delete rows suppression button")
+
+            guard doubleCheckAlert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
+
+            if doubleCheckAlert.suppressionButton?.state == .on {
+                UserDefaults.standard.set(false, forKey: SPShowWarningBeforeDeleteQuery)
+            }
+        }
 
         let rowsToDelete = selectedIndexes.compactMap { index in index < rows.count ? rows[index] : nil }
         runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows")) { [database, table, columnInfo] connection in

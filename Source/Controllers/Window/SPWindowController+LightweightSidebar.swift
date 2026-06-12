@@ -123,6 +123,7 @@ extension SPWindowController {
         guard !didRegisterLightweightPreferenceObservers else { return }
 
         UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayServerVersionInWindowTitle, options: .new, context: nil)
         didRegisterLightweightPreferenceObservers = true
     }
 
@@ -246,21 +247,22 @@ extension SPWindowController {
     }
 
     func updateLightweightWindowTitle(table: String? = nil) {
-        let name = activeConnectionName?.isEmpty == false
+        let connectionName = activeConnectionName?.isEmpty == false
             ? activeConnectionName!
             : NSLocalizedString("Connected", comment: "lightweight connected tab title")
-        let tabTitle = [name, selectedDatabase, table].compactMap { value -> String? in
-            guard let value = value, !value.isEmpty else { return nil }
-            return value
-        }.joined(separator: "/")
+        let result = SAWindowTitleBuilder.buildTitle(
+            connectionState: .connected,
+            filePath: nil,
+            isUntitled: true,
+            bundleName: Bundle.main.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String ?? NSLocalizedString("Sequel Ace", comment: "default connection tab title"),
+            connectionName: connectionName,
+            database: selectedDatabase,
+            table: table ?? selectedTable,
+            mySQLVersion: activeServerVersion,
+            showServerVersionInTitle: UserDefaults.standard.bool(forKey: SPDisplayServerVersionInWindowTitle)
+        )
 
-        var windowTitle = ""
-        if UserDefaults.standard.bool(forKey: "DisplayServerVersionInWindowTitle"), let activeServerVersion = activeServerVersion, !activeServerVersion.isEmpty {
-            windowTitle += "(MySQL \(activeServerVersion)) "
-        }
-        windowTitle += tabTitle
-
-        updateWindow(title: windowTitle, tabTitle: tabTitle)
+        updateWindow(title: result.windowTitle, tabTitle: result.tabTitle)
     }
 
     func applyLightweightTableFilter() {
