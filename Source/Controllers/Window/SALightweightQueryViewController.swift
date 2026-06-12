@@ -1093,6 +1093,16 @@ private extension SALightweightQueryViewController {
         switchDefaultItem.target = self
         menu.addItem(switchDefaultItem)
 
+        menu.addItem(.separator())
+
+        let explainCurrentQueryItem = NSMenuItem(title: NSLocalizedString("Explain Current Query", comment: "explain current query menu item"),
+                                                 action: #selector(runExplainQueryAction(_:)),
+                                                 keyEquivalent: "e")
+        explainCurrentQueryItem.keyEquivalentModifierMask = [.option, .command]
+        explainCurrentQueryItem.target = self
+        explainCurrentQueryItem.isEnabled = canRunExplainQueryAction()
+        menu.addItem(explainCurrentQueryItem)
+
         menu.delegate = runButton
         runButton.menu = menu
         runButton.selectItem(at: 0)
@@ -1146,6 +1156,20 @@ private extension SALightweightQueryViewController {
         }
 
         runButton.selectItem(at: 0)
+        updateRunMenuState()
+    }
+
+    func updateRunMenuState() {
+        guard let menu = runButton.menu else { return }
+
+        for item in menu.items {
+            switch item.action {
+            case #selector(runExplainQueryAction(_:)):
+                item.isEnabled = canRunExplainQueryAction()
+            default:
+                break
+            }
+        }
     }
 
     @objc func runPrimaryQuery(_ sender: Any?) {
@@ -1154,10 +1178,13 @@ private extension SALightweightQueryViewController {
             return
         }
 
+        if NSApp.currentEvent?.type == .keyUp { return }
+
         if UserDefaults.standard.bool(forKey: SPQueryPrimaryControlRunsAll) {
             runQueries(splitQueries(in: queryTextView.string))
         } else {
-            runQueries(queriesForCurrentAction())
+            guard let queries = queriesForCurrentAction() else { return }
+            runQueries(queries)
         }
     }
 
@@ -1167,11 +1194,29 @@ private extension SALightweightQueryViewController {
             return
         }
 
+        if NSApp.currentEvent?.type == .keyUp { return }
+
         if UserDefaults.standard.bool(forKey: SPQueryPrimaryControlRunsAll) {
-            runQueries(queriesForCurrentAction())
+            guard let queries = queriesForCurrentAction() else { return }
+            runQueries(queries)
         } else {
             runQueries(splitQueries(in: queryTextView.string))
         }
+    }
+
+    @objc func runExplainQueryAction(_ sender: Any?) {
+        guard !isRunning else { return }
+
+        // Fixes bug in key equivalents (mirrors the legacy query action guard).
+        if NSApp.currentEvent?.type == .keyUp { return }
+
+        guard let query = queryForExplainCurrentAction() else { return }
+        guard SPCustomQuerySQLClassifier.isQueryExplainable(query) else {
+            reportUnsupportedExplain()
+            return
+        }
+
+        runQueries(["EXPLAIN \(query)"])
     }
 
     func cancelRunningQuery() {
@@ -1727,18 +1772,72 @@ private extension SALightweightQueryViewController {
         }
     }
 
-    func queriesForCurrentAction() -> [String] {
+    func queriesForCurrentAction() -> [String]? {
         let selection = queryTextView.selectedRange()
         if selection.length > 0 {
             return splitQueries(in: (queryTextView.string as NSString).substring(with: selection))
         }
 
-        if currentQueryRange.length > 0 {
-            let query = (queryTextView.string as NSString).substring(with: currentQueryRange)
-            return [SPSQLParser.normaliseQuery(forExecution: query)]
+        let editorString = queryTextView.string as NSString
+        guard isValidQueryRange(currentQueryRange, in: editorString),
+              let query = editorString.safeSubstring(with: currentQueryRange) else {
+            reportNoCurrentQueryRangeForRun()
+            return nil
         }
 
-        return splitQueries(in: queryTextView.string)
+        return [SPSQLParser.normaliseQuery(forExecution: query)]
+    }
+
+    func isValidQueryRange(_ range: NSRange, in string: NSString) -> Bool {
+        return range.location != NSNotFound
+            && range.length > 0
+            && range.location <= string.length
+            && NSMaxRange(range) <= string.length
+    }
+
+    func reportNoCurrentQueryRangeForRun() {
+        NSSound.beep()
+        NSLog("Could not find a query range suitable to run query")
+    }
+
+    func queryForExplainCurrentAction() -> String? {
+        let editorString = queryTextView.string as NSString
+        let selectedRange = queryTextView.selectedRange()
+
+        if selectedRange.length == 0 {
+            let range = currentQueryRange
+            guard range.length > 0, NSMaxRange(range) <= editorString.length else {
+                NSSound.beep()
+                NSLog("runExplainQueryAction: no query under caret")
+                return nil
+            }
+
+            let rawQuery = editorString.safeSubstring(with: range) ?? ""
+            return SPSQLParser.normaliseQuery(forExecution: rawQuery)
+        }
+
+        // Selected text may contain multiple statements separated by ';' —
+        // EXPLAIN does not support multi-statement input, so split delimiter-
+        // aware and reject when >1 non-empty. Comment-only fragments are
+        // ignored so `SELECT 1; -- foo` counts as a single statement.
+        let selectionText = editorString.safeSubstring(with: selectedRange) ?? ""
+        let parser = SPSQLParser(string: selectionText)
+        parser.setDelimiterSupport(true)
+        let semicolon = UInt16(UnicodeScalar(";").value)
+        let parts = (parser.splitString(byCharacter: semicolon) as? [String]) ?? []
+
+        let nonEmpty = parts.compactMap { part -> String? in
+            let probe = SPCustomQuerySQLClassifier.stripSQLComments(part)
+            guard !probe.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return part.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard nonEmpty.count == 1 else {
+            reportUnsupportedExplain()
+            return nil
+        }
+
+        return SPSQLParser.normaliseQuery(forExecution: nonEmpty[0])
     }
 
     func splitQueries(in text: String) -> [String] {
@@ -1895,19 +1994,13 @@ private extension SALightweightQueryViewController {
     }
 
     func queriesContainDestructiveSQL(_ queries: [String]) -> Bool {
-        let safeCommands = ["SHOW", "SELECT"]
-
         for query in queries {
-            var cleanedQuery = query.replacingOccurrences(of: #"--.*?\n"#, with: "", options: .regularExpression)
-            cleanedQuery = cleanedQuery.replacingOccurrences(of: #"--.*?$"#, with: "", options: .regularExpression)
-            cleanedQuery = cleanedQuery.replacingOccurrences(of: #"/\*(.|\n)*?\*/"#, with: "", options: .regularExpression)
-            cleanedQuery = cleanedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if cleanedQuery.isEmpty {
+            let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedQuery.isEmpty {
                 continue
             }
 
-            if safeCommands.contains(where: { cleanedQuery.range(of: $0, options: [.anchored, .caseInsensitive]) != nil }) {
+            if SPCustomQuerySQLClassifier.isQuerySafeWithoutDestructiveWarning(trimmedQuery) {
                 continue
             }
 
@@ -2089,8 +2182,9 @@ private extension SALightweightQueryViewController {
         saveItem.target = self
         menu.addItem(saveItem)
 
-        let clearItem = NSMenuItem(title: NSLocalizedString("Clear History", comment: "clear query history menu item"), action: #selector(clearQueryHistory(_:)), keyEquivalent: "")
+        let clearItem = NSMenuItem(title: clearHistoryMenuTitle(), action: #selector(clearQueryHistory(_:)), keyEquivalent: "")
         clearItem.target = self
+        configureClearHistoryMenuItem(clearItem)
         menu.addItem(clearItem)
 
         menu.addItem(.separator())
@@ -2177,13 +2271,30 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func saveQueryHistory(_ sender: Any?) {
+        let prefs = UserDefaults.standard
+        if prefs.integer(forKey: SPLastSQLFileEncoding) == 0 {
+            prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
+        }
+
+        let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
+        let encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
         let panel = NSSavePanel()
         panel.allowedFileTypes = [SPFileExtensionSQL]
         panel.isExtensionHidden = false
+        panel.allowsOtherFileTypes = true
+        panel.canSelectHiddenExtension = true
         panel.canCreateDirectories = true
+        panel.accessoryView = encodingAccessory.view
         panel.nameFieldStringValue = "history"
         if panel.runModal() == .OK, let url = panel.url {
-            try? buildHistoryString().write(to: url, atomically: true, encoding: .utf8)
+            let encoding = encodingAccessory.selectedEncoding
+            prefs.set(encoding.rawValue, forKey: SPLastSQLFileEncoding)
+
+            do {
+                try buildHistoryString().write(to: url, atomically: true, encoding: encoding)
+            } catch {
+                NSAlert(error: error).runModalCenteredInKeyWindow()
+            }
         }
     }
 
@@ -2191,12 +2302,50 @@ private extension SALightweightQueryViewController {
         let alert = NSAlert()
         alert.window.animationBehavior = .none
         alert.messageText = NSLocalizedString("Clear History?", comment: "clear history message")
-        alert.informativeText = NSLocalizedString("Are you sure you want to clear the lightweight query history? This action cannot be undone.", comment: "clear history confirmation message")
+        alert.informativeText = clearHistoryConfirmationMessage()
         alert.addButton(withTitle: NSLocalizedString("Clear", comment: "clear button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
         guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn, let documentURL else { return }
         SPQueryController.shared().replaceHistory(by: [], forFileURL: documentURL)
+    }
+
+    func configureClearHistoryMenuItem(_ menuItem: NSMenuItem) {
+        menuItem.title = clearHistoryMenuTitle()
+        menuItem.toolTip = clearHistoryMenuToolTip()
+    }
+
+    func clearHistoryMenuTitle() -> String {
+        if isUntitledQueryDocument {
+            return NSLocalizedString("Clear Global History", comment: "clear global history menu item title")
+        }
+
+        return String(format: NSLocalizedString("Clear History for “%@”", comment: "clear history for “%@” menu title"), historyDocumentDisplayName())
+    }
+
+    func clearHistoryMenuToolTip() -> String {
+        if isUntitledQueryDocument {
+            return NSLocalizedString("Clear the global history list", comment: "clear the global history list tooltip message")
+        }
+
+        return NSLocalizedString("Clear the document-based history list", comment: "clear the document-based history list tooltip message")
+    }
+
+    func clearHistoryConfirmationMessage() -> String {
+        if isUntitledQueryDocument {
+            return NSLocalizedString("Are you sure you want to clear the global history list? This action cannot be undone.", comment: "clear global history list informative message")
+        }
+
+        return String(format: NSLocalizedString("Are you sure you want to clear the history list for “%@”? This action cannot be undone.", comment: "clear history list for “%@” informative message"), historyDocumentDisplayName())
+    }
+
+    func historyDocumentDisplayName() -> String {
+        guard let documentURL else {
+            return NSLocalizedString("Untitled", comment: "Name for an untitled connection")
+        }
+
+        let displayName = documentURL.isFileURL ? documentURL.lastPathComponent : documentURL.absoluteString
+        return displayName.removingPercentEncoding ?? displayName
     }
 
     func queryTextForCurrentFavoriteAction() -> String {
@@ -2656,6 +2805,7 @@ private extension SALightweightQueryViewController {
         } else {
             updateContextualRunInterface()
         }
+        updateRunMenuState()
     }
 
     @objc(currentResult)
@@ -2891,6 +3041,8 @@ private extension SALightweightQueryViewController {
                 break
             }
         }
+
+        updateRunMenuState()
     }
 
     func togglePreference(_ key: String, sender: NSMenuItem, apply: (Bool) -> Void) {
@@ -2991,6 +3143,19 @@ private extension SALightweightQueryViewController {
     func setStatusText(_ status: String) {
         baseStatusText = status
         updateStatusSelectionSuffix()
+    }
+
+    func canRunExplainQueryAction() -> Bool {
+        return !isRunning && connection != nil && !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func reportUnsupportedExplain() {
+        let message = NSLocalizedString("EXPLAIN is only supported for a single SELECT or WITH statement.", comment: "EXPLAIN unsupported statement message")
+        NSSound.beep()
+        setStatusText(message)
+        updateQueryInfo(title: NSLocalizedString("Query Status", comment: "Query Status"),
+                        message: message,
+                        isError: true)
     }
 
     func updateStatusSelectionSuffix() {
@@ -3489,6 +3654,12 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
         updateContextualRunInterface()
     }
 
+    func textDidChange(_ notification: Notification) {
+        guard notification.object as AnyObject? === queryTextView else { return }
+        updateCurrentQueryRange()
+        updateContextualRunInterface()
+    }
+
     func textView(_ textView: NSTextView,
                   shouldChangeTextIn affectedCharRange: NSRange,
                   replacementString: String?) -> Bool {
@@ -3588,11 +3759,17 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
             return !isRunning && !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         case #selector(copyQueryHistory(_:)), #selector(saveQueryHistory(_:)), #selector(clearQueryHistory(_:)):
+            if action == #selector(clearQueryHistory(_:)) {
+                configureClearHistoryMenuItem(menuItem)
+            }
             guard let documentURL else { return false }
             return !isRunning && !(SPQueryController.shared().history(forFileURL: documentURL) as? [String] ?? []).isEmpty
 
         case #selector(commentCurrentQuery(_:)):
             return !isRunning && currentQueryRange.length > 0
+
+        case #selector(runExplainQueryAction(_:)):
+            return canRunExplainQueryAction()
 
         case #selector(commentLineOrSelection(_:)):
             menuItem.title = queryTextView.selectedRange().length > 0

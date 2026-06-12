@@ -850,6 +850,12 @@ final class SALightweightSessionState {
             applyLightweightSidebarFontPreference()
             return
         }
+        if keyPath == SPDisplayServerVersionInWindowTitle {
+            if hasActiveLightweightConnection {
+                updateLightweightWindowTitle()
+            }
+            return
+        }
 
         super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
@@ -881,6 +887,7 @@ final class SALightweightSessionState {
 	deinit {
 		if didRegisterLightweightPreferenceObservers {
 			UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
+			UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayServerVersionInWindowTitle)
 		}
 	}
 }
