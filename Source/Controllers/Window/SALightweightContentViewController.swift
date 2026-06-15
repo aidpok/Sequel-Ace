@@ -47,6 +47,7 @@ final class SALightweightContentViewController: NSViewController {
     fileprivate struct ContentRow {
         var values: [ContentValue]
         var originalValues: [ContentValue]
+        var isNew = false
     }
 
     private struct ContentCacheEntry {
@@ -222,9 +223,17 @@ final class SALightweightContentViewController: NSViewController {
         button.setButtonType(.pushOnPushOff)
         return button
     }()
-    private lazy var previousPageButton = toolbarButton(imageName: "NSLeftFacingTriangleTemplate", toolTip: NSLocalizedString("View previous page of results", comment: "previous page tooltip"), action: #selector(loadPreviousPage(_:)))
+    private lazy var previousPageButton = toolbarButton(imageName: "NSLeftFacingTriangleTemplate",
+                                                        toolTip: NSLocalizedString("View previous page of results", comment: "previous page tooltip"),
+                                                        keyEquivalent: String(UnicodeScalar(NSLeftArrowFunctionKey)!),
+                                                        modifierMask: [.command, .shift],
+                                                        action: #selector(loadPreviousPage(_:)))
     private lazy var paginationButton = toolbarButton(imageName: "NSActionTemplate", toolTip: NSLocalizedString("Jump to page (⌘J) or view pagination options", comment: "pagination options tooltip"), keyEquivalent: "j", modifierMask: .command, action: #selector(togglePagination(_:)))
-    private lazy var nextPageButton = toolbarButton(imageName: "NSRightFacingTriangleTemplate", toolTip: NSLocalizedString("View next page of results", comment: "next page tooltip"), action: #selector(loadNextPage(_:)))
+    private lazy var nextPageButton = toolbarButton(imageName: "NSRightFacingTriangleTemplate",
+                                                    toolTip: NSLocalizedString("View next page of results", comment: "next page tooltip"),
+                                                    keyEquivalent: String(UnicodeScalar(NSRightArrowFunctionKey)!),
+                                                    modifierMask: [.command, .shift],
+                                                    action: #selector(loadNextPage(_:)))
 
     private lazy var pageLabel: NSTextField = {
         let label = NSTextField(labelWithString: "")
@@ -1210,11 +1219,23 @@ private extension SALightweightContentViewController {
     @objc func addRow(_ sender: Any?) {
         guard connection != nil, canModifyRows else { return }
 
-        let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
-        runMutation(status: NSLocalizedString("Adding row...", comment: "lightweight content adding row"), reloadPolicy: reloadPolicy) { [database, table] connection in
-            let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) () VALUES ()"
-            _ = connection.queryString(query)
+        if let pendingNewRowIndex = rows.firstIndex(where: { $0.isNew }) {
+            tableView.selectRowIndexes(IndexSet(integer: pendingNewRowIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(pendingNewRowIndex)
+            tableView.editColumn(firstEditableContentColumnIndex(), row: pendingNewRowIndex, with: nil, select: true)
+            return
         }
+
+        let values = columnInfo.map(Self.defaultNewRowValue(for:))
+        let newRow = ContentRow(values: values, originalValues: values, isNew: true)
+        rows.append(newRow)
+        tableView.reloadData()
+        let rowIndex = rows.count - 1
+        tableView.selectRowIndexes(IndexSet(integer: rowIndex), byExtendingSelection: false)
+        tableView.scrollRowToVisible(rowIndex)
+        tableView.editColumn(firstEditableContentColumnIndex(), row: rowIndex, with: nil, select: true)
+        updateStatus()
+        updateControls()
     }
 
     @objc func duplicateRow(_ sender: Any?) {
@@ -1244,6 +1265,14 @@ private extension SALightweightContentViewController {
 
         let selectedIndexes = tableView.selectedRowIndexes
         guard !selectedIndexes.isEmpty else { return }
+        if selectedIndexes.count == 1,
+           let selectedRow = selectedIndexes.first,
+           selectedRow >= 0,
+           selectedRow < rows.count,
+           rows[selectedRow].isNew {
+            cancelNewContentRow(selectedRow)
+            return
+        }
 
         let alert = NSAlert()
         alert.window.animationBehavior = .none
@@ -1325,13 +1354,34 @@ private extension SALightweightContentViewController {
     }
 
     func configureContentContextMenu() {
-        tableView.menu = SALightweightResultGrid.contextMenu(target: self,
-                                                             copyAction: #selector(copySelectedContentRows(_:)),
-                                                             copySQLAction: #selector(copySelectedContentRowsAsSQL(_:)),
-                                                             exportCSVAction: #selector(exportContentResultAsCSV(_:)),
-                                                             exportXMLAction: #selector(exportContentResultAsXML(_:)),
-                                                             copyCommentPrefix: "content",
-                                                             exportCommentPrefix: "content")
+        let menu = SALightweightResultGrid.contextMenu(target: self,
+                                                       copyAction: #selector(copySelectedContentRows(_:)),
+                                                       copySQLAction: #selector(copySelectedContentRowsAsSQL(_:)),
+                                                       exportCSVAction: #selector(exportContentResultAsCSV(_:)),
+                                                       exportXMLAction: #selector(exportContentResultAsXML(_:)),
+                                                       copyCommentPrefix: "content",
+                                                       exportCommentPrefix: "content")
+        menu.addItem(.separator())
+
+        let addRowItem = NSMenuItem(title: NSLocalizedString("Add New Row", comment: "content context add row menu item"),
+                                    action: #selector(addRow(_:)),
+                                    keyEquivalent: "")
+        addRowItem.target = self
+        menu.addItem(addRowItem)
+
+        let duplicateRowItem = NSMenuItem(title: NSLocalizedString("Duplicate Row", comment: "content context duplicate row menu item"),
+                                          action: #selector(duplicateRow(_:)),
+                                          keyEquivalent: "")
+        duplicateRowItem.target = self
+        menu.addItem(duplicateRowItem)
+
+        let deleteRowItem = NSMenuItem(title: NSLocalizedString("Delete Row", comment: "content context delete row menu item"),
+                                       action: #selector(removeRow(_:)),
+                                       keyEquivalent: "")
+        deleteRowItem.target = self
+        menu.addItem(deleteRowItem)
+
+        tableView.menu = menu
     }
 
     func prepareContentContextMenu(for event: NSEvent) {
@@ -1559,8 +1609,10 @@ private extension SALightweightContentViewController {
     }
 
     func updateControls() {
+        let selectedRow = tableView.selectedRow
+        let selectedRowIsNew = selectedRow >= 0 && selectedRow < rows.count && rows[selectedRow].isNew
         addRowButton.isEnabled = canModifyRows
-        duplicateRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows == 1
+        duplicateRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows == 1 && !selectedRowIsNew
         deleteRowButton.isEnabled = canModifyRows && tableView.numberOfSelectedRows > 0
         reloadButton.isEnabled = !isLoading
         editModeButton.isEnabled = !isLoading
@@ -1576,11 +1628,35 @@ private extension SALightweightContentViewController {
         nextPageButton.isEnabled = limitResults && !isLoading && hasNextPage
         if !limitResults {
             pageLabel.stringValue = ""
-        } else if let totalRowCount = totalRowCount {
+        } else if totalRowCount != nil {
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maximumPage)
         } else {
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld", comment: "lightweight content page label"), pageIndex + 1)
         }
+    }
+
+    private func firstEditableContentColumnIndex() -> Int {
+        return tableView.tableColumns.firstIndex(where: { !$0.isHidden }) ?? 0
+    }
+
+    private static func defaultNewRowValue(for column: ColumnInfo) -> ContentValue {
+        if column.isAutoIncrement {
+            return .null
+        }
+
+        if let defaultExpression = column.defaultExpression, !defaultExpression.isEmpty {
+            return .object(defaultExpression)
+        }
+
+        if column.isNullable {
+            return .null
+        }
+
+        if ["integer", "float", "bit"].contains(column.typeGrouping) {
+            return .object("0")
+        }
+
+        return .object("")
     }
 
     func configureRuleFilterColumnsIfNeeded() {
@@ -2815,6 +2891,93 @@ private extension SALightweightContentViewController {
             item.trimmingCharacters(in: CharacterSet(charactersIn: "'\" "))
         }
     }
+
+    private func cancelNewContentRow(_ row: Int) {
+        guard row >= 0, row < rows.count, rows[row].isNew else { return }
+
+        rows.remove(at: row)
+        tableView.reloadData()
+        tableView.deselectAll(nil)
+        tableView.window?.makeFirstResponder(tableView)
+        updateStatus()
+        updateControls()
+    }
+
+    private func saveNewContentRow(row: Int, editedColumnIndex: Int, updatedValue: EditedContentSQLValue, connection: SPMySQLConnection) {
+        guard row >= 0, row < rows.count, rows[row].isNew else { return }
+
+        var newValues = rows[row].values
+        newValues[editedColumnIndex] = updatedValue.localValue
+
+        var insertColumns: [String] = []
+        var insertValues: [String] = []
+        for (index, column) in columnInfo.enumerated() {
+            guard index < newValues.count, !column.isAutoIncrement else { continue }
+
+            let editedSQLValue: EditedContentSQLValue?
+            if index == editedColumnIndex {
+                editedSQLValue = updatedValue
+            } else {
+                let displayValue = displayString(for: newValues[index], columnIndex: index, truncate: false)
+                editedSQLValue = Self.sqlValue(forEditedString: displayValue, columnInfo: column, connection: connection)
+            }
+
+            guard let sqlValue = editedSQLValue?.sql else { continue }
+            insertColumns.append(Self.backtickQuoted(column.name))
+            insertValues.append(sqlValue)
+        }
+
+        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let insertQuery: String
+        if insertColumns.isEmpty {
+            insertQuery = "INSERT INTO \(tableReference) () VALUES ()"
+        } else {
+            insertQuery = "INSERT INTO \(tableReference) (\(insertColumns.joined(separator: ", "))) VALUES (\(insertValues.joined(separator: ", ")))"
+        }
+        let reloadAfterAdd = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow)
+
+        statusLabel.stringValue = NSLocalizedString("Adding row...", comment: "lightweight content adding row")
+        isLoading = true
+        updateControls()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+            connection.queryString(insertQuery)
+            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            let lastInsertID = connection.lastInsertID()
+
+            DispatchQueue.main.async {
+                self.isLoading = false
+                if let error = error, !error.isEmpty {
+                    self.statusLabel.stringValue = error
+                    self.showContentError(title: NSLocalizedString("Unable to add row", comment: "lightweight content add row error title"), message: error)
+                    self.cancelNewContentRow(row)
+                    return
+                }
+
+                guard row >= 0, row < self.rows.count else { return }
+                if reloadAfterAdd {
+                    self.loadCurrentPage()
+                    return
+                }
+
+                for (index, column) in self.columnInfo.enumerated() where index < newValues.count && column.isAutoIncrement && lastInsertID > 0 {
+                    newValues[index] = .object("\(lastInsertID)")
+                }
+
+                self.rows[row] = ContentRow(values: newValues, originalValues: newValues, isNew: false)
+                self.tableView.reloadData()
+                self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                self.statusLabel.stringValue = NSLocalizedString("Row added.", comment: "lightweight content row added status")
+                self.updateStatus()
+                self.updateControls()
+            }
+        }
+    }
+
+    private func showContentError(title: String, message: String) {
+        NSAlert.createWarningAlert(title: title, message: message, callback: nil)
+    }
 }
 
 extension SALightweightContentViewController {
@@ -2951,15 +3114,27 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
 
         let oldRowValues = rows[row].originalValues
         let newValue = String(describing: object ?? "")
-        guard newValue != displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false) else { return }
+        let currentDisplayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
+        guard newValue != currentDisplayValue else {
+            if rows[row].isNew {
+                cancelNewContentRow(row)
+            }
+            return
+        }
+
+        let columnName = columnInfo[columnIndex].name
+        guard let updatedValue = Self.sqlValue(forEditedString: newValue, columnInfo: columnInfo[columnIndex], connection: connection) else { return }
+
+        if rows[row].isNew {
+            saveNewContentRow(row: row, editedColumnIndex: columnIndex, updatedValue: updatedValue, connection: connection)
+            return
+        }
 
         guard let whereClause = Self.rowIdentityWhereClause(for: oldRowValues, columnInfo: columnInfo, connection: connection) else {
             statusLabel.stringValue = NSLocalizedString("Cannot edit row without identifiable columns", comment: "lightweight content edit no identity")
             return
         }
 
-        let columnName = columnInfo[columnIndex].name
-        guard let updatedValue = Self.sqlValue(forEditedString: newValue, columnInfo: columnInfo[columnIndex], connection: connection) else { return }
         let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
         let countQuery = "SELECT COUNT(1) FROM \(tableReference) WHERE \(whereClause)"
         let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(updatedValue.sql) WHERE \(whereClause)"
@@ -3031,6 +3206,28 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     func tableViewSelectionDidChange(_ notification: Notification) {
         updateStatus()
         updateControls()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === tableView else { return false }
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        let row = tableView.editedRow
+        let column = tableView.editedColumn
+        guard row >= 0, row < rows.count else { return false }
+
+        tableView.abortEditing()
+        if rows[row].isNew {
+            cancelNewContentRow(row)
+            return true
+        }
+
+        if column >= 0,
+           column < tableView.numberOfColumns,
+           let columnIndex = Int(tableView.tableColumns[column].identifier.rawValue) {
+            reloadCell(row: row, columnIndex: columnIndex)
+        }
+        tableView.window?.makeFirstResponder(tableView)
+        return true
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
@@ -3121,7 +3318,9 @@ extension SALightweightContentViewController: NSMenuItemValidation {
             return canModifyRows && tableView.numberOfSelectedRows > 0
 
         case #selector(duplicateRow(_:)):
-            return canModifyRows && tableView.numberOfSelectedRows == 1
+            let selectedRow = tableView.selectedRow
+            let selectedRowIsNew = selectedRow >= 0 && selectedRow < rows.count && rows[selectedRow].isNew
+            return canModifyRows && tableView.numberOfSelectedRows == 1 && !selectedRowIsNew
 
         case #selector(addRow(_:)):
             return canModifyRows

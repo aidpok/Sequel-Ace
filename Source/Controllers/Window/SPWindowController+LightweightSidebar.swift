@@ -766,6 +766,7 @@ extension SPWindowController {
                                              tables: lightweightTables,
                                              tableTypes: lightweightTableTypes,
                                              fieldNames: fieldNames)
+        lightweightQueryController.focusEditor()
     }
 
     func showLightweightStatus(for table: String?) {
@@ -790,10 +791,6 @@ extension SPWindowController {
 
         let relationsView = lightweightRelationsController.view
         let detailChanged = installLightweightDetailSubview(relationsView, key: LightweightDetailKey(viewMode: .relations, database: selectedDatabase, table: table, placeholder: nil))
-        lightweightRelationsController.requestLegacyRelationsFallback = { [weak self] in
-            guard let self = self else { return }
-            self.installLegacyDatabaseDocumentIfNeeded(selectingDatabase: self.selectedDatabase, item: self.selectedTable).viewRelations()
-        }
 
         guard let table = table, let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else {
             lightweightRelationsController.showPlaceholder(NSLocalizedString("Select a table to view relations.", comment: "lightweight relations empty state"))

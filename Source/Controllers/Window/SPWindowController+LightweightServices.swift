@@ -747,10 +747,10 @@ import Cocoa
             return
         }
 
-        if lightweightDatabaseHasNonTableObjects(selectedDatabase, connection: activeConnection) {
+        if lightweightDatabaseHasUnsupportedCopyObjects(selectedDatabase, connection: activeConnection) {
             let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Only Partially Supported", comment: "partial copy database support message")
-            alert.informativeText = String(format: NSLocalizedString("Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?", comment: "partial copy database support informative message"), selectedDatabase)
+            alert.messageText = NSLocalizedString("Events Not Copied", comment: "database copy events unsupported message")
+            alert.informativeText = String(format: NSLocalizedString("Duplicating the database '%@' is only partially supported because events cannot be copied by the lightweight path yet. Tables, views, procedures, functions, and triggers will still be copied where possible.\n\nWould you like to continue?", comment: "database copy events unsupported informative message"), selectedDatabase)
             alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
             alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
@@ -1088,6 +1088,38 @@ import Cocoa
         guard activeConnection != nil, loadedDatabaseDocument == nil, activeLightweightViewMode == .content else { return }
 
         lightweightContentController.focusRowFilter()
+    }
+
+    @objc func performActiveLightweightFindPanelAction(_ sender: Any?) {
+        guard activeConnection != nil, loadedDatabaseDocument == nil else { return }
+
+        switch activeLightweightViewMode {
+        case .content:
+            lightweightContentController.focusRowFilter()
+        case .query:
+            lightweightQueryController.performFindPanelAction(sender)
+        default:
+            if let textView = window?.firstResponder as? NSTextView {
+                textView.performFindPanelAction(sender)
+            } else {
+                NSSound.beep()
+            }
+        }
+    }
+
+    @objc func performActiveLightweightTextFinderAction(_ sender: Any?) {
+        guard activeConnection != nil, loadedDatabaseDocument == nil else { return }
+
+        switch activeLightweightViewMode {
+        case .query:
+            lightweightQueryController.performLightweightTextFinderAction(sender)
+        default:
+            if let textView = window?.firstResponder as? NSTextView {
+                textView.performTextFinderAction(sender)
+            } else {
+                NSSound.beep()
+            }
+        }
     }
 
     @objc func focusLightweightContentFilter() {

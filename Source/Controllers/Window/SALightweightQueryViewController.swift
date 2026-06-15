@@ -335,6 +335,8 @@ final class SALightweightQueryViewController: NSViewController {
         textView.allowsUndo = true
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = true
+        textView.usesFindPanel = true
+        textView.isIncrementalSearchingEnabled = true
         textView.autoresizingMask = [.width, .height]
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
@@ -4182,6 +4184,20 @@ private extension SALightweightQueryViewController {
 }
 
 extension SALightweightQueryViewController {
+    func focusEditor() {
+        queryTextView.window?.makeFirstResponder(queryTextView)
+    }
+
+    @objc func performFindPanelAction(_ sender: Any?) {
+        focusEditor()
+        queryTextView.performFindPanelAction(sender)
+    }
+
+    @objc func performLightweightTextFinderAction(_ sender: Any?) {
+        focusEditor()
+        queryTextView.performTextFinderAction(sender)
+    }
+
     func canCopySelectedResultRows(_ sender: Any?) -> Bool {
         let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
         let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag || skipAutoIncrement

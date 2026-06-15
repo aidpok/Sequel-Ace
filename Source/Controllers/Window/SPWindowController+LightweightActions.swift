@@ -5,6 +5,19 @@
 
 import Cocoa
 
+private enum SALightweightDatabaseCopyObjectType {
+    case table
+    case view
+    case procedure
+    case function
+    case trigger
+}
+
+private struct SALightweightDatabaseCopyObject {
+    let name: String
+    let type: SALightweightDatabaseCopyObjectType
+}
+
 extension SPWindowController {
     @objc func addLightweightTable(_ sender: Any?) {
         guard let selectedDatabase = selectedDatabase else { return }
@@ -1134,8 +1147,13 @@ extension SPWindowController {
         }
     }
 
-    func lightweightDatabaseHasNonTableObjects(_ database: String, connection: SPMySQLConnection) -> Bool {
-        return loadLightweightDatabaseRenameObjects(for: database, connection: connection).contains { $0.type != .table }
+    func lightweightDatabaseHasUnsupportedCopyObjects(_ database: String, connection: SPMySQLConnection) -> Bool {
+        guard let quotedDatabase = connection.escapeAndQuoteString(database),
+              let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) LIMIT 1") else {
+            return false
+        }
+
+        return result.numberOfRows() > 0
     }
 
     func runLightweightDatabaseCopyMutation(from sourceDatabase: String,
@@ -1159,7 +1177,7 @@ extension SPWindowController {
                 return
             }
 
-            let objects = self.loadLightweightDatabaseRenameObjects(for: sourceDatabase, connection: activeConnection)
+            let objects = self.loadLightweightDatabaseCopyObjects(for: sourceDatabase, connection: activeConnection)
             if activeConnection.queryErrored() {
                 let error = activeConnection.lastErrorMessage() ?? ""
                 DispatchQueue.main.async {
@@ -1170,7 +1188,13 @@ extension SPWindowController {
                 return
             }
 
-            let tables = objects.filter { $0.type == .table }.map(\.name)
+            let tables = objects.filter { $0.type == .table }
+            let routines = objects.filter { $0.type == .function || $0.type == .procedure }.sorted { left, right in
+                if left.type == right.type { return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending }
+                return left.type == .function
+            }
+            let views = objects.filter { $0.type == .view }
+            let triggers = objects.filter { $0.type == .trigger }
             var options: [String] = []
             if let defaults = self.lightweightDatabaseDefaults(for: sourceDatabase, connection: activeConnection) {
                 if let encoding = defaults.encoding, !encoding.isEmpty {
@@ -1202,11 +1226,12 @@ extension SPWindowController {
 
             if success {
                 for table in tables {
-                    guard let createStatement = self.lightweightCreateTableCopyStatement(table: table,
+                    guard let createStatement = self.lightweightCreateTableCopyStatement(table: table.name,
                                                                                         sourceDatabase: sourceDatabase,
                                                                                         targetDatabase: targetDatabase,
                                                                                         connection: activeConnection) else {
                         success = false
+                        error = activeConnection.lastErrorMessage()
                         break
                     }
 
@@ -1218,12 +1243,77 @@ extension SPWindowController {
                     }
 
                     if copyContent {
-                        _ = activeConnection.queryString("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))")
+                        _ = activeConnection.queryString("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table.name)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table.name))")
                         if activeConnection.queryErrored() {
                             success = false
                             error = activeConnection.lastErrorMessage()
                             break
                         }
+                    }
+                }
+            }
+
+            if success {
+                success = activeConnection.selectDatabase(targetDatabase)
+                if !success { error = activeConnection.lastErrorMessage() }
+            }
+
+            if success {
+                for routine in routines {
+                    guard let createStatement = self.lightweightCreateDatabaseObjectCopyStatement(object: routine,
+                                                                                                 sourceDatabase: sourceDatabase,
+                                                                                                 targetDatabase: targetDatabase,
+                                                                                                 connection: activeConnection) else {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+
+                    _ = activeConnection.queryString(createStatement)
+                    if activeConnection.queryErrored() {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+                }
+            }
+
+            if success {
+                for view in views {
+                    guard let createStatement = self.lightweightCreateDatabaseObjectCopyStatement(object: view,
+                                                                                                 sourceDatabase: sourceDatabase,
+                                                                                                 targetDatabase: targetDatabase,
+                                                                                                 connection: activeConnection) else {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+
+                    _ = activeConnection.queryString(createStatement)
+                    if activeConnection.queryErrored() {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+                }
+            }
+
+            if success {
+                for trigger in triggers {
+                    guard let createStatement = self.lightweightCreateDatabaseObjectCopyStatement(object: trigger,
+                                                                                                 sourceDatabase: sourceDatabase,
+                                                                                                 targetDatabase: targetDatabase,
+                                                                                                 connection: activeConnection) else {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+
+                    _ = activeConnection.queryString(createStatement)
+                    if activeConnection.queryErrored() {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
                     }
                 }
             }
@@ -1277,6 +1367,167 @@ extension SPWindowController {
         }
 
         return nil
+    }
+
+    private func loadLightweightDatabaseCopyObjects(for database: String, connection: SPMySQLConnection) -> [SALightweightDatabaseCopyObject] {
+        var objects: [SALightweightDatabaseCopyObject] = []
+
+        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = row.first { key, _ in
+                    let keyString = String(describing: key).lowercased()
+                    return keyString != "table_type"
+                }.map { stringValue($0.value) } ?? ""
+                let tableType = row.first { key, _ in
+                    String(describing: key).lowercased() == "table_type"
+                }.map { stringValue($0.value).uppercased() } ?? ""
+
+                guard !name.isEmpty else { continue }
+                objects.append(SALightweightDatabaseCopyObject(name: name, type: tableType == "VIEW" ? .view : .table))
+            }
+        }
+
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_type, routine_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["ROUTINE_NAME"] ?? row["routine_name"])
+                let routineType = stringValue(row["ROUTINE_TYPE"] ?? row["routine_type"]).uppercased()
+                guard !name.isEmpty else { continue }
+                objects.append(SALightweightDatabaseCopyObject(name: name, type: routineType == "PROCEDURE" ? .procedure : .function))
+            }
+        }
+
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["TRIGGER_NAME"] ?? row["trigger_name"])
+                guard !name.isEmpty else { continue }
+                objects.append(SALightweightDatabaseCopyObject(name: name, type: .trigger))
+            }
+        }
+
+        return objects
+    }
+
+    private func lightweightCreateDatabaseObjectCopyStatement(object: SALightweightDatabaseCopyObject,
+                                                              sourceDatabase: String,
+                                                              targetDatabase: String,
+                                                              connection: SPMySQLConnection) -> String? {
+        let keyword: String
+        switch object.type {
+        case .view:
+            keyword = "VIEW"
+        case .procedure:
+            keyword = "PROCEDURE"
+        case .function:
+            keyword = "FUNCTION"
+        case .trigger:
+            keyword = "TRIGGER"
+        case .table:
+            return lightweightCreateTableCopyStatement(table: object.name,
+                                                       sourceDatabase: sourceDatabase,
+                                                       targetDatabase: targetDatabase,
+                                                       connection: connection)
+        }
+
+        guard let createStatement = lightweightShowCreateStatement(keyword: keyword,
+                                                                   object: object.name,
+                                                                   database: sourceDatabase,
+                                                                   connection: connection) else {
+            return nil
+        }
+
+        return lightweightRetargetCreateStatement(createStatement,
+                                                  keyword: keyword,
+                                                  sourceName: object.name,
+                                                  targetName: object.name,
+                                                  sourceDatabase: sourceDatabase,
+                                                  targetDatabase: targetDatabase)
+    }
+
+    private func lightweightShowCreateStatement(keyword: String, object: String, database: String, connection: SPMySQLConnection) -> String? {
+        guard let result = connection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(object))") else {
+            return nil
+        }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        if let row = result.getRowAsDictionary() as? [String: Any],
+           let statement = lightweightCreateStatement(from: row, keyword: keyword) {
+            return statement
+        }
+
+        return nil
+    }
+
+    private func lightweightCreateStatement(from row: [String: Any], keyword: String) -> String? {
+        let preferredKeys: [String]
+        switch keyword {
+        case "VIEW":
+            preferredKeys = ["Create View"]
+        case "PROCEDURE":
+            preferredKeys = ["Create Procedure"]
+        case "FUNCTION":
+            preferredKeys = ["Create Function"]
+        case "TRIGGER":
+            preferredKeys = ["SQL Original Statement", "Create Trigger"]
+        default:
+            preferredKeys = ["Create Table"]
+        }
+
+        for key in preferredKeys {
+            let statement = Self.displayString(for: row[key])
+            if !statement.isEmpty {
+                return statement
+            }
+        }
+
+        for (_, value) in row {
+            let statement = Self.displayString(for: value)
+            if statement.range(of: "CREATE ", options: [.caseInsensitive, .anchored]) != nil {
+                return statement
+            }
+        }
+
+        return nil
+    }
+
+    private func lightweightRetargetCreateStatement(_ createStatement: String,
+                                                    keyword: String,
+                                                    sourceName: String,
+                                                    targetName: String,
+                                                    sourceDatabase: String,
+                                                    targetDatabase: String) -> String? {
+        var statement = createStatement
+        let unqualifiedSource = "\(keyword) \(Self.backtickQuoted(sourceName))"
+        let qualifiedSource = "\(keyword) \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))"
+        let qualifiedTarget = "\(keyword) \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName))"
+
+        if let range = statement.range(of: qualifiedSource, options: [.caseInsensitive]) {
+            statement.replaceSubrange(range, with: qualifiedTarget)
+        } else if let range = statement.range(of: unqualifiedSource, options: [.caseInsensitive]) {
+            statement.replaceSubrange(range, with: qualifiedTarget)
+        } else {
+            return nil
+        }
+
+        statement = statement.replacingOccurrences(of: Self.backtickQuoted(sourceDatabase),
+                                                   with: Self.backtickQuoted(targetDatabase))
+        return statement
     }
 
     func runLightweightDatabaseAlterMutation(database: String,

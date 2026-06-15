@@ -42,6 +42,13 @@ struct SALightweightMetadataSnapshot {
     let emptyMessage: String
 }
 
+private final class SALightweightMetadataTableView: SPCopyTable {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        SALightweightResultGrid.selectContextRow(in: self, event: event)
+        return super.menu(for: event)
+    }
+}
+
 final class SALightweightMetadataTableViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private var loadToken = UUID()
     private let columns: [SALightweightMetadataColumn]
@@ -64,6 +71,10 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         return rows[index]
     }
 
+    func setContextMenu(_ menu: NSMenu?) {
+        tableView.menu = menu
+    }
+
     private lazy var placeholderLabel: NSTextField = {
         let label = NSTextField(labelWithString: "")
         label.alignment = .center
@@ -74,7 +85,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     }()
 
     private lazy var tableView: NSTableView = {
-        let tableView = SPCopyTable(frame: .zero)
+        let tableView = SALightweightMetadataTableView(frame: .zero)
         tableView.dataSource = self
         tableView.delegate = self
         tableView.allowsEmptySelection = true
@@ -291,9 +302,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     }
 }
 
-final class SALightweightRelationsViewController: NSViewController {
-    var requestLegacyRelationsFallback: (() -> Void)?
-
+final class SALightweightRelationsViewController: NSViewController, NSMenuItemValidation {
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
@@ -347,6 +356,7 @@ final class SALightweightRelationsViewController: NSViewController {
                 self?.addRelation(row)
             }
         }
+        configureContextMenu()
         updateButtonState()
     }
 
@@ -364,16 +374,18 @@ final class SALightweightRelationsViewController: NSViewController {
         self.table = table
         self.database = database
         self.connection = connection
-        relationsSupported = SALightweightSchemaMetadataLoader.tableSupportsRelations(table: table, database: database, connection: connection)
+        titleLabel.stringValue = String(format: NSLocalizedString("Relations for table: %@", comment: "Relations tab subtitle showing table name"), table)
 
-        guard relationsSupported else {
-            titleLabel.stringValue = NSLocalizedString("This table currently does not support relations. Only tables that use the InnoDB storage engine support them.", comment: "This table currently does not support relations. Only tables that use the InnoDB storage engine support them.")
-            tableController.showPlaceholder("")
+        switch SALightweightSchemaMetadataLoader.relationsSupportState(table: table, database: database, connection: connection) {
+        case .supported:
+            relationsSupported = true
+        case .unsupported(let message), .unavailable(let message):
+            relationsSupported = false
+            tableController.showPlaceholder(message)
             updateButtonState()
             return
         }
 
-        titleLabel.stringValue = String(format: NSLocalizedString("Relations for table: %@", comment: "Relations tab subtitle showing table name"), table)
         updateButtonState()
         tableController.load {
             SALightweightSchemaMetadataLoader.relations(for: table, database: database, connection: connection)
@@ -417,11 +429,30 @@ final class SALightweightRelationsViewController: NSViewController {
         refreshRelations(sender)
     }
 
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(removeRelation(_:)) else { return true }
+        return relationsSupported && tableController.canRemoveSelection()
+    }
+
     private func updateButtonState() {
-        let hasTable = connection != nil && !table.isEmpty && !database.isEmpty && relationsSupported
-        addButton.isEnabled = hasTable
+        let hasTable = connection != nil && !table.isEmpty && !database.isEmpty
+        let canEditRelations = hasTable && relationsSupported
+        addButton.isEnabled = canEditRelations
         refreshButton.isEnabled = hasTable
-        removeButton.isEnabled = hasTable && tableController.canRemoveSelection()
+        removeButton.isEnabled = canEditRelations && tableController.canRemoveSelection()
+    }
+
+    private func configureContextMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = true
+
+        let deleteItem = NSMenuItem(title: NSLocalizedString("Delete Relation", comment: "relations context delete relation menu item"),
+                                    action: #selector(removeRelation(_:)),
+                                    keyEquivalent: "")
+        deleteItem.target = self
+        menu.addItem(deleteItem)
+
+        tableController.setContextMenu(menu)
     }
 
     private func openRelationSheet() {
@@ -818,7 +849,7 @@ private final class SALightweightRelationSheetController: NSWindowController, NS
     }
 }
 
-final class SALightweightTriggersViewController: NSViewController {
+final class SALightweightTriggersViewController: NSViewController, NSMenuItemValidation {
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
@@ -873,6 +904,7 @@ final class SALightweightTriggersViewController: NSViewController {
                 self?.addTrigger(row)
             }
         }
+        configureContextMenu()
         updateButtonState()
     }
 
@@ -933,11 +965,49 @@ final class SALightweightTriggersViewController: NSViewController {
         refreshTriggers(sender)
     }
 
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(editSelectedTrigger(_:)):
+            return tableController.selectedRows.count == 1
+        case #selector(removeTrigger(_:)):
+            return tableController.canRemoveSelection()
+        default:
+            return true
+        }
+    }
+
     private func updateButtonState() {
         let hasTable = connection != nil && !table.isEmpty && !database.isEmpty
         addButton.isEnabled = hasTable
         refreshButton.isEnabled = hasTable
         removeButton.isEnabled = hasTable && tableController.canRemoveSelection()
+    }
+
+    private func configureContextMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = true
+
+        let editItem = NSMenuItem(title: NSLocalizedString("Edit Trigger", comment: "triggers context edit trigger menu item"),
+                                  action: #selector(editSelectedTrigger(_:)),
+                                  keyEquivalent: "")
+        editItem.target = self
+        menu.addItem(editItem)
+
+        let deleteItem = NSMenuItem(title: NSLocalizedString("Delete Trigger", comment: "triggers context delete trigger menu item"),
+                                    action: #selector(removeTrigger(_:)),
+                                    keyEquivalent: "")
+        deleteItem.target = self
+        menu.addItem(deleteItem)
+
+        tableController.setContextMenu(menu)
+    }
+
+    @objc private func editSelectedTrigger(_ sender: Any) {
+        guard let selectedRow = tableController.selectedRows.first,
+              let triggerName = selectedRow["TriggerName"],
+              !triggerName.isEmpty else { return }
+
+        openTriggerSheet(editing: selectedRow)
     }
 
     private func editTrigger(at row: Int) {
@@ -1213,25 +1283,48 @@ private final class SALightweightTriggerSheetController: NSWindowController, NST
     }
 }
 
+fileprivate enum SALightweightRelationsSupportState {
+    case supported
+    case unsupported(String)
+    case unavailable(String)
+}
+
 enum SALightweightSchemaMetadataLoader {
-    fileprivate static func tableSupportsRelations(table: String, database: String, connection: SPMySQLConnection) -> Bool {
+    fileprivate static func relationsSupportState(table: String, database: String, connection: SPMySQLConnection) -> SALightweightRelationsSupportState {
         let query = """
-            SELECT ENGINE \
+            SELECT ENGINE, TABLE_TYPE \
             FROM information_schema.TABLES \
             WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) \
-              AND TABLE_NAME = \(sqlString(table, connection: connection)) \
-              AND TABLE_TYPE = 'BASE TABLE'
+              AND TABLE_NAME = \(sqlString(table, connection: connection))
             """
 
-        guard let result = connection.queryString(query) else { return false }
+        guard let result = connection.queryString(query), !connection.queryErrored() else {
+            return .unavailable(errorMessage(prefix: NSLocalizedString("Unable to determine whether this table supports relations.", comment: "relations support metadata error placeholder"), connection: connection))
+        }
 
         result.defaultRowReturnType = SPMySQLResultRowAsArray
         result.returnDataAsStrings = true
 
-        guard let row = result.getRowAsArray(),
-              let engine = row.first else { return false }
+        guard let row = result.getRowAsArray() else {
+            return .unavailable(NSLocalizedString("Unable to determine whether this table supports relations. The table metadata was not returned; check that the table still exists and that your account can read table metadata.", comment: "relations support metadata unavailable placeholder"))
+        }
 
-        return String(describing: engine).caseInsensitiveCompare("InnoDB") == .orderedSame
+        let engine = row.indices.contains(0) ? displayString(row[0]) : ""
+        let tableType = row.indices.contains(1) ? displayString(row[1]) : ""
+
+        guard tableType.caseInsensitiveCompare("BASE TABLE") == .orderedSame else {
+            return .unsupported(NSLocalizedString("Relations can only be edited for base tables. Views and other database objects do not support foreign keys.", comment: "relations unsupported non-table placeholder"))
+        }
+
+        guard engine.caseInsensitiveCompare("InnoDB") == .orderedSame else {
+            if engine.isEmpty {
+                return .unsupported(NSLocalizedString("This table currently does not support relations. Only tables that use the InnoDB storage engine support them.", comment: "This table currently does not support relations. Only tables that use the InnoDB storage engine support them."))
+            }
+
+            return .unsupported(String(format: NSLocalizedString("This table currently does not support relations. Only tables that use the InnoDB storage engine support them. This table uses %@.", comment: "relations unsupported storage engine placeholder"), engine))
+        }
+
+        return .supported
     }
 
     static func relations(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
