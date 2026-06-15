@@ -161,8 +161,10 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 
 - (void)_hideExportProgress;
 - (BOOL)_isLightweightExport;
+- (BOOL)_isLightweightSelectedTableExport;
 - (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source;
 - (BOOL)_canStartLightweightExportWithCurrentOptions;
+- (BOOL)_lightweightSelectedTableExportHasSelection;
 - (BOOL)_lightweightSupportsExportType:(SPExportType)type;
 - (NSArray *)_lightweightResultForSource:(SPExportSource)source;
 - (void)_enforceLightweightExportUIState;
@@ -283,6 +285,9 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	lightweightQueryResult = [queryResult copy] ?: @[];
 	lightweightQueryString = [queryString copy];
 	lightweightPreferredSource = source;
+
+	if (!tableDataInstance) tableDataInstance = [[SPTableData alloc] init];
+	[tableDataInstance setConnection:aConnection];
 }
 
 /**
@@ -443,6 +448,18 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 
 	if ([self _isLightweightExport]) {
 		SPExportSource preferredSource = lightweightPreferredSource;
+		if ([self _isLightweightSelectedTableExport]) {
+			if (![lightweightSelectedTableItems count]) {
+				[self _showLightweightExportUnavailableAlert];
+				return;
+			}
+
+			selectedExportType = SPAnyExportType;
+			selectedExportSource = SPTableExport;
+			[self exportTables:lightweightSelectedTableItems asFormat:selectedExportType usingSource:selectedExportSource];
+			return;
+		}
+
 		if (![self _lightweightResultAvailableForSource:preferredSource]) {
 			[self _showLightweightExportUnavailableAlert];
 			return;
@@ -542,6 +559,9 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 	SPExportSource actualInput = input;
 	// Dot will always be a TableExport
 	if(exportType == SPDotExport) {
+		actualInput = SPTableExport;
+	}
+	else if ([self _isLightweightSelectedTableExport]) {
 		actualInput = SPTableExport;
 	}
 	else if ([self _isLightweightExport] && (input == SPTableExport || ![[exportInputPopUpButton itemAtIndex:input] isEnabled])) {
@@ -697,6 +717,11 @@ set_input:
 	return lightweightWindowController != nil;
 }
 
+- (BOOL)_isLightweightSelectedTableExport
+{
+	return [self _isLightweightExport] && lightweightPreferredSource == SPTableExport;
+}
+
 - (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source
 {
 	return [[self _lightweightResultForSource:source] count] > 1;
@@ -706,12 +731,38 @@ set_input:
 {
 	if (![self _isLightweightExport]) return YES;
 	if (![self _lightweightSupportsExportType:exportType]) return NO;
+	if ([self _isLightweightSelectedTableExport]) {
+		return exportSource == SPTableExport && [self _lightweightSelectedTableExportHasSelection];
+	}
 	if (exportSource == SPTableExport) return NO;
 	return [self _lightweightResultAvailableForSource:exportSource];
 }
 
+- (BOOL)_lightweightSelectedTableExportHasSelection
+{
+	if (![self _isLightweightSelectedTableExport]) return NO;
+	if (![tables count]) return [lightweightSelectedTableItems count] > 0;
+
+	for (NSArray *table in tables)
+	{
+		if (exportType == SPSQLExport) {
+			if ([[table safeObjectAtIndex:1] boolValue] || [[table safeObjectAtIndex:2] boolValue] || [[table safeObjectAtIndex:3] boolValue]) {
+				return YES;
+			}
+		}
+		else if ([[table safeObjectAtIndex:2] boolValue]) {
+			return YES;
+		}
+	}
+
+	return NO;
+}
+
 - (BOOL)_lightweightSupportsExportType:(SPExportType)type
 {
+	if ([self _isLightweightSelectedTableExport]) {
+		return type == SPSQLExport || type == SPCSVExport || type == SPXMLExport;
+	}
 	return type == SPCSVExport || type == SPXMLExport;
 }
 
@@ -719,7 +770,22 @@ set_input:
 {
 	if (![self _isLightweightExport]) return;
 
-	[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:NO];
+	BOOL isSelectedTableExport = [self _isLightweightSelectedTableExport];
+	[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:isSelectedTableExport];
+	[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:(!isSelectedTableExport && [self _lightweightResultAvailableForSource:SPFilteredExport])];
+	[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:(!isSelectedTableExport && [self _lightweightResultAvailableForSource:SPQueryExport])];
+	[exportInputPopUpButton setEnabled:NO];
+
+	if (isSelectedTableExport) {
+		[exportInputPopUpButton selectItemAtIndex:SPTableExport];
+		exportSource = SPTableExport;
+		[exportTableList setEnabled:YES];
+		[exportSelectAllTablesButton setEnabled:YES];
+		[exportDeselectAllTablesButton setEnabled:YES];
+		[exportRefreshTablesButton setEnabled:NO];
+		return;
+	}
+
 	[exportFilePerTableCheck setHidden:YES];
 	[exportFilePerTableCheck setState:NSControlStateValueOff];
 	[exportTableList setEnabled:NO];
@@ -927,6 +993,21 @@ set_input:
 	[tables removeAllObjects];
 
 	if ([self _isLightweightExport]) {
+		if ([self _isLightweightSelectedTableExport]) {
+			for (id itemName in lightweightSelectedTableItems) {
+				[tables safeAddObject:[NSMutableArray arrayWithObjects:
+									   itemName,
+									   @NO,
+									   @NO,
+									   @NO,
+									   [NSNumber numberWithInt:SPTableTypeTable],
+									   nil]];
+			}
+
+			[exportTableList reloadData];
+			return;
+		}
+
 		for (id itemName in lightweightTablesAndViews) {
 			[tables safeAddObject:[NSMutableArray arrayWithObjects:
 								   itemName,
@@ -1293,10 +1374,18 @@ set_input:
 
 	// When exporting to SQL, only the selected tables option should be enabled
 	if ([self _isLightweightExport]) {
-		[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:NO];
-		[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPFilteredExport])];
-		[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPQueryExport])];
-		[self setExportInput:(SPExportSource)[exportInputPopUpButton indexOfSelectedItem]];
+		if ([self _isLightweightSelectedTableExport]) {
+			[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:YES];
+			[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:NO];
+			[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:NO];
+			[self setExportInput:SPTableExport];
+		}
+		else {
+			[[[exportInputPopUpButton menu] itemAtIndex:SPTableExport] setEnabled:NO];
+			[[[exportInputPopUpButton menu] itemAtIndex:SPFilteredExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPFilteredExport])];
+			[[[exportInputPopUpButton menu] itemAtIndex:SPQueryExport] setEnabled:((enable) && [self _lightweightResultAvailableForSource:SPQueryExport])];
+			[self setExportInput:(SPExportSource)[exportInputPopUpButton indexOfSelectedItem]];
+		}
 		[self _enforceLightweightExportUIState];
 	}
 	else if (isSQL) {
@@ -1354,6 +1443,11 @@ set_input:
  */
 - (void)_checkForDatabaseChanges
 {
+	if ([self _isLightweightExport]) {
+		[self initializeExportUsingSelectedOptions];
+		return;
+	}
+
 	NSUInteger i = [tables count];
 
 	[tablesListInstance updateTables:self];

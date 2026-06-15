@@ -342,6 +342,7 @@ enum SALightweightExportSource {
     // Keep the bridge to Source/Other/Data/SPConstants.h in one place instead of scattering raw values.
     static let filteredResult = SPExportSource(rawValue: 0)!
     static let queryResult = SPExportSource(rawValue: 1)!
+    static let tableExport = SPExportSource(rawValue: 2)!
 }
 
 enum SALightweightTableObjectType: Int {
@@ -492,9 +493,7 @@ final class SALightweightSessionState {
     }
 
     static func queryKey(database: String?, table: String?, connection: SPMySQLConnection) -> TableKey? {
-        guard let database = database, !database.isEmpty else { return nil }
-
-        return TableKey(connection: connectionKey(for: connection), database: database, table: table ?? "")
+        return TableKey(connection: connectionKey(for: connection), database: database ?? "", table: table ?? "")
     }
 
     static func connectionKey(for connection: SPMySQLConnection) -> ConnectionKey {
@@ -658,13 +657,11 @@ final class SALightweightSessionState {
         guard let transport = dictionary[SnapshotKey.transport] as? String,
               let host = dictionary[SnapshotKey.host] as? String,
               let port = dictionary[SnapshotKey.port] as? String,
-              let username = dictionary[SnapshotKey.username] as? String,
-              let database = dictionary[SnapshotKey.database] as? String,
-              !database.isEmpty else { return nil }
+              let username = dictionary[SnapshotKey.username] as? String else { return nil }
 
         return TableKey(
             connection: ConnectionKey(transport: transport, host: host, port: port, username: username),
-            database: database,
+            database: dictionary[SnapshotKey.database] as? String ?? "",
             table: dictionary[SnapshotKey.table] as? String ?? ""
         )
     }
@@ -717,6 +714,7 @@ final class SALightweightSessionState {
     var lightweightTables: [String] = []
     var filteredLightweightTables: [String] = []
     var lightweightTableTypes: [String: SALightweightTableObjectType] = [:]
+    var lightweightTableComments: [String: String] = [:]
     var lightweightPinnedTables: Set<String> = []
     var lightweightTableInfoRows: [String] = [NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane")]
     var lightweightTableInfoLoadToken = UUID()
@@ -764,6 +762,7 @@ final class SALightweightSessionState {
     let lightweightTableInfoPane = NSVisualEffectView(frame: .zero)
     let lightweightSidebarButtonBar = NSView(frame: .zero)
     let lightweightDetailView = NSView(frame: .zero)
+    var lightweightSelectedTableExportMenuItem: NSMenuItem?
     var didRegisterLightweightPreferenceObservers = false
 
     lazy var tableFilterField: NSSearchField = {
@@ -856,6 +855,10 @@ final class SALightweightSessionState {
             }
             return
         }
+        if keyPath == SPDisplayCommentsInTablesList {
+            updateLightweightTableCommentsForPreferenceChange()
+            return
+        }
 
         super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
@@ -888,6 +891,7 @@ final class SALightweightSessionState {
 		if didRegisterLightweightPreferenceObservers {
 			UserDefaults.standard.removeObserver(self, forKeyPath: SPGlobalFontSettings)
 			UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayServerVersionInWindowTitle)
+			UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayCommentsInTablesList)
 		}
 	}
 }

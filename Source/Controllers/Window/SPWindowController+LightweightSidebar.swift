@@ -6,6 +6,22 @@
 import Cocoa
 
 extension SPWindowController {
+    func preferredLightweightViewModeFromPreferences() -> SAViewMode {
+        let preferredValue = UserDefaults.standard.integer(forKey: SPDefaultViewMode)
+        if preferredValue > 0 {
+            return SAViewMode.fromPreferences(preferredValue)
+        }
+
+        return SAViewMode.fromPreferences(UserDefaults.standard.integer(forKey: SPLastViewMode))
+    }
+
+    func setActiveLightweightViewMode(_ mode: SAViewMode, persist: Bool = true) {
+        activeLightweightViewMode = mode
+        if persist {
+            UserDefaults.standard.set(mode.preferencesValue, forKey: SPLastViewMode)
+        }
+    }
+
     func showLightweightError(title: String, message: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -124,6 +140,7 @@ extension SPWindowController {
 
         UserDefaults.standard.addObserver(self, forKeyPath: SPGlobalFontSettings, options: .new, context: nil)
         UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayServerVersionInWindowTitle, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayCommentsInTablesList, options: .new, context: nil)
         didRegisterLightweightPreferenceObservers = true
     }
 
@@ -193,10 +210,12 @@ extension SPWindowController {
         activeLightweightDetailKey = nil
         selectedDatabase = nil
         selectedTable = nil
+        updateLightweightSidebarActionMenuState()
         lightweightDatabases.removeAll { $0.caseInsensitiveCompare(database) == .orderedSame }
         lightweightTables = []
         filteredLightweightTables = []
         lightweightTableTypes = [:]
+        lightweightTableComments = [:]
         lightweightPinnedTables = []
         tableFilterField.stringValue = ""
         tablesListView.reloadData()
@@ -219,6 +238,7 @@ extension SPWindowController {
         activeLightweightDetailKey = nil
         selectedDatabase = newDatabase
         selectedTable = nil
+        updateLightweightSidebarActionMenuState()
         lightweightDatabases = lightweightDatabases.map { database in
             database.caseInsensitiveCompare(oldDatabase) == .orderedSame ? newDatabase : database
         }
@@ -278,23 +298,25 @@ extension SPWindowController {
         }
     }
 
-    func loadLightweightTableObjects(for database: String, connection: SPMySQLConnection) -> [(name: String, type: SALightweightTableObjectType)] {
-        var objects: [(name: String, type: SALightweightTableObjectType)] = []
+    func loadLightweightTableObjects(for database: String, connection: SPMySQLConnection) -> [(name: String, type: SALightweightTableObjectType, comment: String?)] {
+        var objects: [(name: String, type: SALightweightTableObjectType, comment: String?)] = []
+        let shouldLoadComments = UserDefaults.standard.bool(forKey: SPDisplayCommentsInTablesList)
+        let tableQuery = shouldLoadComments
+            ? "SHOW TABLE STATUS FROM \(Self.backtickQuoted(database))"
+            : "SHOW FULL TABLES FROM \(Self.backtickQuoted(database))"
 
-        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))") {
+        if let result = connection.queryString(tableQuery) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
-                let name = row.first { key, _ in
-                    let keyString = String(describing: key).lowercased()
-                    return keyString != "table_type"
-                }.map { stringValue($0.value) } ?? ""
+                let name = lightweightTableName(from: row)
                 let tableType = row.first { key, _ in
                     String(describing: key).lowercased() == "table_type"
                 }.map { stringValue($0.value).uppercased() } ?? ""
+                let tableComment = shouldLoadComments ? lightweightRowString(row["Comment"] ?? row["COMMENT"] ?? row["comment"]) : nil
 
                 guard !name.isEmpty else { continue }
-                objects.append((name: name, type: tableType == "VIEW" ? .view : .table))
+                objects.append((name: name, type: tableType == "VIEW" || tableComment?.uppercased() == "VIEW" ? .view : .table, comment: tableComment))
             }
         }
 
@@ -306,11 +328,67 @@ extension SPWindowController {
                 let name = stringValue(row["ROUTINE_NAME"] ?? row["routine_name"])
                 let routineType = stringValue(row["ROUTINE_TYPE"] ?? row["routine_type"]).uppercased()
                 guard !name.isEmpty else { continue }
-                objects.append((name: name, type: routineType == "PROCEDURE" ? .procedure : .function))
+                objects.append((name: name, type: routineType == "PROCEDURE" ? .procedure : .function, comment: nil))
             }
         }
 
         return objects
+    }
+
+    func updateLightweightTableCommentsForPreferenceChange() {
+        lightweightTableComments = [:]
+
+        guard UserDefaults.standard.bool(forKey: SPDisplayCommentsInTablesList),
+              hasActiveLightweightConnection,
+              let selectedDatabase = selectedDatabase,
+              let activeConnection = activeConnection else {
+            tablesListView.reloadData()
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
+            guard let self = self, let activeConnection = activeConnection else { return }
+            let comments = self.loadLightweightTableComments(for: selectedDatabase, connection: activeConnection)
+
+            DispatchQueue.main.async {
+                guard self.selectedDatabase == selectedDatabase else { return }
+                self.lightweightTableComments = comments
+                self.tablesListView.reloadData()
+            }
+        }
+    }
+
+    func loadLightweightTableComments(for database: String, connection: SPMySQLConnection) -> [String: String] {
+        var comments: [String: String] = [:]
+
+        guard let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database))") else { return comments }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        while let row = result.getRowAsDictionary() as? [String: Any] {
+            let name = lightweightTableName(from: row)
+            guard !name.isEmpty else { continue }
+            comments[name] = lightweightRowString(row["Comment"] ?? row["COMMENT"] ?? row["comment"])
+        }
+
+        return comments
+    }
+
+    private func lightweightTableName(from row: [String: Any]) -> String {
+        let explicitName = lightweightRowString(row["Name"] ?? row["NAME"] ?? row["name"])
+        if !explicitName.isEmpty {
+            return explicitName
+        }
+
+        return row.first { key, _ in
+            let keyString = String(describing: key).lowercased()
+            return keyString != "table_type"
+        }.map { lightweightRowString($0.value) } ?? ""
+    }
+
+    private func lightweightRowString(_ value: Any?) -> String {
+        guard let value = value, !(value is NSNull) else { return "" }
+        return stringValue(value)
     }
 
     func orderLightweightTables(_ tables: [String], pinnedTables: Set<String>) -> [String] {
@@ -383,7 +461,7 @@ extension SPWindowController {
             ?? (snapshot[SALightweightWindowSessionSnapshotKey.viewMode] as? Int).flatMap { SAViewMode(rawValue: $0) }
             ?? .structure
 
-        activeLightweightViewMode = restoredViewMode
+        setActiveLightweightViewMode(restoredViewMode, persist: false)
 
         guard let database = restoredDatabase ?? selectedDatabase else {
             showLightweightPlaceholder(NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
@@ -406,12 +484,14 @@ extension SPWindowController {
         }
         selectedDatabase = database
         selectedTable = nil
+        updateLightweightSidebarActionMenuState()
         setLightweightFallbackToolbarItemsEnabled(true)
         resetLightweightTableInfo()
         showLightweightPlaceholder(NSLocalizedString("Loading tables...", comment: "lightweight database shell loading tables"))
         lightweightTables = []
         filteredLightweightTables = []
         lightweightTableTypes = [:]
+        lightweightTableComments = [:]
         lightweightPinnedTables = []
         tablesListView.reloadData()
 
@@ -422,9 +502,13 @@ extension SPWindowController {
             let pinnedTables = self.loadLightweightPinnedTables(for: database, connection: activeConnection)
             var uniqueTables: [String] = []
             var types: [String: SALightweightTableObjectType] = [:]
+            var comments: [String: String] = [:]
             for object in loadedObjects where types[object.name] == nil {
                 uniqueTables.append(object.name)
                 types[object.name] = object.type
+                if let comment = object.comment {
+                    comments[object.name] = comment
+                }
             }
             let tables = self.orderLightweightTables(uniqueTables, pinnedTables: pinnedTables)
 
@@ -433,19 +517,24 @@ extension SPWindowController {
                 self.updateLightweightWindowTitle()
                 self.lightweightTables = tables
                 self.lightweightTableTypes = types
+                self.lightweightTableComments = comments
                 self.lightweightPinnedTables = pinnedTables
                 self.applyLightweightTableFilter()
                 self.tablesListView.reloadData()
                 if let tableToRestore = tableToRestore, tables.contains(tableToRestore) {
                     if let restoringViewMode = restoringViewMode {
-                        self.activeLightweightViewMode = restoringViewMode
+                        self.setActiveLightweightViewMode(restoringViewMode, persist: false)
                     }
                     self.selectLightweightTableInSidebar(tableToRestore)
                     self.selectLightweightTable(tableToRestore, recordsHistory: false)
                     return
                 }
                 if let restoringViewMode = restoringViewMode, restoringViewMode == .query {
-                    self.activeLightweightViewMode = restoringViewMode
+                    self.setActiveLightweightViewMode(restoringViewMode, persist: false)
+                    self.showLightweightQuery()
+                    return
+                }
+                if self.activeLightweightViewMode == .query {
                     self.showLightweightQuery()
                     return
                 }
@@ -462,6 +551,7 @@ extension SPWindowController {
             saveCurrentLightweightViewState()
         }
         selectedTable = table
+        updateLightweightSidebarActionMenuState()
         setLightweightFallbackToolbarItemsEnabled(true)
         markLightweightResumeStateChanged()
         if recordsHistory {
@@ -615,7 +705,7 @@ extension SPWindowController {
     func showLightweightStructure(for table: String) {
         guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
 
-        activeLightweightViewMode = .structure
+        setActiveLightweightViewMode(.structure)
         databaseToolbarController.selectViewMode(.structure)
 
         let structureView = lightweightStructureController.view
@@ -634,7 +724,7 @@ extension SPWindowController {
     func showLightweightContent(for table: String) {
         guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
 
-        activeLightweightViewMode = .content
+        setActiveLightweightViewMode(.content)
         databaseToolbarController.selectViewMode(.content)
 
         let contentView = lightweightContentController.view
@@ -659,16 +749,27 @@ extension SPWindowController {
     func showLightweightQuery() {
         guard let activeConnection = activeConnection else { return }
 
-        activeLightweightViewMode = .query
+        setActiveLightweightViewMode(.query)
         databaseToolbarController.selectViewMode(.query)
 
         let queryView = lightweightQueryController.view
         _ = installLightweightDetailSubview(queryView, key: LightweightDetailKey(viewMode: .query, database: selectedDatabase, table: selectedTable, placeholder: nil))
-        lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
+        let fieldNames = selectedDatabase.flatMap { database in
+            selectedTable.flatMap { table in
+                lightweightStructureController.cachedColumnMetadata(for: table, database: database)
+            }
+        }?.compactMap { $0["name"] } ?? []
+        lightweightQueryController.loadQuery(database: selectedDatabase,
+                                             table: selectedTable,
+                                             connection: activeConnection,
+                                             databases: lightweightDatabases,
+                                             tables: lightweightTables,
+                                             tableTypes: lightweightTableTypes,
+                                             fieldNames: fieldNames)
     }
 
     func showLightweightStatus(for table: String?) {
-        activeLightweightViewMode = .status
+        setActiveLightweightViewMode(.status)
         databaseToolbarController.selectViewMode(.status)
 
         let tableInfoView = lightweightTableInfoController.view
@@ -684,7 +785,7 @@ extension SPWindowController {
     }
 
     func showLightweightRelations(for table: String?) {
-        activeLightweightViewMode = .relations
+        setActiveLightweightViewMode(.relations)
         databaseToolbarController.selectViewMode(.relations)
 
         let relationsView = lightweightRelationsController.view
@@ -704,7 +805,7 @@ extension SPWindowController {
     }
 
     func showLightweightTriggers(for table: String?) {
-        activeLightweightViewMode = .triggers
+        setActiveLightweightViewMode(.triggers)
         databaseToolbarController.selectViewMode(.triggers)
 
         let triggersView = lightweightTriggersController.view

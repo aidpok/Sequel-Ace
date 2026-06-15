@@ -98,9 +98,12 @@ extension SPWindowController: SAConnectionDelegate {
             return
         }
 
+        setActiveLightweightViewMode(preferredLightweightViewModeFromPreferences(), persist: false)
         if let selectedDatabase = selectedDatabase {
             selectLightweightDatabaseInToolbar(selectedDatabase)
             loadTables(for: selectedDatabase)
+        } else if activeLightweightViewMode == .query {
+            showLightweightQuery()
         }
     }
 
@@ -539,6 +542,7 @@ extension SPWindowController: SADatabaseToolbarControllerDelegate {
     func databaseToolbar(_ controller: SADatabaseToolbarController, didSelectViewMode mode: SAViewMode) {
         if activeConnection != nil,
            loadedDatabaseDocument == nil,
+           mode != .query,
            selectedDatabase?.isEmpty != false {
             return
         }
@@ -718,9 +722,16 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
         let table = filteredLightweightTables[row - 1]
         cell.image = (lightweightTableTypes[table] ?? .table).imageName.flatMap { NSImage(named: NSImage.Name($0)) }
-        if lightweightPinnedTables.contains(table) {
-            cell.setNote(NSLocalizedString("Pinned", comment: "pinned table list note"))
+        var notes: [String] = []
+        if UserDefaults.standard.bool(forKey: SPDisplayCommentsInTablesList),
+           let comment = lightweightTableComments[table],
+           !comment.isEmpty {
+            notes.append(comment)
         }
+        if lightweightPinnedTables.contains(table) {
+            notes.append(NSLocalizedString("Pinned", comment: "pinned table list note"))
+        }
+        cell.setNote(notes.joined(separator: " — "))
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {

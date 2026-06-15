@@ -50,6 +50,81 @@ private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
     }
 }
 
+private final class SALightweightMenuSearchFieldView: NSView {
+    private let searchField: NSSearchField
+    private let searchFrame = NSRect(x: 20, y: 1, width: 176, height: 19)
+
+    init(searchField: NSSearchField) {
+        self.searchField = searchField
+        super.init(frame: NSRect(x: 0, y: 0, width: 217, height: 20))
+        autoresizingMask = [.maxXMargin, .minYMargin]
+        addSubview(searchField)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        searchField.frame = searchFrame
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window else { return }
+            window.makeFirstResponder(self.searchField)
+        }
+    }
+}
+
+@objcMembers
+private final class SALightweightQueryTablesListProxy: NSObject {
+    private(set) var selectedDatabase: String?
+    private(set) var tableName: String?
+    private(set) var allTableAndViewNames: [String] = []
+    private(set) var allTableNames: [String] = []
+    private(set) var allViewNames: [String] = []
+    private(set) var allProcedureNames: [String] = []
+    private(set) var allFunctionNames: [String] = []
+    private(set) var allDatabaseNames: [String] = []
+    private(set) var allSystemDatabaseNames: [String] = []
+    private(set) var allFieldNames: [String] = []
+
+    func update(database: String?,
+                table: String?,
+                databases: [String],
+                tables: [String],
+                tableTypes: [String: SALightweightTableObjectType],
+                fieldNames: [String]) {
+        selectedDatabase = database
+        tableName = table
+        allTableNames = tables.filter { (tableTypes[$0] ?? .table) == .table }
+        allViewNames = tables.filter { tableTypes[$0] == .view }
+        allProcedureNames = tables.filter { tableTypes[$0] == .procedure }
+        allFunctionNames = tables.filter { tableTypes[$0] == .function }
+        allTableAndViewNames = allTableNames + allViewNames
+        updateFieldNames(fieldNames)
+
+        let partition = SADatabaseListManager.partition(databases: databases)
+        allDatabaseNames = partition.userDatabases
+        allSystemDatabaseNames = partition.systemDatabases
+    }
+
+    func updateFieldNames(_ fieldNames: [String]) {
+        allFieldNames = fieldNames
+    }
+
+    func selectedTableAndViewNames() -> [String] {
+        guard let tableName,
+              allTableAndViewNames.contains(tableName) else { return [] }
+
+        return [tableName]
+    }
+}
+
 @objcMembers
 final class SALightweightQueryViewController: NSViewController {
 
@@ -85,8 +160,20 @@ final class SALightweightQueryViewController: NSViewController {
         let countQuery: String
         let updateQuery: String
         let refreshQuery: String?
+        let fallbackCountQuery: String?
+        let fallbackUpdateQuery: String?
+        let fallbackRefreshQuery: String?
         let localValue: Any
         let requiresReload: Bool
+    }
+
+    private struct ResultGridViewState {
+        let selectedRows: IndexSet
+        let firstVisibleRow: Int?
+        let columnDefinitions: [NSDictionary]
+        let rows: [[Any]]
+        let lastExecutedQuery: String
+        let lastResultQuery: String
     }
 
     private weak var connection: SPMySQLConnection?
@@ -113,6 +200,9 @@ final class SALightweightQueryViewController: NSViewController {
     private var isApplyingQuerySort = false
     private var querySortColumnIndex: Int?
     private var querySortAscending = true
+    private var pendingResultGridViewState: ResultGridViewState?
+    private var pendingSortFailureRestore: (columnIndex: Int?, ascending: Bool)?
+    private var primaryKeyColumnCache: [String: Set<String>] = [:]
     private var bracketHighlighter: SPBracketHighlighter?
     private let helpViewerClient = SPHelpViewerClient()
     private lazy var fieldEditor = SPFieldEditorController()
@@ -120,9 +210,13 @@ final class SALightweightQueryViewController: NSViewController {
     private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
     private var isFieldEditorPresented = false
     private lazy var favoriteDocumentProxy = SALightweightQueryFavoriteDocumentProxy(queryController: self)
+    private let completionTablesListProxy = SALightweightQueryTablesListProxy()
     private let maxDisplayedRows = 10_000
     private let initialQueryRowPublishSize = 40
     private let remainingQueryRowPublishSize = 1_000
+    private let bundleBlobHandlingInclude = 2
+    private let bundleBlobHandlingFileReference = 3
+    private let bundleBlobHandlingImageFileReference = 4
     private var baseStatusText = NSLocalizedString("Ready", comment: "lightweight query ready status")
     private var resultColumnWidths: [String: CGFloat] = [:]
     private static let observedPreferenceKeys = [
@@ -158,6 +252,7 @@ final class SALightweightQueryViewController: NSViewController {
     var queryExecutionWillBegin: (() -> Void)?
     var queryExecutionDidEnd: (() -> Void)?
     var tableDocumentInstance: Any { favoriteDocumentProxy }
+    var tablesListInstance: Any { completionTablesListProxy }
     var textView: SPTextView { queryTextView }
 
     private func prewarmFieldEditor() {
@@ -192,6 +287,11 @@ final class SALightweightQueryViewController: NSViewController {
     private static let queryEditorInitialHeightRatio: CGFloat = 142.0 / 387.0
     private static let queryEditorMinimumInitialHeight: CGFloat = 143.0
     private static let queryEditorMaximumInitialHeight: CGFloat = 360.0
+    private let queryMenuDynamicStartIndex = 7
+    private var favoritesSearchMenuItem: NSMenuItem?
+    private var historySearchMenuItem: NSMenuItem?
+    private var favoritesMenu: NSMenu?
+    private var historyMenu: NSMenu?
     private lazy var actionButton: NSPopUpButton = {
         let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 35, height: 25), pullsDown: true)
         button.bezelStyle = .regularSquare
@@ -204,21 +304,27 @@ final class SALightweightQueryViewController: NSViewController {
     }()
 
     private lazy var historySearchField: NSSearchField = {
-        let field = NSSearchField(frame: NSRect(x: 0, y: 0, width: 180, height: 22))
-        field.sendsSearchStringImmediately = true
-        field.sendsWholeSearchString = false
-        field.placeholderString = NSLocalizedString("Filter", comment: "query history filter placeholder")
-        field.delegate = self
+        let field = makeMenuSearchField(placeholder: NSLocalizedString("Filter", comment: "query history filter placeholder"),
+                                        recentsAutosaveName: "SPQueryHistorySearchField")
+        field.target = self
+        field.action = #selector(filterQueryHistory(_:))
         return field
     }()
 
     private lazy var favoriteSearchField: NSSearchField = {
-        let field = NSSearchField(frame: NSRect(x: 0, y: 0, width: 180, height: 22))
-        field.sendsSearchStringImmediately = true
-        field.sendsWholeSearchString = false
-        field.placeholderString = NSLocalizedString("Filter", comment: "query favorite filter placeholder")
-        field.delegate = self
+        let field = makeMenuSearchField(placeholder: NSLocalizedString("Filter", comment: "query favorite filter placeholder"),
+                                        recentsAutosaveName: "SPQueryFavoriteSearchField")
+        field.target = self
+        field.action = #selector(filterQueryFavorites(_:))
         return field
+    }()
+
+    private lazy var historySearchFieldView: NSView = {
+        makeMenuSearchFieldView(for: historySearchField)
+    }()
+
+    private lazy var favoriteSearchFieldView: NSView = {
+        makeMenuSearchFieldView(for: favoriteSearchField)
     }()
 
     private lazy var queryTextView: SPTextView = {
@@ -249,32 +355,40 @@ final class SALightweightQueryViewController: NSViewController {
         return tableView
     }()
 
-    private lazy var favoritesButton: NSPopUpButton = {
-        let button = NSPopUpButton(frame: .zero, pullsDown: true)
+    private lazy var favoritesButton: NSButton = {
+        let button = NSButton(frame: .zero)
+        button.setButtonType(.momentaryPushIn)
+        button.title = NSLocalizedString("Query Favorites", comment: "query favorites button title")
         button.target = self
-        button.action = #selector(chooseQueryFavorite(_:))
+        button.action = #selector(showQueryFavoritesMenu(_:))
         button.toolTip = NSLocalizedString("Choose a favorite from the menu or save queries to the favorites (⌥⌘F)", comment: "query favorites tooltip")
         button.keyEquivalent = "f"
         button.keyEquivalentModifierMask = [.option, .command]
         button.bezelStyle = .recessed
         button.cell?.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.lineBreakMode = .byTruncatingTail
         return button
     }()
 
-    private lazy var historyButton: NSPopUpButton = {
-        let button = NSPopUpButton(frame: .zero, pullsDown: true)
+    private lazy var historyButton: NSButton = {
+        let button = NSButton(frame: .zero)
+        button.setButtonType(.momentaryPushIn)
+        button.title = NSLocalizedString("Query History", comment: "query history button title")
         button.target = self
-        button.action = #selector(chooseQueryHistory(_:))
+        button.action = #selector(showQueryHistoryMenu(_:))
         button.toolTip = NSLocalizedString("Choose a query from your recent queries (⌥⌘Y)", comment: "query history tooltip")
         button.keyEquivalent = "y"
         button.keyEquivalentModifierMask = [.option, .command]
         button.bezelStyle = .recessed
         button.cell?.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.lineBreakMode = .byTruncatingTail
         return button
     }()
 
     private lazy var runButton: SPComboPopupButton = {
-        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 300, height: 22), pullsDown: true)
+        let button = SPComboPopupButton(frame: NSRect(x: 0, y: 0, width: 180, height: 22), pullsDown: true)
         button.target = self
         button.action = #selector(runPrimaryQuery(_:))
         button.keyEquivalent = "r"
@@ -445,7 +559,7 @@ final class SALightweightQueryViewController: NSViewController {
 
             runButton.trailingAnchor.constraint(equalTo: controlBarView.trailingAnchor, constant: -8),
             runButton.centerYAnchor.constraint(equalTo: controlBarView.centerYAnchor),
-            runButton.widthAnchor.constraint(equalToConstant: 300),
+            runButton.widthAnchor.constraint(equalToConstant: 180),
 
             queryInfoButton.leadingAnchor.constraint(equalTo: bottomBarView.leadingAnchor, constant: 10),
             queryInfoButton.topAnchor.constraint(equalTo: bottomBarView.topAnchor, constant: 4),
@@ -547,7 +661,13 @@ final class SALightweightQueryViewController: NSViewController {
         }
     }
 
-    func loadQuery(database: String?, table: String?, connection: SPMySQLConnection) {
+    func loadQuery(database: String?,
+                   table: String?,
+                   connection: SPMySQLConnection,
+                   databases: [String] = [],
+                   tables: [String] = [],
+                   tableTypes: [String: SALightweightTableObjectType] = [:],
+                   fieldNames: [String] = []) {
         let queryKey = SALightweightSessionState.queryKey(database: database, table: nil, connection: connection)
         let legacyTableKey = SALightweightSessionState.tableKey(database: database, table: table, connection: connection)
         saveCurrentQueryTextIfNeeded()
@@ -555,6 +675,12 @@ final class SALightweightQueryViewController: NSViewController {
         self.connection = connection
         self.database = database ?? ""
         self.table = table
+        completionTablesListProxy.update(database: database,
+                                         table: table,
+                                         databases: databases,
+                                         tables: tables,
+                                         tableTypes: tableTypes,
+                                         fieldNames: fieldNames)
 
         if documentURL == nil {
             documentURL = SPQueryController.shared().registerDocument(withFileURL: nil, andContextInfo: nil)
@@ -810,6 +936,7 @@ private extension SALightweightQueryViewController {
         queryTextView.delegate = self
         queryTextView.setValue(queryScrollView, forKey: "scrollView")
         queryTextView.setValue(self, forKey: "customQueryInstance")
+        queryTextView.setValue(completionTablesListProxy, forKey: "tablesListInstance")
         queryTextView.awakeFromNib()
         queryTextView.textContainerInset = NSSize(width: 4, height: 0)
         bracketHighlighter = SPBracketHighlighter(textView: queryTextView)
@@ -1068,7 +1195,7 @@ private extension SALightweightQueryViewController {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let titleItem = NSMenuItem(title: NSLocalizedString("Run Current Query", comment: "run button title"), action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: NSLocalizedString("Run Current", comment: "run button title"), action: nil, keyEquivalent: "")
         titleItem.isHidden = true
         menu.addItem(titleItem)
 
@@ -1117,7 +1244,7 @@ private extension SALightweightQueryViewController {
         let secondaryItem = menu.items[3]
 
         if primaryActionIsRunAll {
-            titleItem.title = NSLocalizedString("Run All Queries", comment: "run all button")
+            titleItem.title = NSLocalizedString("Run All", comment: "run all button")
             primaryItem.title = NSLocalizedString("Run All Queries", comment: "run all menu item title")
         } else {
             secondaryItem.title = NSLocalizedString("Run All Queries", comment: "run all menu item title")
@@ -1139,18 +1266,18 @@ private extension SALightweightQueryViewController {
         if queryTextView.selectedRange().length == 0 {
             if currentQueryBeforeCaret {
                 if !primaryActionIsRunAll {
-                    titleItem.title = NSLocalizedString("Run Previous Query", comment: "run previous button")
+                    titleItem.title = NSLocalizedString("Run Previous", comment: "run previous button")
                 }
                 contextualItem.title = NSLocalizedString("Run Previous Query", comment: "run previous query menu item")
             } else {
                 if !primaryActionIsRunAll {
-                    titleItem.title = NSLocalizedString("Run Current Query", comment: "run current button")
+                    titleItem.title = NSLocalizedString("Run Current", comment: "run current button")
                 }
                 contextualItem.title = NSLocalizedString("Run Current Query", comment: "run current query menu item")
             }
         } else {
             if !primaryActionIsRunAll {
-                titleItem.title = NSLocalizedString("Run Selected Text", comment: "run selection button")
+                titleItem.title = NSLocalizedString("Run Selection", comment: "run selection button")
             }
             contextualItem.title = NSLocalizedString("Run Selected Text", comment: "run selected text menu item")
         }
@@ -1338,10 +1465,40 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func showAllFieldCompletions(_ sender: Any?) {
+        refreshCompletionFieldNamesIfNeeded()
         queryTextView.showCompletionList(for: "$SP_ASLIST_ALL_FIELDS", at: NSRange(location: queryTextView.selectedRange().location, length: 0), fuzzySearch: false)
     }
 
+    @objc func refreshCompletionFieldNamesIfNeeded() {
+        guard completionTablesListProxy.allFieldNames.isEmpty,
+              let connection,
+              !database.isEmpty,
+              let table,
+              completionTablesListProxy.allTableAndViewNames.contains(table) else { return }
+
+        guard let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))") else { return }
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+
+        let rows = result.getAllRows() as? [[String: Any]] ?? []
+        let fieldNames = rows.compactMap { row -> String? in
+            if let field = row["Field"] as? String, !field.isEmpty {
+                return field
+            }
+
+            if let field = row["field"] as? String, !field.isEmpty {
+                return field
+            }
+
+            return nil
+        }
+
+        completionTablesListProxy.updateFieldNames(fieldNames)
+    }
+
     func performTextViewCompletion(fuzzySearch: Bool) {
+        refreshCompletionFieldNamesIfNeeded()
+
         let selector = NSSelectorFromString("doCompletionByUsingSpellChecker:fuzzyMode:autoCompleteMode:")
         guard queryTextView.responds(to: selector),
               let implementation = queryTextView.method(for: selector) else {
@@ -1354,7 +1511,7 @@ private extension SALightweightQueryViewController {
         completionFunction(queryTextView, selector, false, fuzzySearch, false)
     }
 
-    func runQueries(_ queries: [String]) {
+    func runQueries(_ queries: [String], preservingResultGridState: Bool = false, recordsHistory: Bool = true) {
         guard let connection, !isRunning else { return }
 
         let runnableQueries = queries
@@ -1381,7 +1538,14 @@ private extension SALightweightQueryViewController {
         let token = queryToken
         isCancellationRequested = false
 
-        let preservingColumnsForSort = isApplyingQuerySort && !columnDefinitions.isEmpty
+        if preservingResultGridState {
+            pendingResultGridViewState = captureResultGridViewState()
+        } else {
+            pendingResultGridViewState = nil
+            pendingSortFailureRestore = nil
+        }
+
+        let preservingColumnsForSort = preservingResultGridState && !columnDefinitions.isEmpty
         if !isApplyingQuerySort {
             querySortColumnIndex = nil
             querySortAscending = true
@@ -1390,17 +1554,19 @@ private extension SALightweightQueryViewController {
 
         isRunning = true
         runningQueryCount = runnableQueries.count
-        rows = []
-        displayCache.invalidateAll()
+        updateDataTableBundleSupport()
         if preservingColumnsForSort {
+            displayCache.invalidateAll()
             tableView.noteNumberOfRowsChanged()
         } else {
+            rows = []
+            displayCache.invalidateAll()
             columnDefinitions = []
             columnWidthCache.invalidateAll()
             rebuildColumns()
+            lastExecutedQuery = ""
+            lastResultQuery = ""
         }
-        lastExecutedQuery = ""
-        lastResultQuery = ""
         let runningStatus = runnableQueries.count > 1
             ? String(format: NSLocalizedString("Running query 1 of %ld...", comment: "lightweight query running multiple status"), runnableQueries.count)
             : NSLocalizedString("Running query...", comment: "lightweight query running status")
@@ -1504,7 +1670,7 @@ private extension SALightweightQueryViewController {
 
                 queriesRun += 1
 
-                result.returnDataAsStrings = true
+                result.returnDataAsStrings = false
                 result.defaultRowReturnType = SPMySQLResultRowAsArray
 
                 totalExecutionTime += result.queryExecutionTime()
@@ -1652,22 +1818,40 @@ private extension SALightweightQueryViewController {
                 self.lastExecutedQuery = finalResult.executedQuery
                 self.lastResultQuery = finalResult.resultQuery
 
-                if !self.lastExecutedQuery.isEmpty {
+                if recordsHistory, !self.lastExecutedQuery.isEmpty {
                     self.addHistoryEntry(self.lastExecutedQuery)
                 }
 
                 if let error = finalResult.fatalError, !error.isEmpty {
+                    let sortRestore = self.isApplyingQuerySort ? self.pendingSortFailureRestore : nil
                     self.isApplyingQuerySort = false
-                    self.columnDefinitions = []
-                    self.rows = []
+                    if let state = self.pendingResultGridViewState {
+                        self.columnDefinitions = state.columnDefinitions
+                        self.rows = state.rows
+                        self.lastExecutedQuery = state.lastExecutedQuery
+                        self.lastResultQuery = state.lastResultQuery
+                        if let sortRestore {
+                            self.querySortColumnIndex = sortRestore.columnIndex
+                            self.querySortAscending = sortRestore.ascending
+                        }
+                    } else {
+                        self.columnDefinitions = []
+                        self.rows = []
+                    }
                     self.displayCache.invalidateAll()
                     self.columnWidthCache.invalidateAll()
                     self.rebuildColumns()
-                    self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: finalResult.errorText ?? error, errorID: finalResult.lastErrorID)
-                    self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: finalResult.errorText ?? error, isError: true)
-                    self.setStatusText(error)
+                    self.updateDataTableBundleSupport()
+                    let displayedError = sortRestore == nil ? error : NSLocalizedString("Couldn't sort column.", comment: "text shown if an error occurred while sorting the result table")
+                    if sortRestore == nil {
+                        self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: finalResult.errorText ?? error, errorID: finalResult.lastErrorID)
+                    }
+                    self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: displayedError, isError: true)
+                    self.setStatusText(displayedError)
                     self.rebuildMenus()
                     self.updateControls()
+                    self.restorePendingResultGridViewState()
+                    self.pendingSortFailureRestore = nil
                     return
                 }
 
@@ -1680,6 +1864,7 @@ private extension SALightweightQueryViewController {
                     self.columnWidthCache.invalidateAll()
                     self.rebuildColumns()
                 }
+                self.updateDataTableBundleSupport()
                 self.updateStatus(for: finalResult, queryCount: max(finalResult.queriesRun, runnableQueries.count))
                 self.prewarmFieldEditor()
                 if let errorText = finalResult.errorText, !errorText.isEmpty {
@@ -1692,6 +1877,8 @@ private extension SALightweightQueryViewController {
                 }
                 self.rebuildMenus()
                 self.updateControls()
+                self.restorePendingResultGridViewState()
+                self.pendingSortFailureRestore = nil
                 self.isApplyingQuerySort = false
             }
         }
@@ -1879,33 +2066,110 @@ private extension SALightweightQueryViewController {
         let text = queryTextView.string as NSString
         guard position <= text.length else { return NSRange(location: 0, length: 0) }
 
-        var previousNonEmptyRange = NSRange(location: 0, length: 0)
+        let whitespaceAndNewlineSet = CharacterSet.whitespacesAndNewlines as NSCharacterSet
+        let whitespaceSet = CharacterSet.whitespaces as NSCharacterSet
+        let fullRange = NSRange(location: 0, length: text.length)
+        let ranges = cachedCurrentQueryRanges()
+        var selectedRange = NSRange(location: NSNotFound, length: 0)
 
-        for range in cachedCurrentQueryRanges() {
-            let trimmed = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
+        for (index, rangeValue) in ranges.enumerated() {
+            let range = NSIntersectionRange(rangeValue, fullRange)
+            if range.location == NSNotFound || range.length == 0 {
                 continue
             }
 
-            if position < range.location {
-                break
-            }
+            let queryPosition = NSMaxRange(range)
+            let queryStartPosition = range.location
 
-            previousNonEmptyRange = range
+            if queryPosition >= position {
+                if lookBehind {
+                    var positionAssociatedWithPreviousQuery = false
 
-            if NSLocationInRange(position, range) || position == NSMaxRange(range) {
-                if position == NSMaxRange(range) && position > range.location {
-                    let lastCharacter = text.substring(with: NSRange(location: max(range.location, position - 1), length: 1))
-                    if lastCharacter == ";" {
-                        break
+                    if position == queryStartPosition {
+                        positionAssociatedWithPreviousQuery = true
                     }
+
+                    if !positionAssociatedWithPreviousQuery, index > 0 {
+                        let previousRange = NSIntersectionRange(ranges[index - 1], fullRange)
+                        if previousRange.location != NSNotFound,
+                           NSMaxRange(previousRange) < position,
+                           position < queryStartPosition {
+                            positionAssociatedWithPreviousQuery = true
+                        }
+                    }
+
+                    if !positionAssociatedWithPreviousQuery,
+                       queryStartPosition <= position,
+                       position <= queryPosition {
+                        let stringToPreviousRange = NSRange(location: queryStartPosition,
+                                                            length: position - queryStartPosition)
+                        let stringToEndRange = NSRange(location: position,
+                                                       length: queryPosition - position)
+                        let stringToPrevious = text.substring(with: stringToPreviousRange)
+                        let stringToEnd = text.substring(with: stringToEndRange) as NSString
+
+                        if stringToPrevious.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            for characterIndex in 0..<stringToEnd.length {
+                                let character = stringToEnd.character(at: characterIndex)
+                                if whitespaceSet.characterIsMember(character) {
+                                    continue
+                                }
+                                if whitespaceAndNewlineSet.characterIsMember(character) {
+                                    positionAssociatedWithPreviousQuery = true
+                                }
+                                break
+                            }
+                        }
+                    }
+
+                    if index > 0, positionAssociatedWithPreviousQuery {
+                        let previousRange = NSIntersectionRange(ranges[index - 1], fullRange)
+                        if previousRange.location != NSNotFound,
+                           let previousQuery = text.safeSubstring(with: previousRange),
+                           !previousQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            selectedRange = previousRange
+                            break
+                        }
+                    }
+
+                    lookBehind = false
                 }
-                lookBehind = false
-                return range
+
+                selectedRange = range
+                break
             }
         }
 
-        return previousNonEmptyRange
+        if lookBehind, position == text.length, let lastRange = ranges.last {
+            selectedRange = NSIntersectionRange(lastRange, fullRange)
+        }
+
+        if selectedRange.location == NSNotFound || selectedRange.length == 0 {
+            return NSRange(location: 0, length: 0)
+        }
+
+        let trimmedRange = trimmedQueryRange(selectedRange, in: text)
+        return trimmedRange.length > 0 ? trimmedRange : NSRange(location: 0, length: 0)
+    }
+
+    func trimmedQueryRange(_ range: NSRange, in text: NSString) -> NSRange {
+        var trimmedRange = NSIntersectionRange(range, NSRange(location: 0, length: text.length))
+        let whitespace = CharacterSet.whitespacesAndNewlines
+
+        while trimmedRange.length > 0,
+              let scalar = UnicodeScalar(text.character(at: trimmedRange.location)),
+              whitespace.contains(scalar) {
+            trimmedRange.location += 1
+            trimmedRange.length -= 1
+        }
+
+        while trimmedRange.length > 0,
+              let scalar = UnicodeScalar(text.character(at: NSMaxRange(trimmedRange) - 1)),
+              whitespace.contains(scalar) {
+            trimmedRange.length -= 1
+        }
+
+        return trimmedRange
     }
 
     func queryTextRange(forQueryNumber queryNumber: Int) -> NSRange {
@@ -1914,14 +2178,14 @@ private extension SALightweightQueryViewController {
 
         var currentQueryNumber = 0
         for range in cachedCurrentQueryRanges() {
-            let trimmed = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
+            let trimmedRange = trimmedQueryRange(range, in: text)
+            if trimmedRange.length == 0 {
                 continue
             }
 
             currentQueryNumber += 1
             if currentQueryNumber == queryNumber {
-                return NSIntersectionRange(NSRange(location: 0, length: text.length), range)
+                return trimmedRange
             }
         }
 
@@ -2060,9 +2324,57 @@ private extension SALightweightQueryViewController {
         rebuildHistoryMenu()
     }
 
-    func rebuildFavoritesMenu() {
+    func makeMenuSearchField(placeholder: String, recentsAutosaveName: String) -> NSSearchField {
+        let field = NSSearchField(frame: NSRect(x: 20, y: 2, width: 176, height: 19))
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.textColor = .controlTextColor
+        field.focusRingType = .none
+        field.refusesFirstResponder = false
+        field.isEnabled = true
+        field.isEditable = true
+        field.controlSize = .small
+        field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.placeholderString = placeholder
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.delegate = self
+
+        if let cell = field.cell as? NSSearchFieldCell {
+            cell.controlSize = .small
+            cell.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            cell.focusRingType = .none
+            cell.isBordered = false
+            cell.isBezeled = false
+            cell.drawsBackground = false
+            cell.textColor = .controlTextColor
+            cell.sendsActionOnEndEditing = true
+            cell.recentsAutosaveName = recentsAutosaveName
+            cell.maximumRecents = 10
+        }
+
+        return field
+    }
+
+    func focusMenuSearchField(_ searchField: NSSearchField) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak searchField] in
+            guard let searchField, let window = searchField.window else { return }
+            window.makeFirstResponder(searchField)
+            searchField.selectText(nil)
+        }
+    }
+
+    func makeMenuSearchFieldView(for searchField: NSSearchField) -> NSView {
+        SALightweightMenuSearchFieldView(searchField: searchField)
+    }
+
+    func configureFavoritesMenuShellIfNeeded() {
+        guard favoritesSearchMenuItem == nil else { return }
+
         let menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
         let titleItem = NSMenuItem(title: NSLocalizedString("Query Favorites", comment: "query favorites menu title"), action: nil, keyEquivalent: "")
         titleItem.isHidden = true
         menu.addItem(titleItem)
@@ -2072,7 +2384,6 @@ private extension SALightweightQueryViewController {
                                        keyEquivalent: "")
         saveQueryItem.target = self
         saveQueryItem.toolTip = NSLocalizedString("Save current query, selection, or - if no selection or current query could be found - the entire content to Favorite.", comment: "save query to favorites tooltip")
-        saveQueryItem.isEnabled = !queryTextView.string.isEmpty
         menu.addItem(saveQueryItem)
 
         let saveAllItem = NSMenuItem(title: NSLocalizedString("Save All to Favorites", comment: "save all to favorites menu item"),
@@ -2080,7 +2391,6 @@ private extension SALightweightQueryViewController {
                                      keyEquivalent: "")
         saveAllItem.target = self
         saveAllItem.toolTip = NSLocalizedString("Save editor content to Favorite. Press ⌥ to restrict for current query or selection.", comment: "save all to favorites tooltip")
-        saveAllItem.isEnabled = !queryTextView.string.isEmpty
         menu.addItem(saveAllItem)
 
         let editItem = NSMenuItem(title: NSLocalizedString("Edit Favorites...", comment: "edit favorites menu item"),
@@ -2091,12 +2401,27 @@ private extension SALightweightQueryViewController {
 
         menu.addItem(.separator())
 
-        let searchItem = NSMenuItem()
-        searchItem.view = favoriteSearchField
+        let searchItem = NSMenuItem(title: "..placeholder for seachfield..",
+                                    action: nil,
+                                    keyEquivalent: "")
+        searchItem.isEnabled = true
+        searchItem.view = favoriteSearchFieldView
         menu.addItem(searchItem)
         menu.addItem(.separator())
 
-        let filterText = favoriteSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        favoritesSearchMenuItem = searchItem
+        favoritesMenu = menu
+    }
+
+    func rebuildFavoritesMenu() {
+        configureFavoritesMenuShellIfNeeded()
+        guard let menu = favoritesMenu else { return }
+
+        while menu.numberOfItems > queryMenuDynamicStartIndex {
+            menu.removeItem(at: menu.numberOfItems - 1)
+        }
+
+        favoritesSearchMenuItem?.view = favoriteSearchFieldView
 
         if let documentURL {
             let documentHeader = NSMenuItem(title: documentURL.lastPathComponent, action: nil, keyEquivalent: "")
@@ -2104,9 +2429,6 @@ private extension SALightweightQueryViewController {
             menu.addItem(documentHeader)
 
             for favorite in SPQueryController.shared().favorites(forFileURL: documentURL) as? [[String: Any]] ?? [] {
-                if !favoriteMatchesFilter(favorite, filterText: filterText) {
-                    continue
-                }
                 addFavorite(favorite, to: menu)
             }
         }
@@ -2116,13 +2438,11 @@ private extension SALightweightQueryViewController {
         menu.addItem(globalHeader)
 
         for favorite in UserDefaults.standard.array(forKey: SPQueryFavorites) as? [[String: Any]] ?? [] {
-            if !favoriteMatchesFilter(favorite, filterText: filterText) {
-                continue
-            }
             addFavorite(favorite, to: menu)
         }
 
-        favoritesButton.menu = menu
+        configureFavoritesMenuItems(menu)
+        applyFavoritesFilter()
     }
 
     func titleForSaveCurrentFavoriteMenuItem() -> String {
@@ -2152,7 +2472,7 @@ private extension SALightweightQueryViewController {
 
         let item = NSMenuItem(title: name, action: #selector(chooseQueryFavorite(_:)), keyEquivalent: "")
         item.target = self
-        item.representedObject = favorite["query"] as? String
+        item.representedObject = favorite
         item.toolTip = favorite["query"] as? String
         item.indentationLevel = 1
 
@@ -2167,9 +2487,12 @@ private extension SALightweightQueryViewController {
         menu.addItem(item)
     }
 
-    func rebuildHistoryMenu() {
+    func configureHistoryMenuShellIfNeeded() {
+        guard historySearchMenuItem == nil else { return }
+
         let menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
         let titleItem = NSMenuItem(title: NSLocalizedString("Query History", comment: "query history menu title"), action: nil, keyEquivalent: "")
         titleItem.isHidden = true
         menu.addItem(titleItem)
@@ -2189,18 +2512,30 @@ private extension SALightweightQueryViewController {
 
         menu.addItem(.separator())
 
-        let searchItem = NSMenuItem()
-        searchItem.view = historySearchField
+        let searchItem = NSMenuItem(title: "..placeholder for seachfield..",
+                                    action: nil,
+                                    keyEquivalent: "")
+        searchItem.isEnabled = true
+        searchItem.view = historySearchFieldView
         menu.addItem(searchItem)
         menu.addItem(.separator())
 
-        let filterText = historySearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        historySearchMenuItem = searchItem
+        historyMenu = menu
+    }
+
+    func rebuildHistoryMenu() {
+        configureHistoryMenuShellIfNeeded()
+        guard let menu = historyMenu else { return }
+
+        while menu.numberOfItems > queryMenuDynamicStartIndex {
+            menu.removeItem(at: menu.numberOfItems - 1)
+        }
+
+        historySearchMenuItem?.view = historySearchFieldView
+
         if let documentURL {
             for history in SPQueryController.shared().history(forFileURL: documentURL) as? [String] ?? [] {
-                if !filterText.isEmpty, !history.localizedCaseInsensitiveContains(filterText) {
-                    continue
-                }
-
                 let title = history.count > 64 ? "\(history.prefix(63))..." : history
                 let item = NSMenuItem(title: title, action: #selector(chooseQueryHistory(_:)), keyEquivalent: "")
                 item.target = self
@@ -2210,13 +2545,100 @@ private extension SALightweightQueryViewController {
             }
         }
 
-        historyButton.menu = menu
+        configureHistoryMenuItems(menu)
+        applyHistoryFilter()
     }
 
     @objc func chooseQueryFavorite(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem, let query = item.representedObject as? String else { return }
+        guard let item = sender as? NSMenuItem else { return }
+        let query = (item.representedObject as? [String: Any])?["query"] as? String
+            ?? item.representedObject as? String
+        guard let query else { return }
         insertQuery(query, replacingContentByDefault: UserDefaults.standard.bool(forKey: SPQueryFavoriteReplacesContent))
-        favoritesButton.selectItem(at: 0)
+    }
+
+    @objc func showQueryFavoritesMenu(_ sender: Any?) {
+        rebuildFavoritesMenu()
+        popUpQueryMenu(favoritesMenu, from: favoritesButton)
+    }
+
+    @objc func showQueryHistoryMenu(_ sender: Any?) {
+        rebuildHistoryMenu()
+        popUpQueryMenu(historyMenu, from: historyButton)
+    }
+
+    func popUpQueryMenu(_ menu: NSMenu?, from button: NSButton) {
+        guard let menu else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+    }
+
+    func configureFavoritesMenuItems(_ menu: NSMenu) {
+        let canSave = !isRunning && !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        for item in menu.items {
+            switch item.action {
+            case #selector(saveCurrentQueryToFavorites(_:)):
+                item.title = titleForSaveCurrentFavoriteMenuItem()
+                item.isEnabled = canSave
+            case #selector(saveAllQueriesToFavorites(_:)):
+                item.isEnabled = canSave
+            case #selector(editQueryFavorites(_:)), #selector(chooseQueryFavorite(_:)):
+                item.isEnabled = !isRunning
+            default:
+                break
+            }
+        }
+    }
+
+    func configureHistoryMenuItems(_ menu: NSMenu) {
+        let hasHistory: Bool
+        if let documentURL {
+            hasHistory = !(SPQueryController.shared().history(forFileURL: documentURL) as? [String] ?? []).isEmpty
+        } else {
+            hasHistory = false
+        }
+
+        for item in menu.items {
+            switch item.action {
+            case #selector(copyQueryHistory(_:)), #selector(saveQueryHistory(_:)), #selector(clearQueryHistory(_:)):
+                if item.action == #selector(clearQueryHistory(_:)) {
+                    configureClearHistoryMenuItem(item)
+                }
+                item.isEnabled = !isRunning && hasHistory
+            case #selector(chooseQueryHistory(_:)):
+                item.isEnabled = !isRunning
+            default:
+                break
+            }
+        }
+    }
+
+    func applyFavoritesFilter() {
+        guard let menu = favoritesMenu else { return }
+        let filterText = favoriteSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for item in menu.items where item.action == #selector(chooseQueryFavorite(_:)) {
+            guard let favorite = item.representedObject as? [String: Any] else { continue }
+            item.isHidden = !favoriteMatchesFilter(favorite, filterText: filterText)
+        }
+    }
+
+    func applyHistoryFilter() {
+        guard let menu = historyMenu else { return }
+        let filterText = historySearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for item in menu.items where item.action == #selector(chooseQueryHistory(_:)) {
+            guard let history = item.representedObject as? String else { continue }
+            item.isHidden = !filterText.isEmpty && !history.localizedCaseInsensitiveContains(filterText)
+        }
+    }
+
+    @objc func filterQueryFavorites(_ sender: Any?) {
+        applyFavoritesFilter()
+    }
+
+    @objc func filterQueryHistory(_ sender: Any?) {
+        applyHistoryFilter()
     }
 
     @objc func saveCurrentQueryToFavorites(_ sender: Any?) {
@@ -2237,7 +2659,6 @@ private extension SALightweightQueryViewController {
               let manager = SPQueryFavoriteManager(delegate: self),
               let managerWindow = manager.window else {
             NSSound.beep()
-            favoritesButton.selectItem(at: 0)
             return
         }
 
@@ -2245,7 +2666,6 @@ private extension SALightweightQueryViewController {
         window.beginSheet(managerWindow) { [weak self] _ in
             self?.favoritesManager = nil
         }
-        favoritesButton.selectItem(at: 0)
     }
 
     @objc func exportQueryResultAsCSV(_ sender: Any?) {
@@ -2261,7 +2681,6 @@ private extension SALightweightQueryViewController {
     @objc func chooseQueryHistory(_ sender: Any?) {
         guard let item = sender as? NSMenuItem, let query = item.representedObject as? String else { return }
         insertQuery(query, replacingContentByDefault: UserDefaults.standard.bool(forKey: SPQueryHistoryReplacesContent))
-        historyButton.selectItem(at: 0)
     }
 
     @objc func copyQueryHistory(_ sender: Any?) {
@@ -2412,7 +2831,6 @@ private extension SALightweightQueryViewController {
         }
 
         NotificationCenter.default.post(name: .SPQueryFavoritesHaveBeenUpdated, object: self)
-        favoritesButton.selectItem(at: 0)
     }
 
     func insertQuery(_ query: String, replacingContentByDefault replaceContent: Bool) {
@@ -2501,6 +2919,7 @@ private extension SALightweightQueryViewController {
     func rebuildColumns() {
         let benchmarkStart = CFAbsoluteTimeGetCurrent()
         defer {
+            updateDataTableBundleSupport()
             SALightweightResultGrid.logPerformance("Query rebuild columns", start: benchmarkStart, details: "columns=\(columnDefinitions.count) rows=\(rows.count)", minimumMilliseconds: 4)
         }
 
@@ -2530,7 +2949,7 @@ private extension SALightweightQueryViewController {
                 title: columnName,
                 descriptor: Self.gridColumnDescriptor(columnDefinition, fallbackName: columnName),
                 font: tableFont,
-                editable: canEditResultColumn(columnDefinition),
+                editable: true,
                 headerToolTip: headerToolTip(for: columnDefinition),
                 headerAttributedString: columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes),
                 savedWidth: savedResultColumnWidth(for: columnDefinition) ?? resultColumnWidths[resultColumnWidthKey(for: columnDefinition, fallbackIndex: index)],
@@ -2562,6 +2981,50 @@ private extension SALightweightQueryViewController {
         SALightweightResultGrid.applySortIndicator(to: tableView, columnIndex: querySortColumnIndex, ascending: querySortAscending)
     }
 
+    private func captureResultGridViewState() -> ResultGridViewState {
+        let firstVisibleRow: Int?
+        if let clipView = tableView.enclosingScrollView?.contentView {
+            let visibleRect = clipView.documentVisibleRect
+            let visibleRow = tableView.row(at: NSPoint(x: visibleRect.minX, y: visibleRect.minY))
+            firstVisibleRow = visibleRow >= 0 ? visibleRow : nil
+        } else {
+            firstVisibleRow = nil
+        }
+
+        return ResultGridViewState(selectedRows: tableView.selectedRowIndexes,
+                                   firstVisibleRow: firstVisibleRow,
+                                   columnDefinitions: columnDefinitions,
+                                   rows: rows,
+                                   lastExecutedQuery: lastExecutedQuery,
+                                   lastResultQuery: lastResultQuery)
+    }
+
+    private func restorePendingResultGridViewState() {
+        guard let state = pendingResultGridViewState else { return }
+        pendingResultGridViewState = nil
+        restoreResultGridViewState(state)
+    }
+
+    private func restoreResultGridViewState(_ state: ResultGridViewState) {
+        guard !rows.isEmpty else { return }
+
+        var validSelection = IndexSet()
+        state.selectedRows.forEach { row in
+            if row < rows.count {
+                validSelection.insert(row)
+            }
+        }
+        tableView.selectRowIndexes(validSelection, byExtendingSelection: false)
+
+        if let firstVisibleRow = state.firstVisibleRow {
+            tableView.scrollRowToVisible(min(max(firstVisibleRow, 0), rows.count - 1))
+        } else if let firstSelection = validSelection.first {
+            tableView.scrollRowToVisible(firstSelection)
+        }
+
+        updateStatusSelectionSuffix()
+    }
+
     func scheduleVisibleColumnAutosize(delay: TimeInterval = 0.05) {
         autosizeCoordinator.schedule(delay: delay) { [weak self] in
             self?.autosizeResultColumns()
@@ -2578,8 +3041,7 @@ private extension SALightweightQueryViewController {
                 (definition["db"] as? String) ?? "",
                 (definition["type"] as? String) ?? "",
                 (definition["typegrouping"] as? String) ?? "",
-                String(describing: definition["char_length"] ?? ""),
-                canEditResultColumn(definition) ? "1" : "0"
+                String(describing: definition["char_length"] ?? "")
             ].joined(separator: "\u{1e}")
         }
     }
@@ -2595,7 +3057,7 @@ private extension SALightweightQueryViewController {
                                                  title: columnName,
                                                  descriptor: Self.gridColumnDescriptor(columnDefinition, fallbackName: columnName),
                                                  font: tableFont,
-                                                 editable: canEditResultColumn(columnDefinition),
+                                                 editable: true,
                                                  headerToolTip: headerToolTip(for: columnDefinition),
                                                  headerAttributedString: columnDefinition.tableContentColumnHeaderAttributedString(columnTypesVisible: showColumnTypes))
         }
@@ -2739,7 +3201,7 @@ private extension SALightweightQueryViewController {
         let orderClause = " ORDER BY \(columnIndex + 1) \(descending ? "DESC" : "ASC") "
         let maskedQuery = queryMaskedForClauseSearch(query)
         let queryNSString = query as NSString
-        var mutableQuery = NSMutableString(string: query)
+        let mutableQuery = NSMutableString(string: query)
         let trailingSemicolonRange = firstRegexRange(in: maskedQuery, pattern: #"(?s);\s*$"#)
         let insertionLimit = trailingSemicolonRange?.location ?? queryNSString.length
         let prefix = (maskedQuery as NSString).substring(to: insertionLimit)
@@ -2766,18 +3228,33 @@ private extension SALightweightQueryViewController {
 
     func queryMaskedForClauseSearch(_ query: String) -> String {
         let maskedQuery = NSMutableString(string: query)
-        let patterns = [
+        let quotedPatterns = [
             #"(?s)"(?:[^"\\]|\\.)*""#,
             #"(?s)'(?:[^'\\]|\\.)*'"#,
             #"(?s)`(?:[^`\\]|\\.)*`"#
         ]
 
-        for pattern in patterns {
+        for pattern in quotedPatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             while true {
                 let range = regex.rangeOfFirstMatch(in: maskedQuery as String, range: NSRange(location: 0, length: maskedQuery.length))
                 if range.location == NSNotFound { break }
                 maskedQuery.replaceCharacters(in: range, with: String(repeating: "_", count: range.length))
+            }
+        }
+
+        let commentPatterns = [
+            #"(?m)--(?=$|[ \t\r\n\f\v])[^\r\n]*(?:\r?\n|$)"#,
+            #"(?m)#[^\r\n]*(?:\r?\n|$)"#,
+            #"(?s)/\*.*?\*/"#
+        ]
+
+        for pattern in commentPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            while true {
+                let range = regex.rangeOfFirstMatch(in: maskedQuery as String, range: NSRange(location: 0, length: maskedQuery.length))
+                if range.location == NSNotFound { break }
+                maskedQuery.replaceCharacters(in: range, with: String(repeating: " ", count: range.length))
             }
         }
 
@@ -2840,6 +3317,11 @@ private extension SALightweightQueryViewController {
     @objc(usedQuery)
     func usedQuery() -> String {
         return lastExecutedQuery
+    }
+
+    @objc(dataColumnDefinitions)
+    func dataColumnDefinitionsForLegacyConsumers() -> [NSDictionary] {
+        return columnDefinitions
     }
 
     @objc func copySelectedResultRows(_ sender: Any?) {
@@ -2917,6 +3399,86 @@ private extension SALightweightQueryViewController {
                                                  rowCount: rows.count,
                                                  columnName: { self.columnName(for: $0) },
                                                  value: { self.resultDisplayValue(row: $0, tableColumn: $1) })
+    }
+
+    func resultRowsAsTabStringForBundle(includeHeaders: Bool, rowIndexes: IndexSet, requireRows: Bool, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard !requireRows || !rowIndexes.isEmpty else { return nil }
+
+        var lines: [String] = []
+        if includeHeaders {
+            lines.append(tableView.tableColumns.map { SALightweightResultGrid.copyEscaped(columnName(for: $0)) }.joined(separator: "\t"))
+        }
+
+        for (displayRow, rowIndex) in rowIndexes.enumerated() where rowIndex < rows.count {
+            lines.append(tableView.tableColumns.map { tableColumn in
+                guard let value = bundleDisplayValue(row: rowIndex, displayRow: displayRow, tableColumn: tableColumn, blobHandling: blobHandling, blobFileDirectory: blobFileDirectory) else { return "" }
+                return SALightweightResultGrid.copyEscaped(value)
+            }.joined(separator: "\t"))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    func resultRowsAsCSVStringForBundle(includeHeaders: Bool, rowIndexes: IndexSet, requireRows: Bool, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard !requireRows || !rowIndexes.isEmpty else { return nil }
+
+        var lines: [String] = []
+        if includeHeaders {
+            lines.append(tableView.tableColumns.map { SALightweightResultGrid.csvEscaped(columnName(for: $0)) }.joined(separator: ","))
+        }
+
+        for (displayRow, rowIndex) in rowIndexes.enumerated() where rowIndex < rows.count {
+            lines.append(tableView.tableColumns.map { tableColumn in
+                SALightweightResultGrid.csvEscaped(bundleDisplayValue(row: rowIndex,
+                                                                     displayRow: displayRow,
+                                                                     tableColumn: tableColumn,
+                                                                     blobHandling: blobHandling,
+                                                                     blobFileDirectory: blobFileDirectory) ?? "")
+            }.joined(separator: ","))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    func bundleDisplayValue(row rowIndex: Int, displayRow: Int, tableColumn: NSTableColumn, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard rowIndex >= 0,
+              rowIndex < rows.count,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
+              columnIndex < rows[rowIndex].count else { return nil }
+
+        let value = rows[rowIndex][columnIndex]
+        if value is NSNull {
+            return UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        }
+
+        if let data = value as? Data {
+            switch blobHandling {
+            case bundleBlobHandlingInclude:
+                return displayString(for: data, columnDefinition: columnDefinition(at: columnIndex))
+            case bundleBlobHandlingFileReference:
+                return writeBundleBlob(data, row: displayRow, column: columnIndex, fileExtension: "dat", blobFileDirectory: blobFileDirectory)
+            case bundleBlobHandlingImageFileReference:
+                let imageData = NSImage(data: data)?.tiffRepresentation ?? Data()
+                return writeBundleBlob(imageData, row: displayRow, column: columnIndex, fileExtension: "tif", blobFileDirectory: blobFileDirectory)
+            default:
+                return "BLOB"
+            }
+        }
+
+        return displayString(for: value, columnDefinition: columnDefinition(at: columnIndex))
+    }
+
+    func writeBundleBlob(_ data: Data, row: Int, column: Int, fileExtension: String, blobFileDirectory: String?) -> String {
+        guard let blobFileDirectory, !blobFileDirectory.isEmpty else { return "" }
+
+        do {
+            try FileManager.default.createDirectory(atPath: blobFileDirectory, withIntermediateDirectories: true)
+            let path = (blobFileDirectory as NSString).appendingPathComponent("\(row)_\(column).\(fileExtension)")
+            try data.write(to: URL(fileURLWithPath: path), options: [])
+            return path
+        } catch {
+            return ""
+        }
     }
 
     func resultRowsAsSQLInserts(rowIndexes: IndexSet, skipAutoIncrement: Bool) -> String? {
@@ -3254,16 +3816,8 @@ private extension SALightweightQueryViewController {
         UserDefaults.standard.set(savedWidths, forKey: SPTableColumnWidths)
     }
 
-    func canEditResultColumn(_ columnDefinition: NSDictionary) -> Bool {
-        guard resultColumnOrigin(for: columnDefinition) != nil else { return false }
-
-        let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
-        return typeGrouping != "blobdata"
-    }
-
     func canEditResultCell(row: Int, column columnIndex: Int) -> Bool {
         guard canSaveResultCell(row: row, column: columnIndex),
-              canEditResultColumn(columnDefinitions[columnIndex]),
               !shouldUseFieldEditor(row: row, column: columnIndex) else { return false }
 
         return true
@@ -3376,6 +3930,38 @@ private extension SALightweightQueryViewController {
         tableView.reloadData(forRowIndexes: tableView.selectedRowIndexes, columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
     }
 
+    func confirmDestructiveQueryIfNeeded(_ query: String) -> Bool {
+        guard UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
+              queriesContainDestructiveSQL([query]) else { return true }
+
+        let alert = NSAlert()
+        alert.window.animationBehavior = .none
+        alert.messageText = NSLocalizedString("Execute SQL?", comment: "Execute SQL?")
+        alert.informativeText = destructiveQueryWarning(for: [query])
+        alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+        return alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn
+    }
+
+    func handleNoAffectedRowsAfterCellEdit(row: Int) {
+        let message = NSLocalizedString("The row was not written to the MySQL database. You probably haven't changed anything.\nReload the table to be sure that the row exists and use a primary key for your table.\n(This error can be turned off in the preferences.)", comment: "message of panel when no rows have been affected after writing to the db")
+
+        if UserDefaults.standard.bool(forKey: SPShowNoAffectedRowsError) {
+            let alert = NSAlert()
+            alert.window.animationBehavior = .none
+            alert.messageText = NSLocalizedString("Warning", comment: "warning")
+            alert.informativeText = message
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+            alert.runModalCenteredInKeyWindow()
+        } else {
+            NSSound.beep()
+        }
+
+        setStatusText(NSLocalizedString("No rows were affected.", comment: "lightweight query no affected rows edit status"))
+        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+    }
+
     private func resultColumnOrigin(for columnDefinition: NSDictionary) -> ResultColumnOrigin? {
         guard let database = nonEmptyMetadata("db", in: columnDefinition),
               let table = nonEmptyMetadata("org_table", in: columnDefinition),
@@ -3396,42 +3982,66 @@ private extension SALightweightQueryViewController {
               columnIndex < columnDefinitions.count,
               columnIndex < rows[rowIndex].count,
               let origin = resultColumnOrigin(for: columnDefinitions[columnIndex]),
-              let whereClause = whereClause(for: rowIndex, origin: origin, connection: connection) else { return nil }
+              let baseWhereClause = whereClause(for: rowIndex, origin: origin, connection: connection, includeBlobColumns: false) else { return nil }
 
         let newValue = sqlValue(forEditedObject: object, columnDefinition: columnDefinitions[columnIndex], connection: connection)
         let tableReference = "\(Self.backtickQuoted(origin.database)).\(Self.backtickQuoted(origin.table))"
-        let countQuery = "SELECT COUNT(1) FROM \(tableReference) \(whereClause)"
-        let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(origin.column)) = \(newValue.sql) \(whereClause)"
-        let refreshQuery = newValue.requiresReload ? "SELECT \(Self.backtickQuoted(origin.column)) FROM \(tableReference) \(whereClause) LIMIT 1" : nil
+        let countQuery = "SELECT COUNT(1) FROM \(tableReference) \(baseWhereClause)"
+        let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(origin.column)) = \(newValue.sql) \(baseWhereClause)"
+        let refreshQuery = newValue.requiresReload ? "SELECT \(Self.backtickQuoted(origin.column)) FROM \(tableReference) \(baseWhereClause) LIMIT 1" : nil
+        var fallbackCountQuery: String?
+        var fallbackUpdateQuery: String?
+        var fallbackRefreshQuery: String?
 
-        return CellUpdate(countQuery: countQuery, updateQuery: updateQuery, refreshQuery: refreshQuery, localValue: newValue.localValue, requiresReload: newValue.requiresReload)
+        if let blobWhereClause = whereClause(for: rowIndex, origin: origin, connection: connection, includeBlobColumns: true),
+           blobWhereClause != baseWhereClause {
+            fallbackCountQuery = "SELECT COUNT(1) FROM \(tableReference) \(blobWhereClause)"
+            fallbackUpdateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(origin.column)) = \(newValue.sql) \(blobWhereClause)"
+            fallbackRefreshQuery = newValue.requiresReload ? "SELECT \(Self.backtickQuoted(origin.column)) FROM \(tableReference) \(blobWhereClause) LIMIT 1" : nil
+        }
+
+        return CellUpdate(countQuery: countQuery,
+                          updateQuery: updateQuery,
+                          refreshQuery: refreshQuery,
+                          fallbackCountQuery: fallbackCountQuery,
+                          fallbackUpdateQuery: fallbackUpdateQuery,
+                          fallbackRefreshQuery: fallbackRefreshQuery,
+                          localValue: newValue.localValue,
+                          requiresReload: newValue.requiresReload)
     }
 
-    private func whereClause(for rowIndex: Int, origin: ResultColumnOrigin, connection: SPMySQLConnection) -> String? {
+    private func whereClause(for rowIndex: Int, origin: ResultColumnOrigin, connection: SPMySQLConnection, includeBlobColumns: Bool = false) -> String? {
+        guard rowIndex >= 0, rowIndex < rows.count else { return nil }
+
         var sameOriginColumns: [(index: Int, definition: NSDictionary)] = []
 
-        for tableColumn in tableView.tableColumns {
-            guard let columnIndex = Int(tableColumn.identifier.rawValue),
-                  columnIndex < columnDefinitions.count,
-                  columnIndex < rows[rowIndex].count,
-                  let columnOrigin = resultColumnOrigin(for: columnDefinitions[columnIndex]),
+        for (columnIndex, columnDefinition) in columnDefinitions.enumerated() {
+            guard columnIndex < rows[rowIndex].count,
+                  let columnOrigin = resultColumnOrigin(for: columnDefinition),
                   columnOrigin.database == origin.database,
                   columnOrigin.table == origin.table else { continue }
 
-            sameOriginColumns.append((columnIndex, columnDefinitions[columnIndex]))
+            sameOriginColumns.append((columnIndex, columnDefinition))
         }
 
-        let primaryColumns = sameOriginColumns.filter { isPrimaryKeyColumn($0.definition) }
-        let identityColumns = primaryColumns.isEmpty
-            ? sameOriginColumns.filter { canUseColumnForFallbackIdentity($0.definition) }
-            : primaryColumns
+        let primaryColumnNames = primaryKeyColumnNames(database: origin.database, table: origin.table, connection: connection)
+        let primaryColumns = sameOriginColumns.filter { _, definition in
+            guard let columnOrigin = resultColumnOrigin(for: definition) else { return false }
+            return primaryColumnNames.contains(columnOrigin.column)
+        }
+        let identityColumns = primaryColumns.isEmpty ? sameOriginColumns : primaryColumns
 
         let parts = identityColumns.compactMap { index, definition -> String? in
-            guard let columnOrigin = resultColumnOrigin(for: definition) else { return nil }
-            let value = rows[rowIndex][index]
+            guard let columnOrigin = resultColumnOrigin(for: definition),
+                  index < rows[rowIndex].count else { return nil }
 
+            let value = rows[rowIndex][index]
             if value is NSNull {
                 return "\(Self.backtickQuoted(columnOrigin.column)) IS NULL"
+            }
+
+            if !includeBlobColumns, !canUseColumnForFallbackIdentity(definition) {
+                return nil
             }
 
             return "\(Self.backtickQuoted(columnOrigin.column)) = \(sqlValue(forStoredObject: value, columnDefinition: definition, connection: connection))"
@@ -3442,39 +4052,50 @@ private extension SALightweightQueryViewController {
         return "WHERE (\(parts.joined(separator: " AND ")))"
     }
 
-    func isPrimaryKeyColumn(_ columnDefinition: NSDictionary) -> Bool {
-        if let value = columnDefinition["PRI_KEY_FLAG"] as? Bool {
-            return value
+    func primaryKeyColumnNames(database: String, table: String, connection: SPMySQLConnection) -> Set<String> {
+        let cacheKey = "\(database)\u{1f}\(table)"
+        if let cached = primaryKeyColumnCache[cacheKey] {
+            return cached
         }
 
-        if let value = columnDefinition["PRI_KEY_FLAG"] as? NSNumber {
-            return value.boolValue
+        let query = "SHOW COLUMNS FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        guard let result = connection.queryString(query) else {
+            return []
         }
 
-        if let value = columnDefinition["PRI_KEY_FLAG"] as? String {
-            return value == "1" || value.uppercased() == "PRI" || value.uppercased() == "YES"
-        }
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        guard !connection.queryErrored() else { return [] }
+        let rows = result.getAllRows() as? [[String: Any]] ?? []
+        let names = Set(rows.compactMap { row -> String? in
+            let key = (row["Key"] as? String) ?? (row["key"] as? String) ?? ""
+            guard key == "PRI" else { return nil }
+            return (row["Field"] as? String) ?? (row["field"] as? String)
+        })
 
-        return false
+        primaryKeyColumnCache[cacheKey] = names
+        return names
     }
 
     func canUseColumnForFallbackIdentity(_ columnDefinition: NSDictionary) -> Bool {
         let typeGrouping = ((columnDefinition["typegrouping"] as? String) ?? "").lowercased()
         let type = ((columnDefinition["type"] as? String) ?? "").uppercased()
 
-        if typeGrouping == "blobdata" || typeGrouping == "textdata" || typeGrouping == "binary" {
+        if typeGrouping == "blobdata" || typeGrouping == "textdata" {
             return false
         }
 
-        return !type.hasSuffix("BLOB")
-            && !type.hasSuffix("TEXT")
-            && type != "BINARY"
-            && type != "VARBINARY"
+        return type != "BINARY" && type != "VARBINARY"
     }
 
     func sqlValue(forStoredObject object: Any, columnDefinition: NSDictionary, connection: SPMySQLConnection) -> String {
         if let data = object as? Data {
             return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false))
+        }
+
+        if let geometry = object as? SPMySQLGeometryData,
+           let data = geometry.data() {
+            return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(geometry.wktString() ?? String(describing: geometry))
         }
 
         let value = String(describing: object)
@@ -3678,6 +4299,11 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
         }
     }
 
+    @objc(selectCurrentQuery:)
+    func selectCurrentQuery(_ sender: Any?) {
+        selectCurrentQuery()
+    }
+
     @objc func showAutoHelpForCurrentWord(_ sender: Any?) {
         let textView = (sender as? SPTextView) ?? queryTextView
         let wordRange = rangeForCurrentWord(in: textView)
@@ -3689,6 +4315,19 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
 
         let searchString = text.substring(with: wordRange)
         helpViewerClient.showHelp(for: searchString, addToHistory: true, calledByAutoHelp: true)
+    }
+
+    @objc func showMySQLHelpForCurrentWord(_ sender: Any?) {
+        let textView = (sender as? SPTextView) ?? queryTextView
+        let wordRange = rangeForCurrentWord(in: textView)
+        let text = textView.string as NSString
+
+        guard wordRange.location != NSNotFound,
+              NSMaxRange(wordRange) <= text.length,
+              wordRange.length > 0 else { return }
+
+        let searchString = text.substring(with: wordRange)
+        helpViewerClient.showHelp(for: searchString, addToHistory: true, calledByAutoHelp: false)
     }
 
     private func rangeForCurrentWord(in textView: NSTextView) -> NSRange {
@@ -3731,9 +4370,59 @@ extension SALightweightQueryViewController: NSTextViewDelegate {
 extension SALightweightQueryViewController: NSSearchFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         if obj.object as AnyObject? === historySearchField {
-            rebuildHistoryMenu()
+            applyHistoryFilter()
         } else if obj.object as AnyObject? === favoriteSearchField {
-            rebuildFavoritesMenu()
+            applyFavoritesFilter()
+        }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === historySearchField || control === favoriteSearchField else {
+            return false
+        }
+
+        guard commandSelector == #selector(NSResponder.moveDown(_:))
+            || commandSelector == #selector(NSResponder.moveUp(_:)) else {
+            return false
+        }
+
+        historySearchField.abortEditing()
+        favoriteSearchField.abortEditing()
+        postSearchPopupArrowEvent(for: commandSelector)
+        return true
+    }
+
+    private func postSearchPopupArrowEvent(for commandSelector: Selector) {
+        let keyCode: UInt16 = commandSelector == #selector(NSResponder.moveDown(_:)) ? 0x7D : 0x7E
+        guard let event = NSEvent.keyEvent(with: .keyDown,
+                                           location: .zero,
+                                           modifierFlags: [],
+                                           timestamp: 0,
+                                           windowNumber: view.window?.windowNumber ?? 0,
+                                           context: NSGraphicsContext.current,
+                                           characters: "",
+                                           charactersIgnoringModifiers: "",
+                                           isARepeat: false,
+                                           keyCode: keyCode) else {
+            return
+        }
+
+        NSApp.postEvent(event, atStart: false)
+    }
+}
+
+extension SALightweightQueryViewController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === favoritesMenu {
+            favoritesSearchMenuItem?.view = favoriteSearchFieldView
+            configureFavoritesMenuItems(menu)
+            applyFavoritesFilter()
+            focusMenuSearchField(favoriteSearchField)
+        } else if menu === historyMenu {
+            historySearchMenuItem?.view = historySearchFieldView
+            configureHistoryMenuItems(menu)
+            applyHistoryFilter()
+            focusMenuSearchField(historySearchField)
         }
     }
 }
@@ -3756,6 +4445,9 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
             return !isRunning && connection != nil
 
         case #selector(saveCurrentQueryToFavorites(_:)), #selector(saveAllQueriesToFavorites(_:)):
+            if action == #selector(saveCurrentQueryToFavorites(_:)) {
+                menuItem.title = titleForSaveCurrentFavoriteMenuItem()
+            }
             return !isRunning && !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         case #selector(copyQueryHistory(_:)), #selector(saveQueryHistory(_:)), #selector(clearQueryHistory(_:)):
@@ -3799,6 +4491,34 @@ extension SALightweightQueryViewController: SALightweightResultGridTableViewDele
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {
         prepareResultContextMenu(for: event)
     }
+
+    func resultGridTableView(_ tableView: NSTableView, bundleInputFor inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {
+        let rowIndexes: IndexSet
+        if onlySelectedRows {
+            rowIndexes = self.tableView.selectedRowIndexes
+        } else {
+            rowIndexes = IndexSet(integersIn: 0..<rows.count)
+        }
+
+        switch inputSource {
+        case SPBundleInputSourceSelectedTableRowsAsTab, SPBundleInputSourceTableRowsAsTab:
+            return resultRowsAsTabStringForBundle(includeHeaders: true,
+                                                  rowIndexes: rowIndexes,
+                                                  requireRows: onlySelectedRows,
+                                                  blobHandling: blobHandling,
+                                                  blobFileDirectory: blobFileDirectory)
+        case SPBundleInputSourceSelectedTableRowsAsCsv, SPBundleInputSourceTableRowsAsCsv:
+            return resultRowsAsCSVStringForBundle(includeHeaders: true,
+                                                  rowIndexes: rowIndexes,
+                                                  requireRows: onlySelectedRows,
+                                                  blobHandling: blobHandling,
+                                                  blobFileDirectory: blobFileDirectory)
+        case SPBundleInputSourceSelectedTableRowsAsSqlInsert, SPBundleInputSourceTableRowsAsSqlInsert:
+            return resultRowsAsSQLInserts(rowIndexes: rowIndexes, skipAutoIncrement: false)
+        default:
+            return ""
+        }
+    }
 }
 
 extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDelegate {
@@ -3814,6 +4534,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         guard !lastExecutedQuery.isEmpty else { return }
 
         let shiftPressed = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+        pendingSortFailureRestore = (querySortColumnIndex, querySortAscending)
         if querySortColumnIndex == columnIndex {
             querySortAscending.toggle()
         } else {
@@ -3823,7 +4544,9 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         applyQuerySortIndicator()
 
         isApplyingQuerySort = true
-        runQueries([queryByApplyingSort(to: lastExecutedQuery, columnIndex: columnIndex, descending: !querySortAscending)])
+        runQueries([queryByApplyingSort(to: lastExecutedQuery, columnIndex: columnIndex, descending: !querySortAscending)],
+                   preservingResultGridState: true,
+                   recordsHistory: false)
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
@@ -3872,11 +4595,17 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
             return
         }
 
+        guard confirmDestructiveQueryIfNeeded(update.updateQuery) else {
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: columnIndex))
+            return
+        }
+
         let reloadAfterEdit = UserDefaults.standard.bool(forKey: SPReloadAfterEditingRow)
         let queryToReload = lastExecutedQuery
 
         setStatusText(NSLocalizedString("Saving cell...", comment: "lightweight query saving cell status"))
         isRunning = true
+        updateDataTableBundleSupport()
         updateControls()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
@@ -3886,19 +4615,38 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                 _ = connection.selectDatabase(self.database)
             }
 
-            let matchingRows = SALightweightResultGrid.matchingRowCount(for: update.countQuery, connection: connection)
+            var activeUpdateQuery = update.updateQuery
+            var activeRefreshQuery = update.refreshQuery
+            var matchingRows = SALightweightResultGrid.matchingRowCount(for: update.countQuery, connection: connection)
             var error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            var affectedRows: UInt64 = 0
+
+            if error == nil,
+               let count = matchingRows,
+               count > 1,
+               let fallbackCountQuery = update.fallbackCountQuery,
+               let fallbackUpdateQuery = update.fallbackUpdateQuery {
+                matchingRows = SALightweightResultGrid.matchingRowCount(for: fallbackCountQuery, connection: connection)
+                error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+                if error == nil {
+                    activeUpdateQuery = fallbackUpdateQuery
+                    activeRefreshQuery = update.fallbackRefreshQuery
+                }
+            }
 
             if error == nil, matchingRows == 1 {
-                _ = connection.queryString(update.updateQuery)
+                _ = connection.queryString(activeUpdateQuery)
                 error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+                if error == nil {
+                    affectedRows = connection.rowsAffectedByLastQuery()
+                }
             }
             var refreshedValue: Any?
             if error == nil,
                matchingRows == 1,
                update.requiresReload,
                !reloadAfterEdit,
-               let refreshQuery = update.refreshQuery {
+               let refreshQuery = activeRefreshQuery {
                 let result = connection.queryString(refreshQuery)
                 result?.defaultRowReturnType = SPMySQLResultRowAsArray
                 if !connection.queryErrored(),
@@ -3910,6 +4658,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
             DispatchQueue.main.async {
                 self.isRunning = false
+                self.updateDataTableBundleSupport()
                 self.updateControls()
 
                 if let error, !error.isEmpty {
@@ -3922,13 +4671,18 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                     return
                 }
 
+                guard affectedRows > 0 else {
+                    self.handleNoAffectedRowsAfterCellEdit(row: row)
+                    return
+                }
+
                 if reloadAfterEdit, !queryToReload.isEmpty {
-                    self.runQueries([queryToReload])
+                    self.runQueries([queryToReload], preservingResultGridState: true, recordsHistory: false)
                     return
                 }
 
                 if update.requiresReload, !reloadAfterEdit, refreshedValue == nil, !queryToReload.isEmpty {
-                    self.runQueries([queryToReload])
+                    self.runQueries([queryToReload], preservingResultGridState: true, recordsHistory: false)
                     return
                 }
 
@@ -3987,6 +4741,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
         guard !isFieldEditorPresented,
+              !isRunning,
               tableView === self.tableView,
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier) else { return false }
@@ -4056,6 +4811,13 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
     func rebuildDisplayRows() {
         displayCache.invalidateAll()
         columnWidthCache.invalidateAll()
+    }
+
+    func updateDataTableBundleSupport() {
+        tableView.supportsDataTableBundleCommands = !isRunning
+            && !lastExecutedQuery.isEmpty
+            && !columnDefinitions.isEmpty
+            && tableView.tableColumns.count == columnDefinitions.count
     }
 
 }

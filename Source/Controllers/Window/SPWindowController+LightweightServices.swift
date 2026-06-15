@@ -236,12 +236,29 @@ import Cocoa
         lightweightQueryController.doPerformQueryService(query)
     }
 
+    @objc func doPerformLightweightLoadQueryService(_ query: String) {
+        guard hasActiveLightweightConnection else { return }
+
+        viewQuery()
+        lightweightQueryController.doPerformLoadQueryService(query)
+    }
+
     @objc func legacyDatabaseDocumentForMenuAction() -> SPDatabaseDocument {
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
     }
 
+    private func activeLightweightTextCopyResponder(for menuItem: NSMenuItem?) -> NSTextView? {
+        guard menuItem?.tag ?? 0 == 0 else { return nil }
+        guard let textView = window?.firstResponder as? NSTextView else { return nil }
+        return textView
+    }
+
     @objc func canCopyActiveLightweightSelection(_ menuItem: NSMenuItem?) -> Bool {
         guard hasActiveLightweightConnection else { return false }
+
+        if let textView = activeLightweightTextCopyResponder(for: menuItem) {
+            return textView.selectedRange().length > 0
+        }
 
         switch activeLightweightViewMode {
         case .content:
@@ -255,6 +272,11 @@ import Cocoa
 
     @objc func copyActiveLightweightSelection(_ sender: Any?) {
         guard hasActiveLightweightConnection else { return }
+
+        if let textView = activeLightweightTextCopyResponder(for: sender as? NSMenuItem) {
+            textView.copy(sender)
+            return
+        }
 
         switch activeLightweightViewMode {
         case .content:
@@ -299,13 +321,40 @@ import Cocoa
         let isQueryExport = source == querySource
         let contentResult = isContentExport ? lightweightContentController.exportDataResult(withNULLs: true) : []
         let queryResult = isQueryExport ? lightweightQueryController.exportDataResult(withNULLs: true, truncateDataFields: false) : []
+        guard let controller = configuredLightweightExportController(preferredSource: source,
+                                                                     selectedTableItems: selectedTable.map { [$0] } ?? [],
+                                                                     contentResult: contentResult,
+                                                                     contentQuery: isContentExport ? lightweightContentController.exportUsedQuery() : "",
+                                                                     queryResult: queryResult,
+                                                                     queryString: isQueryExport ? lightweightQueryController.exportUsedQuery() : "") else {
+            NSSound.beep()
+            return
+        }
+
+        lightweightExportController = controller
+        controller.exportData()
+    }
+
+    @nonobjc func configuredLightweightExportController(preferredSource source: SPExportSource,
+                                                        selectedTableItems selectedTables: [String],
+                                                        contentResult: [[Any]] = [],
+                                                        contentQuery: String = "",
+                                                        queryResult: [[Any]] = [],
+                                                        queryString: String = "",
+                                                        tableNames: [String]? = nil,
+                                                        procedureNames: [String]? = nil,
+                                                        functionNames: [String]? = nil) -> SPExportController? {
+        guard hasActiveLightweightConnection,
+              let activeConnection = activeConnection else {
+            return nil
+        }
+
         let tablesAndViews = lightweightTables.filter { table in
             let type = lightweightTableTypes[table] ?? .table
             return type == .table || type == .view
         }
         let procedures = lightweightTables.filter { lightweightTableTypes[$0] == .procedure }
         let functions = lightweightTables.filter { lightweightTableTypes[$0] == .function }
-        let selectedTables = selectedTable.map { [$0] } ?? []
         let controller = SPExportController()
 
         let database = selectedDatabase ?? ""
@@ -313,8 +362,6 @@ import Cocoa
         let serverVersion = activeServerVersion ?? ""
         let selectedTableName = selectedTable ?? ""
         let favoriteName = activeConnectionName ?? lightweightConnectionDisplayName()
-        let contentQuery = isContentExport ? lightweightContentController.exportUsedQuery() : ""
-        let queryString = isQueryExport ? lightweightQueryController.exportUsedQuery() : ""
 
         controller.configure(forLightweightWindowController: self,
                              connection: activeConnection,
@@ -324,17 +371,17 @@ import Cocoa
                              serverVersion: serverVersion,
                              selectedTableName: selectedTableName,
                              favoriteName: favoriteName,
-                             tablesAndViewNames: tablesAndViews,
-                             procedureNames: procedures,
-                             functionNames: functions,
+                             tablesAndViewNames: tableNames ?? tablesAndViews,
+                             procedureNames: procedureNames ?? procedures,
+                             functionNames: functionNames ?? functions,
                              selectedTableItems: selectedTables,
                              contentResult: contentResult,
                              contentQuery: contentQuery,
                              queryResult: queryResult,
                              queryString: queryString,
                              preferredSource: source)
-        lightweightExportController = controller
-        controller.exportData()
+
+        return controller
     }
 
     @objc func canImportLightweightSQL() -> Bool {
@@ -1132,7 +1179,7 @@ import Cocoa
 
         let notification = NSUserNotification()
         notification.title = NSLocalizedString("Syntax Copied", comment: "create table syntax copied notification title")
-        notification.informativeText = String(format: NSLocalizedString("Syntax for %@ table copied", comment: "description for table syntax copied notification"), table)
+        notification.informativeText = String(format: NSLocalizedString("Syntax for %@ copied", comment: "description for create syntax copied notification"), table)
         notification.soundName = NSUserNotificationDefaultSoundName
         NSUserNotificationCenter.default.deliver(notification)
     }
@@ -1146,8 +1193,16 @@ import Cocoa
         guard let table = selectedTable,
               let syntax = lightweightCreateTableSyntax(showErrors: true) else { return }
 
-        let title = String(format: NSLocalizedString("Create syntax for TABLE '%@'", comment: "Create syntax label"), table)
+        let title = String(format: NSLocalizedString("Create syntax for %@ '%@'", comment: "Create syntax label"), lightweightCreateSyntaxTypeTitle(), table)
         showLightweightCreateSyntaxSheet(title: title, syntax: syntax)
+    }
+
+    @objc(copyCreateTableSyntax:) func copyCreateTableSyntaxMenuBridge(_ sender: Any?) {
+        copyLightweightCreateTableSyntax(sender)
+    }
+
+    @objc(showCreateTableSyntax:) func showCreateTableSyntaxMenuBridge(_ sender: Any?) {
+        showLightweightCreateTableSyntax(sender)
     }
 
     @objc func checkLightweightTable() {
@@ -1172,6 +1227,30 @@ import Cocoa
 
     @objc func checksumLightweightTable() {
         performLightweightTableMaintenance(.checksum)
+    }
+
+    @objc(checkTable:) func checkTableMenuBridge(_ sender: Any?) {
+        checkLightweightTable()
+    }
+
+    @objc(repairTable:) func repairTableMenuBridge(_ sender: Any?) {
+        repairLightweightTable()
+    }
+
+    @objc(analyzeTable:) func analyzeTableMenuBridge(_ sender: Any?) {
+        analyzeLightweightTable()
+    }
+
+    @objc(optimizeTable:) func optimizeTableMenuBridge(_ sender: Any?) {
+        optimizeLightweightTable()
+    }
+
+    @objc(flushTable:) func flushTableMenuBridge(_ sender: Any?) {
+        flushLightweightTable()
+    }
+
+    @objc(checksumTable:) func checksumTableMenuBridge(_ sender: Any?) {
+        checksumLightweightTable()
     }
 
     @objc func showUserManager() {
@@ -1305,7 +1384,21 @@ import Cocoa
             return nil
         }
 
-        guard let syntax = SALightweightTableInfoLoader.createSyntax(for: selectedTable, database: selectedDatabase, connection: activeConnection) else {
+        let objectType = lightweightTableTypes[selectedTable] ?? .table
+        let keyword = lightweightCreateSyntaxKeyword(for: objectType)
+        let query = "SHOW CREATE \(keyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable))"
+        guard let result = activeConnection.queryString(query) else {
+            if showErrors {
+                showLightweightCreateSyntaxError(NSLocalizedString("Couldn't get create syntax.", comment: "message of panel when table information cannot be retrieved"))
+            }
+            return nil
+        }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+
+        guard let row = result.getRowAsDictionary() as? [String: Any],
+              let syntax = lightweightCreateSyntax(from: row) else {
             if showErrors {
                 let message: String
                 if activeConnection.isConnected(), activeConnection.lastErrorMessage()?.isEmpty == false {
@@ -1319,6 +1412,52 @@ import Cocoa
         }
 
         return syntax
+    }
+
+    @nonobjc func lightweightCreateSyntaxKeyword(for objectType: SALightweightTableObjectType) -> String {
+        switch objectType {
+        case .view:
+            return "VIEW"
+        case .procedure:
+            return "PROCEDURE"
+        case .function:
+            return "FUNCTION"
+        case .none, .table:
+            return "TABLE"
+        }
+    }
+
+    @nonobjc func lightweightCreateSyntaxTypeTitle() -> String {
+        guard let selectedTable = selectedTable else {
+            return NSLocalizedString("TABLE", comment: "Create syntax table type")
+        }
+
+        switch lightweightTableTypes[selectedTable] ?? .table {
+        case .view:
+            return NSLocalizedString("VIEW", comment: "Create syntax view type")
+        case .procedure:
+            return NSLocalizedString("PROCEDURE", comment: "Create syntax procedure type")
+        case .function:
+            return NSLocalizedString("FUNCTION", comment: "Create syntax function type")
+        case .none, .table:
+            return NSLocalizedString("TABLE", comment: "Create syntax table type")
+        }
+    }
+
+    @nonobjc func lightweightCreateSyntax(from row: [String: Any]) -> String? {
+        for key in ["Create Table", "Create View", "Create Procedure", "Create Function"] {
+            if let syntax = row[key] as? String, !syntax.isEmpty {
+                return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+            }
+        }
+
+        for (key, value) in row where key.lowercased().contains("create") {
+            if let syntax = value as? String, !syntax.isEmpty {
+                return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+            }
+        }
+
+        return nil
     }
 
     enum LightweightTableMaintenanceAction {

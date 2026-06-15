@@ -65,6 +65,7 @@ static const NSInteger kBlobInclude     = 2;
 static const NSInteger kBlobAsFile      = 3;
 static const NSInteger kBlobAsImageFile = 4;
 static const NSInteger SACellFilterMenuTag = 1945001;
+static const NSInteger SADataTableBundleMenuTag = 10000000;
 
 NSString *kColType    = @"TYPE";
 NSString *kColMapping = @"MAPPING";
@@ -80,6 +81,149 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
  */
 @synthesize fieldEditorSelectedRange;
 @synthesize tmpBlobFileDirectory;
+
+- (BOOL)_objectSupportsDataTableBundleCommands:(id)object
+{
+	if(!object || ![object respondsToSelector:@selector(supportsDataTableBundleCommands)]) return NO;
+
+	BOOL (*supports)(id, SEL) = (BOOL (*)(id, SEL))[object methodForSelector:@selector(supportsDataTableBundleCommands)];
+	return supports(object, @selector(supportsDataTableBundleCommands));
+}
+
+- (BOOL)_supportsDataTableBundleCommands
+{
+	if([[self delegate] isKindOfClass:[SPCustomQuery class]] || [[self delegate] isKindOfClass:[SPTableContent class]]) return YES;
+
+	return [self _objectSupportsDataTableBundleCommands:self]
+		|| [self _objectSupportsDataTableBundleCommands:[self delegate]];
+}
+
+- (NSString *)_dataTableBundleSource
+{
+	id delegate = [self delegate];
+
+	if([delegate isKindOfClass:[SPCustomQuery class]]) return @"query";
+	if([delegate isKindOfClass:[SPTableContent class]]) return @"content";
+
+	SEL selector = @selector(dataTableBundleSource);
+	id provider = [self respondsToSelector:selector] ? self : ([delegate respondsToSelector:selector] ? delegate : nil);
+	if(provider) {
+		NSString *(*source)(id, SEL) = (NSString *(*)(id, SEL))[provider methodForSelector:selector];
+		NSString *value = source(provider, selector);
+		if([value length]) return value;
+	}
+
+	return nil;
+}
+
+- (NSArray *)_dataTableBundleColumnDefinitions
+{
+	id delegate = [self delegate];
+	if(![delegate respondsToSelector:@selector(dataColumnDefinitions)]) return nil;
+
+	NSArray *(*definitions)(id, SEL) = (NSArray *(*)(id, SEL))[delegate methodForSelector:@selector(dataColumnDefinitions)];
+	return definitions(delegate, @selector(dataColumnDefinitions));
+}
+
+- (NSString *)_providedDataTableBundleInputForInputSource:(NSString *)inputSource blobHandling:(NSInteger)blobHandling onlySelectedRows:(BOOL)onlySelectedRows blobFileDirectory:(NSString *)blobFileDirectory
+{
+	SEL selector = @selector(dataTableBundleInputForInputSource:blobHandling:onlySelectedRows:blobFileDirectory:);
+	id delegate = [self delegate];
+	id provider = [self respondsToSelector:selector] ? self : ([delegate respondsToSelector:selector] ? delegate : nil);
+	if(!provider) return nil;
+
+	NSString *(*input)(id, SEL, NSString *, NSInteger, BOOL, NSString *) = (NSString *(*)(id, SEL, NSString *, NSInteger, BOOL, NSString *))[provider methodForSelector:selector];
+	return input(provider, selector, inputSource, blobHandling, onlySelectedRows, blobFileDirectory);
+}
+
+- (BOOL)_hasProvidedDataTableBundleInput
+{
+	SEL selector = @selector(dataTableBundleInputForInputSource:blobHandling:onlySelectedRows:blobFileDirectory:);
+	return [self respondsToSelector:selector] || [[self delegate] respondsToSelector:selector];
+}
+
+- (NSString *)_dataTableBundleInputForInputSource:(NSString *)inputSource blobHandling:(NSInteger)blobHandling blobFileDirectory:(NSString *)blobFileDirectory
+{
+	BOOL hasProvidedInput = [self _hasProvidedDataTableBundleInput];
+
+	if([inputSource isEqualToString:SPBundleInputSourceSelectedTableRowsAsTab]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:YES blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsTabStringWithHeaders:YES onlySelectedRows:YES blobHandling:blobHandling];
+	}
+
+	if([inputSource isEqualToString:SPBundleInputSourceSelectedTableRowsAsCsv]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:YES blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsCsvStringWithHeaders:YES onlySelectedRows:YES blobHandling:blobHandling];
+	}
+
+	if([inputSource isEqualToString:SPBundleInputSourceSelectedTableRowsAsSqlInsert]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:YES blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsSqlInsertsOnlySelectedRows:YES];
+	}
+
+	if([inputSource isEqualToString:SPBundleInputSourceTableRowsAsTab]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:NO blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsTabStringWithHeaders:YES onlySelectedRows:NO blobHandling:blobHandling];
+	}
+
+	if([inputSource isEqualToString:SPBundleInputSourceTableRowsAsCsv]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:NO blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsCsvStringWithHeaders:YES onlySelectedRows:NO blobHandling:blobHandling];
+	}
+
+	if([inputSource isEqualToString:SPBundleInputSourceTableRowsAsSqlInsert]) {
+		NSString *provided = [self _providedDataTableBundleInputForInputSource:inputSource blobHandling:blobHandling onlySelectedRows:NO blobFileDirectory:blobFileDirectory];
+		return hasProvidedInput ? provided : [self rowsAsSqlInsertsOnlySelectedRows:NO];
+	}
+
+	return @"";
+}
+
+- (void)_removeDataTableBundleMenuFromMenu:(NSMenu *)menu
+{
+	NSMenuItem *item = [menu itemWithTag:SADataTableBundleMenuTag];
+	if(!item) return;
+
+	NSInteger index = [menu indexOfItem:item];
+	if(index > 0 && [[menu itemAtIndex:index - 1] isSeparatorItem]) {
+		[menu removeItemAtIndex:index - 1];
+		index--;
+	}
+
+	[menu removeItem:item];
+}
+
+- (void)_appendQueryDataTableMetadata:(NSMutableString *)tableMetaData withColumnDefinitions:(NSArray *)definitions columnMappings:(NSUInteger *)columnMappings columnCount:(NSUInteger)numColumns
+{
+	if(!definitions || [definitions count] != numColumns) return;
+
+	for(NSUInteger c = 0; c < numColumns; c++) {
+		NSDictionary *col = [definitions safeObjectAtIndex:columnMappings[c]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"type"]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"typegrouping"]];
+		[tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"char_length"]) ? : @""];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"UNSIGNED_FLAG"]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"AUTO_INCREMENT_FLAG"]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"PRI_KEY_FLAG"]];
+		[tableMetaData appendString:@"\n"];
+	}
+}
+
+- (void)_appendContentDataTableMetadata:(NSMutableString *)tableMetaData withColumnDefinitions:(NSArray *)definitions columnMappings:(NSUInteger *)columnMappings columnCount:(NSUInteger)numColumns
+{
+	if(!definitions || [definitions count] != numColumns) return;
+
+	for(NSUInteger c = 0; c < numColumns; c++) {
+		NSDictionary *col = [definitions safeObjectAtIndex:columnMappings[c]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"type"]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"typegrouping"]];
+		[tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"length"]) ? : @""];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"unsigned"]];
+		[tableMetaData appendFormat:@"%@\t", [col objectForKey:@"autoincrement"]];
+		[tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"isprimarykey"]) ? : @"0"];
+		[tableMetaData appendFormat:@"%@\n", [col objectForKey:@"comment"]];
+	}
+}
 
 - (void)_removeCellFilterMenuItemFromMenu:(NSMenu *)menu
 {
@@ -1123,18 +1267,11 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 {
 	NSMenu *menu = [self menu];
 
-	if(![[self delegate] isKindOfClass:[SPCustomQuery class]] && ![[self delegate] isKindOfClass:[SPTableContent class]]) return menu;
+	[self _removeDataTableBundleMenuFromMenu:menu];
+	if(![self _supportsDataTableBundleCommands]) return menu;
 	[self _removeCellFilterMenuItemFromMenu:menu];
 
 	[SPBundleManager.shared reloadBundles:self];
-
-	// Remove 'Bundles' sub menu and separator
-	NSMenuItem *bItem = [menu itemWithTag:10000000];
-	if(bItem) {
-		NSInteger sepIndex = [menu indexOfItem:bItem]-1;
-		[menu removeItemAtIndex:sepIndex];
-		[menu removeItem:bItem];
-	}
 
 	NSArray *bundleCategories = [SPBundleManager.shared bundleCategoriesForScope:SPBundleScopeDataTable];
 	NSArray *bundleItems = [SPBundleManager.shared bundleItemsForScope:SPBundleScopeDataTable];
@@ -1145,7 +1282,7 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 
 		NSMenu *bundleMenu = [[NSMenu alloc] init];
 		NSMenuItem *bundleSubMenuItem = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Bundles", @"bundles menu item label") action:nil keyEquivalent:@""];
-		[bundleSubMenuItem setTag:10000000];
+		[bundleSubMenuItem setTag:SADataTableBundleMenuTag];
 
 		[menu addItem:bundleSubMenuItem];
 		[menu setSubmenu:bundleMenu forItem:bundleSubMenuItem];
@@ -1518,6 +1655,11 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 
 - (IBAction)executeBundleItemForDataTable:(id)sender
 {
+	if(![self _supportsDataTableBundleCommands]) {
+		NSBeep();
+		return;
+	}
+
 	NSInteger idx = [(NSMenuItem*)sender tag] - 1000000;
 	NSString *infoPath = nil;
 	NSArray *bundleItems = [SPBundleManager.shared bundleItemsForScope:SPBundleScopeDataTable];
@@ -1606,24 +1748,7 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
         [self setTmpBlobFileDirectory:@""];
     }
 
-    if([inputAction isEqualToString:SPBundleInputSourceSelectedTableRowsAsTab]) {
-        input = [self rowsAsTabStringWithHeaders:YES onlySelectedRows:YES blobHandling:blobHandling];
-    }
-    else if([inputAction isEqualToString:SPBundleInputSourceSelectedTableRowsAsCsv]) {
-        input = [self rowsAsCsvStringWithHeaders:YES onlySelectedRows:YES blobHandling:blobHandling];
-    }
-    else if([inputAction isEqualToString:SPBundleInputSourceSelectedTableRowsAsSqlInsert]) {
-        input = [self rowsAsSqlInsertsOnlySelectedRows:YES];
-    }
-    else if([inputAction isEqualToString:SPBundleInputSourceTableRowsAsTab]) {
-        input = [self rowsAsTabStringWithHeaders:YES onlySelectedRows:NO blobHandling:blobHandling];
-    }
-    else if([inputAction isEqualToString:SPBundleInputSourceTableRowsAsCsv]) {
-        input = [self rowsAsCsvStringWithHeaders:YES onlySelectedRows:NO blobHandling:blobHandling];
-    }
-    else if([inputAction isEqualToString:SPBundleInputSourceTableRowsAsSqlInsert]) {
-        input = [self rowsAsSqlInsertsOnlySelectedRows:NO];
-    }
+	input = [self _dataTableBundleInputForInputSource:inputAction blobHandling:blobHandling blobFileDirectory:[self tmpBlobFileDirectory]];
     
     if(input == nil) input = @"";
     [input writeToFile:bundleInputFilePath
@@ -1646,40 +1771,15 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
         columnMappings[c] = (NSUInteger)[[[columns safeObjectAtIndex:c] identifier] integerValue];
 
     NSMutableString *tableMetaData = [NSMutableString string];
-    if([[self delegate] isKindOfClass:[SPCustomQuery class]]) {
-        [env setObject:@"query" forKey:SPBundleShellVariableDataTableSource];
-        
-        NSArray *defs = [(id <SPDatabaseContentViewDelegate>)[self delegate] dataColumnDefinitions];
-        
-        if(defs && [defs count] == numColumns)
-            for( c = 0; c < numColumns; c++ ) {
-                NSDictionary *col = [defs safeObjectAtIndex:columnMappings[c]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"type"]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"typegrouping"]];
-                [tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"char_length"]) ? : @""];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"UNSIGNED_FLAG"]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"AUTO_INCREMENT_FLAG"]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"PRI_KEY_FLAG"]];
-                [tableMetaData appendString:@"\n"];
-            }
-    }
-    else if([[self delegate] isKindOfClass:[SPTableContent class]]) {
-        [env setObject:@"content" forKey:SPBundleShellVariableDataTableSource];
-        
-        NSArray *defs = [(id <SPDatabaseContentViewDelegate>)[self delegate] dataColumnDefinitions];
-        
-        if(defs && [defs count] == numColumns)
-            for( c = 0; c < numColumns; c++ ) {
-                NSDictionary *col = [defs safeObjectAtIndex:columnMappings[c]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"type"]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"typegrouping"]];
-                [tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"length"]) ? : @""];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"unsigned"]];
-                [tableMetaData appendFormat:@"%@\t", [col objectForKey:@"autoincrement"]];
-                [tableMetaData appendFormat:@"%@\t", ([col objectForKey:@"isprimarykey"]) ? : @"0"];
-                [tableMetaData appendFormat:@"%@\n", [col objectForKey:@"comment"]];
-            }
-    }
+	NSString *dataTableSource = [self _dataTableBundleSource];
+	NSArray *defs = [self _dataTableBundleColumnDefinitions];
+	if([dataTableSource length]) [env setObject:dataTableSource forKey:SPBundleShellVariableDataTableSource];
+	if([dataTableSource isEqualToString:@"query"]) {
+		[self _appendQueryDataTableMetadata:tableMetaData withColumnDefinitions:defs columnMappings:columnMappings columnCount:numColumns];
+	}
+	else if([dataTableSource isEqualToString:@"content"]) {
+		[self _appendContentDataTableMetadata:tableMetaData withColumnDefinitions:defs columnMappings:columnMappings columnCount:numColumns];
+	}
     free(columnMappings);
 
     inputFileError = nil;

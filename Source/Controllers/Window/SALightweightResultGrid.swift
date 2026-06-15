@@ -39,6 +39,13 @@ protocol SALightweightResultGridTableViewDelegate: AnyObject {
     func resultGridTableViewCopyRowsAsSQL(_ sender: Any?)
     func resultGridTableView(_ tableView: NSTableView, canCopyRowsFor item: NSValidatedUserInterfaceItem) -> Bool
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent)
+    func resultGridTableView(_ tableView: NSTableView, bundleInputFor inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String?
+}
+
+extension SALightweightResultGridTableViewDelegate {
+    func resultGridTableView(_ tableView: NSTableView, bundleInputFor inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {
+        nil
+    }
 }
 
 private protocol SALightweightDenseAccessibilityTable: AnyObject {
@@ -73,8 +80,16 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
     weak var resultGridDelegate: SALightweightResultGridTableViewDelegate?
     var lightweightAccessibilityLabel: String?
 
-    @objc var supportsDataTableBundleCommands: Bool {
-        false
+    @objc var supportsDataTableBundleCommands = false
+    @objc let dataTableBundleSource = "query"
+
+    @objc(dataTableBundleInputForInputSource:blobHandling:onlySelectedRows:blobFileDirectory:)
+    func dataTableBundleInput(for inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {
+        return resultGridDelegate?.resultGridTableView(self,
+                                                       bundleInputFor: inputSource,
+                                                       blobHandling: blobHandling,
+                                                       onlySelectedRows: onlySelectedRows,
+                                                       blobFileDirectory: blobFileDirectory)
     }
 
     @objc(copy:)
@@ -343,9 +358,9 @@ enum SALightweightResultGrid {
         let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(identifier)"))
         tableColumn.title = title
         tableColumn.isEditable = editable
-        tableColumn.width = isWideTextColumn(typeGrouping: descriptor.typeGrouping)
+        tableColumn.width = savedWidth ?? (isWideTextColumn(typeGrouping: descriptor.typeGrouping)
             ? wideTextColumnWidth
-            : savedWidth ?? defaultColumnWidth(for: descriptor)
+            : defaultColumnWidth(for: descriptor))
         tableColumn.minWidth = minWidth
         tableColumn.maxWidth = maxWidth
         tableColumn.resizingMask = resizingMask
@@ -667,6 +682,10 @@ enum SALightweightResultGrid {
             }
 
             return displayString(String(data: data, encoding: .utf8) ?? "", truncate: truncate)
+        }
+
+        if let geometry = value as? SPMySQLGeometryData {
+            return displayString(geometry.wktString() ?? "", truncate: truncate)
         }
 
         return displayString(String(describing: value), truncate: truncate)

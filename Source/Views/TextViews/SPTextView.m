@@ -85,6 +85,11 @@ NSInteger _alphabeticSort(id string1, id string2, void *reverse);
 - (void)_setTextSelectionColor:(NSColor *)newSelectionColor;
 - (void)_setTextSelectionColor:(NSColor *)newSelectionColor onBackgroundColor:(NSColor *)aBackgroundColor;
 - (void)_positionCompletionPopup:(SPNarrowDownCompletion *)aPopup relativeToTextAtLocation:(NSUInteger)aLocation;
+- (id)_delegateValueForKeyIfAvailable:(NSString *)key;
+- (id)_effectiveTableDocumentInstance;
+- (id)_effectiveTablesListInstance;
+- (id)_effectiveCustomQueryInstance;
+- (BOOL)_supportsQueryFavoriteTabTriggers;
 
 @property (assign) NSUInteger taskCount;
 
@@ -118,6 +123,43 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 @synthesize syntaxHighlightingApplied;
 @synthesize taskCount;
 @synthesize completionFuzzyMode;
+
+- (id)_delegateValueForKeyIfAvailable:(NSString *)key
+{
+	id delegate = [self delegate];
+	SEL selector = NSSelectorFromString(key);
+	if(!delegate || ![delegate respondsToSelector:selector])
+		return nil;
+
+	return [(NSObject *)delegate valueForKey:key];
+}
+
+- (id)_effectiveTableDocumentInstance
+{
+	return tableDocumentInstance ?: [self _delegateValueForKeyIfAvailable:@"tableDocumentInstance"];
+}
+
+- (id)_effectiveTablesListInstance
+{
+	return tablesListInstance ?: [self _delegateValueForKeyIfAvailable:@"tablesListInstance"];
+}
+
+- (id)_effectiveCustomQueryInstance
+{
+	return customQueryInstance ?: [self _delegateValueForKeyIfAvailable:@"customQueryInstance"];
+}
+
+- (BOOL)_supportsQueryFavoriteTabTriggers
+{
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	id delegate = [self delegate];
+
+	return [delegate isKindOfClass:[SPCustomQuery class]]
+		|| [delegate respondsToSelector:@selector(currentQueryRange)]
+		|| [queryInstance respondsToSelector:@selector(currentQueryRange)]
+		|| [queryInstance respondsToSelector:@selector(selectCurrentQuery)]
+		|| [queryInstance respondsToSelector:@selector(selectCurrentQuery:)];
+}
 
 - (void) awakeFromNib
 {
@@ -339,13 +381,15 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
     SPLog(@"strlength = %lu", strLen);
 
     // only start a task if the string is > SP_TEXT_SIZE_TRIGGER_FOR_PARTLY_PARSING
-    if(strLen > SP_TEXT_SIZE_TRIGGER_FOR_PARTLY_PARSING){
-        taskCount++;
-        SPLog("startTaskWithDescription. Count = %lu", (unsigned long)taskCount);
-        [tableDocumentInstance startTaskWithDescription:NSLocalizedString(@"Applying syntax highlighting...", @"Applying syntax highlighting task description")];
-        // wait a bit longer than 0.1s, so the progress window can display
-        delay = 2.0;
-    }
+	if(strLen > SP_TEXT_SIZE_TRIGGER_FOR_PARTLY_PARSING){
+		taskCount++;
+		SPLog("startTaskWithDescription. Count = %lu", (unsigned long)taskCount);
+		id taskTableDocumentInstance = [self _effectiveTableDocumentInstance];
+		if([taskTableDocumentInstance respondsToSelector:@selector(startTaskWithDescription:)])
+			[taskTableDocumentInstance startTaskWithDescription:NSLocalizedString(@"Applying syntax highlighting...", @"Applying syntax highlighting task description")];
+		// wait a bit longer than 0.1s, so the progress window can display
+		delay = 2.0;
+	}
     [self performSelector:@selector(doSyntaxHighlightingWithForce:) withObject:@(YES) afterDelay:delay];
 
 }
@@ -407,8 +451,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		// Add structural db/table/field data to completions list or fallback to gathering SPTablesList data
 
 		NSString* connectionID;
-		if(tableDocumentInstance)
-			connectionID = [tableDocumentInstance connectionID];
+		id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
+		id completionTablesListInstance = [self _effectiveTablesListInstance];
+		if([completionTableDocumentInstance respondsToSelector:@selector(connectionID)])
+			connectionID = [completionTableDocumentInstance connectionID];
 		else
 			connectionID = @"_";
 
@@ -426,14 +472,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			NSString *currentDb = nil;
 			NSString *currentTable = nil;
 
-			if (tablesListInstance && [tablesListInstance selectedDatabase])
-				currentDb = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, [tablesListInstance selectedDatabase]];
-			if (tablesListInstance && [tablesListInstance tableName])
-				currentTable = [tablesListInstance tableName];
+			if ([completionTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [completionTablesListInstance selectedDatabase])
+				currentDb = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, [completionTablesListInstance selectedDatabase]];
+			if ([completionTablesListInstance respondsToSelector:@selector(tableName)] && [completionTablesListInstance tableName])
+				currentTable = [completionTablesListInstance tableName];
 
 			// Put current selected db at the top
-			if(aTableName == nil && aDbName == nil && [tablesListInstance selectedDatabase]) {
-				currentDb = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, [tablesListInstance selectedDatabase]];
+			if(aTableName == nil && aDbName == nil && [completionTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [completionTablesListInstance selectedDatabase]) {
+				currentDb = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, [completionTablesListInstance selectedDatabase]];
 				[sortedDbs removeObject:currentDb];
 				[sortedDbs insertObject:currentDb atIndex:0];
 			}
@@ -468,7 +514,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			if(!aDbName) {
 
 				// Try to suggest only items which are uniquely valid for the parsed string
-				NSArray *uniqueSchema = [[SPNavigatorController sharedNavigatorController] getUniqueDbIdentifierFor:[aTableName lowercaseString] andConnection:[[(NSObject*)[self delegate] valueForKeyPath:@"tableDocumentInstance"] connectionID]  ignoreFields:YES];
+				NSArray *uniqueSchema = [[SPNavigatorController sharedNavigatorController] getUniqueDbIdentifierFor:[aTableName lowercaseString] andConnection:connectionID ignoreFields:YES];
 				NSInteger uniqueSchemaKind = [[uniqueSchema objectAtIndex:0] intValue];
 
 				// If no db name but table name check if table name is a valid name in the current selected db
@@ -611,35 +657,48 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			// [possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"fetching table data…", @"fetching table data for completion in progress message"), @"path", @"", @"noCompletion", nil]];
 
 			// Add all database names to completions list
-			for (id obj in [tablesListInstance allDatabaseNames])
-				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"database-small", @"image", @"", @"isRef", nil]];
+			if([completionTablesListInstance respondsToSelector:@selector(allDatabaseNames)])
+				for (id obj in [completionTablesListInstance allDatabaseNames])
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"database-small", @"image", @"", @"isRef", nil]];
 
 			// Add all system database names to completions list
-			for (id obj in [tablesListInstance allSystemDatabaseNames])
-				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"database-small", @"image", @"", @"isRef", nil]];
+			if([completionTablesListInstance respondsToSelector:@selector(allSystemDatabaseNames)])
+				for (id obj in [completionTablesListInstance allSystemDatabaseNames])
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"database-small", @"image", @"", @"isRef", nil]];
 
 			// Add table names to completions list
-			for (id obj in [tablesListInstance allTableNames])
-				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"table-small-square", @"image", @"", @"isRef", nil]];
+			if([completionTablesListInstance respondsToSelector:@selector(allTableNames)])
+				for (id obj in [completionTablesListInstance allTableNames])
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"table-small-square", @"image", @"", @"isRef", nil]];
 
 			// Add view names to completions list
-			for (id obj in [tablesListInstance allViewNames])
-				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"table-view-small-square", @"image", @"", @"isRef", nil]];
+			if([completionTablesListInstance respondsToSelector:@selector(allViewNames)])
+				for (id obj in [completionTablesListInstance allViewNames])
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"table-view-small-square", @"image", @"", @"isRef", nil]];
 
 			// Add field names to completions list for currently selected table
-			if ([tableDocumentInstance table] != nil)
-				for (id obj in [tableDocumentInstance->tableDataInstance columnNames])
+			if ([completionTableDocumentInstance isKindOfClass:[SPDatabaseDocument class]]
+				&& [completionTableDocumentInstance respondsToSelector:@selector(table)]
+				&& [completionTableDocumentInstance table] != nil) {
+				SPDatabaseDocument *completionDocument = (SPDatabaseDocument *)completionTableDocumentInstance;
+				for (id obj in [completionDocument->tableDataInstance columnNames])
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
+			}
+			else if ([completionTablesListInstance respondsToSelector:NSSelectorFromString(@"allFieldNames")])
+				for (id obj in [(NSObject *)completionTablesListInstance valueForKey:@"allFieldNames"])
 					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 
 			// Add proc/func only for MySQL version 5 or higher
 			if(mySQLmajorVersion > 4) {
 				// Add all procedures to completions list for currently selected table
-				for (id obj in [tablesListInstance allProcedureNames])
-					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"proc-small", @"image", @"", @"isRef", nil]];
+				if([completionTablesListInstance respondsToSelector:@selector(allProcedureNames)])
+					for (id obj in [completionTablesListInstance allProcedureNames])
+						[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"proc-small", @"image", @"", @"isRef", nil]];
 
 				// Add all function to completions list for currently selected table
-				for (id obj in [tablesListInstance allFunctionNames])
-					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"func-small", @"image", @"", @"isRef", nil]];
+				if([completionTablesListInstance respondsToSelector:@selector(allFunctionNames)])
+					for (id obj in [completionTablesListInstance allFunctionNames])
+						[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"func-small", @"image", @"", @"isRef", nil]];
 			}
 		}
 	} // end of dict mode?
@@ -684,8 +743,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
     }
 
 	NSRange r = [self selectedRange];
+	id queryInstance = [self _effectiveCustomQueryInstance];
 
-	if(![self delegate] || (![[self delegate] isKindOfClass:[SPCustomQuery class]] && ![customQueryInstance respondsToSelector:@selector(showAutoHelpForCurrentWord:)]) || r.length || snippetControlCounter > -1) return;
+	if(![self delegate] || (![[self delegate] isKindOfClass:[SPCustomQuery class]] && ![queryInstance respondsToSelector:@selector(showAutoHelpForCurrentWord:)]) || r.length || snippetControlCounter > -1) return;
 
 	if(r.location) {
 		NSCharacterSet *ignoreCharacterSet = [NSCharacterSet characterSetWithCharactersInString:@"\"'`;,()[]{}=+/<> \t\n\r"];
@@ -722,8 +782,16 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	[self doCompletionByUsingSpellChecker:NO fuzzyMode:completionFuzzyMode autoCompleteMode:NO];
 }
 
+- (void)refreshLightweightCompletionFieldsIfNeeded
+{
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	if([queryInstance respondsToSelector:@selector(refreshCompletionFieldNamesIfNeeded)])
+		[queryInstance performSelector:@selector(refreshCompletionFieldNamesIfNeeded)];
+}
+
 - (void)doCompletionByUsingSpellChecker:(BOOL)isDictMode fuzzyMode:(BOOL)fuzzySearch autoCompleteMode:(BOOL)autoCompleteMode
 {
+	[self refreshLightweightCompletionFieldsIfNeeded];
 
 	// Cancel autocompletion trigger
 	if([prefs boolForKey:SPCustomQueryAutoComplete])
@@ -763,6 +831,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSString* currentWord   = [[self string] substringWithRange:completionRange];
 	NSString* prefix        = @"";
 	NSString *currentDb     = nil;
+	id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
+	id completionTablesListInstance = [self _effectiveTablesListInstance];
+	id completionCustomQueryInstance = [self _effectiveCustomQueryInstance];
+	id dbStructureRetriever = [completionTableDocumentInstance respondsToSelector:@selector(databaseStructureRetrieval)] ? [completionTableDocumentInstance databaseStructureRetrieval] : nil;
 
 	// Break for long stuff
 	if(completionRange.length>100000) return;
@@ -787,8 +859,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 		// Parse for leading db.table.field infos
 
-		if(tablesListInstance && [tablesListInstance selectedDatabase])
-			currentDb = [tablesListInstance selectedDatabase];
+		if([completionTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [completionTablesListInstance selectedDatabase])
+			currentDb = [completionTablesListInstance selectedDatabase];
 		else
 			currentDb = @"";
 
@@ -926,11 +998,11 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	// Check for table name aliases
 	NSString *alias = nil;
-	if (dbBrowseMode && tableDocumentInstance && customQueryInstance) {
+	if (dbBrowseMode && completionTableDocumentInstance && completionCustomQueryInstance && dbStructureRetriever) {
 		NSString *theDb = (dbName == nil) ? [NSString stringWithString:currentDb] : [NSString stringWithString:dbName];
-		NSString *connectionID = [tableDocumentInstance connectionID];
+		NSString *connectionID = [completionTableDocumentInstance respondsToSelector:@selector(connectionID)] ? [completionTableDocumentInstance connectionID] : @"_";
 		NSString *conID = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, theDb];
-		NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[[tableDocumentInstance databaseStructureRetrieval] structure] objectForKey:connectionID]];
+		NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[dbStructureRetriever structure] objectForKey:connectionID]];
 		if(theDb && dbs != nil && [dbs count] && [dbs objectForKey:conID] && [[dbs objectForKey:conID] isKindOfClass:[NSDictionary class]]) {
 			NSArray *allTables = [[dbs objectForKey:conID] allKeys];
 			// Check if found table name is known, if not parse for aliases
@@ -988,7 +1060,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 													   autoComplete:autoCompleteMode
 														  oneColumn:isDictMode
 															  alias:alias
-										   withDBStructureRetriever:[tableDocumentInstance databaseStructureRetrieval]];
+										   withDBStructureRetriever:dbStructureRetriever];
 
 	completionParseRangeLocation = parseRange.location;
 
@@ -1211,8 +1283,11 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// If Extended Table Info tab is active delegate the print call to the SPDatabaseDocument
 	// if the user doesn't select anything in self
 	if([[[[self delegate] class] description] isEqualToString:@"SPExtendedTableInfo"] && ![self selectedRange].length) {
-		[[(NSObject*)[self delegate] valueForKeyPath:@"tableDocumentInstance"] printDocument:sender];
-		return;
+		id printDocumentInstance = [self _delegateValueForKeyIfAvailable:@"tableDocumentInstance"];
+		if([printDocumentInstance respondsToSelector:@selector(printDocument:)]) {
+			[printDocumentInstance printDocument:sender];
+			return;
+		}
 	}
 
 	// This will scale the view to fit the page without centering it.
@@ -1254,7 +1329,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
  */
 - (IBAction) showMySQLHelpForCurrentWord:(id)sender
 {
-	[[tableDocumentInstance helpViewerClient] showHelpForCurrentWord:self];
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	id helpTableDocumentInstance = [self _effectiveTableDocumentInstance];
+	if([helpTableDocumentInstance respondsToSelector:@selector(helpViewerClient)]) {
+		[[helpTableDocumentInstance helpViewerClient] showHelpForCurrentWord:self];
+	}
+	else if([queryInstance respondsToSelector:@selector(showMySQLHelpForCurrentWord:)]) {
+		[queryInstance performSelector:@selector(showMySQLHelpForCurrentWord:) withObject:self];
+	}
 }
 
 /**
@@ -1322,8 +1404,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 - (IBAction) selectCurrentQuery:(id)sender
 {
-	if([self isEditable])
-		[customQueryInstance selectCurrentQuery];
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	if(![self isEditable] || !queryInstance)
+		return;
+
+	if([queryInstance respondsToSelector:@selector(selectCurrentQuery)])
+		[queryInstance selectCurrentQuery];
+	else if([queryInstance respondsToSelector:@selector(selectCurrentQuery:)])
+		[queryInstance performSelector:@selector(selectCurrentQuery:) withObject:sender];
 }
 
 /**
@@ -1591,12 +1679,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSMutableArray *possibleCompletions = [[NSMutableArray alloc] initWithCapacity:0];
 
 	NSString *connectionID;
-	if(tableDocumentInstance)
-		connectionID = [tableDocumentInstance connectionID];
+	id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
+	if([completionTableDocumentInstance respondsToSelector:@selector(connectionID)])
+		connectionID = [completionTableDocumentInstance connectionID];
 	else
 		connectionID = @"_";
 
 	NSArray *arr = nil;
+	id completionTablesListInstance = [self _effectiveTablesListInstance];
 	if([kind isEqualToString:@"$SP_ASLIST_ALL_TABLES"]) {
 		// TODO HansJB
 		// NSString *currentDb = nil;
@@ -1624,7 +1714,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		// 		}
 		// 	}
 		// } else {
-		arr = [NSArray arrayWithArray:[[(NSObject*)[self delegate] valueForKeyPath:@"tablesListInstance"] allTableAndViewNames]];
+		if([completionTablesListInstance respondsToSelector:@selector(allTableAndViewNames)])
+			arr = [NSArray arrayWithArray:[completionTablesListInstance allTableAndViewNames]];
 		if(arr == nil) {
 			arr = @[];
 		}
@@ -1633,13 +1724,16 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		// }
 	}
 	else if([kind isEqualToString:@"$SP_ASLIST_ALL_DATABASES"]) {
-		arr = [NSArray arrayWithArray:[[(NSObject*)[self delegate] valueForKeyPath:@"tablesListInstance"] allDatabaseNames]];
+		if([completionTablesListInstance respondsToSelector:@selector(allDatabaseNames)])
+			arr = [NSArray arrayWithArray:[completionTablesListInstance allDatabaseNames]];
 		if(arr == nil) {
 			arr = @[];
 		}
 		for(id w in arr)
 			[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"database-small", @"image", @"", @"isRef", nil]];
-		arr = [NSArray arrayWithArray:[[(NSObject*)[self delegate] valueForKeyPath:@"tablesListInstance"] allSystemDatabaseNames]];
+		arr = nil;
+		if([completionTablesListInstance respondsToSelector:@selector(allSystemDatabaseNames)])
+			arr = [NSArray arrayWithArray:[completionTablesListInstance allSystemDatabaseNames]];
 		if(arr == nil) {
 			arr = @[];
 		}
@@ -1647,56 +1741,67 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"database-small", @"image", @"", @"isRef", nil]];
 	}
 	else if([kind isEqualToString:@"$SP_ASLIST_ALL_FIELDS"]) {
+		[self refreshLightweightCompletionFieldsIfNeeded];
 
 		NSString *currentDb = nil;
 		NSString *currentTable = nil;
 
-		if (tablesListInstance && [tablesListInstance selectedDatabase])
-			currentDb = [tablesListInstance selectedDatabase];
-		if (tablesListInstance && [tablesListInstance tableName])
-			currentTable = [tablesListInstance tableName];
+		if ([completionTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [completionTablesListInstance selectedDatabase])
+			currentDb = [completionTablesListInstance selectedDatabase];
+		if ([completionTablesListInstance respondsToSelector:@selector(tableName)] && [completionTablesListInstance tableName])
+			currentTable = [completionTablesListInstance tableName];
 
-		NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[[tableDocumentInstance databaseStructureRetrieval] structure] objectForKey:connectionID]];
-		if(currentDb != nil && currentTable != nil && dbs != nil && [dbs count] && [dbs objectForKey:currentDb] && [[dbs objectForKey:currentDb] objectForKey:currentTable]) {
-			NSDictionary * theTable = [[dbs objectForKey:currentDb] objectForKey:currentTable];
-			NSArray *allFields = [theTable allKeys];
-			NSSortDescriptor *desc = [[NSSortDescriptor alloc] initWithKey:nil ascending:YES selector:@selector(localizedCompare:)];
-			NSArray *sortedFields = [allFields sortedArrayUsingDescriptors:@[desc]];
-			for(id field in sortedFields) {
-				if(![field hasPrefix:@"  "]) {
-					NSArray *def = [theTable objectForKey:field];
-					NSString *typ = [NSString stringWithFormat:@"%@ %@ %@", [def objectAtIndex:0], [def objectAtIndex:1], [def objectAtIndex:2]];
-					// Check if type definition contains a , if so replace the bracket content by … and add
-					// the bracket content as "list" key to prevend the token field to split them by ,
-					if(typ && [typ rangeOfString:@","].length) {
-						NSString *t = [typ stringByReplacingOccurrencesOfRegex:@"\\(.*?\\)" withString:@"(…)"];
-						NSString *lst = [typ stringByMatching:@"\\(([^\\)]*?)\\)" capture:1L];
-						[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-														field, @"display",
-														@"field-small-square", @"image",
-														[NSString stringWithFormat:@"%@%@%@", currentTable, SPUniqueSchemaDelimiter, currentDb], @"path",
-														t, @"type",
-														lst, @"list",
-														@"", @"isRef",
-														nil]];
-					} else {
-						[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-														field, @"display",
-														@"field-small-square", @"image",
-														[NSString stringWithFormat:@"%@%@%@", currentTable, SPUniqueSchemaDelimiter, currentDb], @"path",
-														typ, @"type",
-														@"", @"isRef",
-														nil]];
+		if([completionTableDocumentInstance respondsToSelector:@selector(databaseStructureRetrieval)]) {
+			NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[[completionTableDocumentInstance databaseStructureRetrieval] structure] objectForKey:connectionID]];
+			if(currentDb != nil && currentTable != nil && dbs != nil && [dbs count] && [dbs objectForKey:currentDb] && [[dbs objectForKey:currentDb] objectForKey:currentTable]) {
+				NSDictionary * theTable = [[dbs objectForKey:currentDb] objectForKey:currentTable];
+				NSArray *allFields = [theTable allKeys];
+				NSSortDescriptor *desc = [[NSSortDescriptor alloc] initWithKey:nil ascending:YES selector:@selector(localizedCompare:)];
+				NSArray *sortedFields = [allFields sortedArrayUsingDescriptors:@[desc]];
+				for(id field in sortedFields) {
+					if(![field hasPrefix:@"  "]) {
+						NSArray *def = [theTable objectForKey:field];
+						NSString *typ = [NSString stringWithFormat:@"%@ %@ %@", [def objectAtIndex:0], [def objectAtIndex:1], [def objectAtIndex:2]];
+						// Check if type definition contains a , if so replace the bracket content by … and add
+						// the bracket content as "list" key to prevend the token field to split them by ,
+						if(typ && [typ rangeOfString:@","].length) {
+							NSString *t = [typ stringByReplacingOccurrencesOfRegex:@"\\(.*?\\)" withString:@"(…)"];
+							NSString *lst = [typ stringByMatching:@"\\(([^\\)]*?)\\)" capture:1L];
+							[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+															field, @"display",
+															@"field-small-square", @"image",
+															[NSString stringWithFormat:@"%@%@%@", currentTable, SPUniqueSchemaDelimiter, currentDb], @"path",
+															t, @"type",
+															lst, @"list",
+															@"", @"isRef",
+															nil]];
+						} else {
+							[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+															field, @"display",
+															@"field-small-square", @"image",
+															[NSString stringWithFormat:@"%@%@%@", currentTable, SPUniqueSchemaDelimiter, currentDb], @"path",
+															typ, @"type",
+															@"", @"isRef",
+															nil]];
+						}
 					}
 				}
 			}
-		}
-		else {
-			arr = [NSArray arrayWithArray:[tableDocumentInstance->tableDataInstance columnNames]];
+			else if([completionTableDocumentInstance isKindOfClass:[SPDatabaseDocument class]]
+					&& [completionTableDocumentInstance respondsToSelector:@selector(table)]) {
+				SPDatabaseDocument *completionDocument = (SPDatabaseDocument *)completionTableDocumentInstance;
+				arr = [NSArray arrayWithArray:[completionDocument->tableDataInstance columnNames]];
 
-			if(arr == nil) {
-				arr = @[];
+				if(arr == nil) {
+					arr = @[];
+				}
+				for(id w in arr)
+					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 			}
+		}
+		else if(completionTablesListInstance && [completionTablesListInstance respondsToSelector:NSSelectorFromString(@"allFieldNames")]) {
+			NSArray *fallbackFields = [(NSObject*)completionTablesListInstance valueForKey:@"allFieldNames"];
+			arr = fallbackFields ? [NSArray arrayWithArray:fallbackFields] : @[];
 			for(id w in arr)
 				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 		}
@@ -1968,18 +2073,19 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			if([theHintString isMatchedByRegex:@"(?<!\\\\)\\$SP_"]) {
 				NSRange r;
 				NSString *currentTable = nil;
-				if (tablesListInstance && [tablesListInstance tableName])
-					currentTable = [tablesListInstance tableName];
+				id snippetTablesListInstance = [self _effectiveTablesListInstance];
+				if ([snippetTablesListInstance respondsToSelector:@selector(tableName)] && [snippetTablesListInstance tableName])
+					currentTable = [snippetTablesListInstance tableName];
 				NSString *currentDb = nil;
-				if (tablesListInstance && [tablesListInstance selectedDatabase])
-					currentDb = [tablesListInstance selectedDatabase];
+				if ([snippetTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [snippetTablesListInstance selectedDatabase])
+					currentDb = [snippetTablesListInstance selectedDatabase];
 
 				while ([theHintString isMatchedByRegex:@"(?<!\\\\)\\$SP_SELECTED_TABLES"])
 				{
 					r = [theHintString rangeOfRegex:@"(?<!\\\\)\\$SP_SELECTED_TABLES"];
 
 					if (r.length) {
-						NSArray *selTables = [tablesListInstance selectedTableAndViewNames];
+						NSArray *selTables = [snippetTablesListInstance respondsToSelector:@selector(selectedTableAndViewNames)] ? [snippetTablesListInstance selectedTableAndViewNames] : @[];
 
 						[theHintString replaceCharactersInRange:r withString:[selTables count] ? [selTables componentsJoinedAndBacktickQuoted] : @"\\$SP_SELECTED_TABLE"];
 					}
@@ -2365,9 +2471,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		return;
 	}
 
-	// Check for {SHIFT}TAB to try to insert query favorite via TAB trigger if SPTextView belongs to SPCustomQuery
+	// Check for {SHIFT}TAB to try to insert query favorite via TAB trigger if SPTextView belongs to a query editor
 	// and TAB as soft indention
-	if ([theEvent keyCode] == 48 && [self isEditable] && [[self delegate] isKindOfClass:[SPCustomQuery class]]){
+	if ([theEvent keyCode] == 48 && [self isEditable] && [self _supportsQueryFavoriteTabTriggers]){
 		NSRange targetRange = [self getRangeForCurrentWord];
 		NSString *tabTrigger = [[self string] substringWithRange:targetRange];
 
@@ -2413,8 +2519,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		}
 
 		// Check if tab trigger is defined; if so insert it, otherwise pass through event
-		if(snippetControlCounter < 0 && [tabTrigger length] && [tableDocumentInstance fileURL]) {
-			NSArray *snippets = [[SPQueryController sharedQueryController] queryFavoritesForFileURL:[tableDocumentInstance fileURL] andTabTrigger:tabTrigger includeGlobals:YES];
+		id favoriteDocumentInstance = [self _effectiveTableDocumentInstance];
+		NSURL *favoriteFileURL = [favoriteDocumentInstance respondsToSelector:@selector(fileURL)] ? [favoriteDocumentInstance fileURL] : nil;
+		if(snippetControlCounter < 0 && [tabTrigger length] && (favoriteFileURL || ![[self delegate] isKindOfClass:[SPCustomQuery class]])) {
+			NSArray *snippets = [[SPQueryController sharedQueryController] queryFavoritesForFileURL:favoriteFileURL andTabTrigger:tabTrigger includeGlobals:YES];
 			if([snippets count] > 0 && [(NSString*)[(NSDictionary*)[snippets objectAtIndex:0] objectForKey:@"query"] length]) {
 				[self insertAsSnippet:[(NSDictionary*)[snippets objectAtIndex:0] objectForKey:@"query"] atRange:targetRange];
 				return;
@@ -2847,15 +2955,20 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// If selection show Help for it
 	if([self selectedRange].length)
 	{
-		[customQueryInstance performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
+		id queryInstance = [self _effectiveCustomQueryInstance];
+		if([queryInstance respondsToSelector:@selector(showAutoHelpForCurrentWord:)])
+			[queryInstance performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
 		return;
 	}
 	// Otherwise show Help if caret is not inside quotes
 	NSUInteger cursorPosition = [self selectedRange].location;
 	// If cursor at the end go one char leftwards
 	if (cursorPosition > 0 && cursorPosition >= [[self string] length]) cursorPosition--;
-	if (cursorPosition < [[self string] length] && ![(NSString*)NSMutableAttributedStringAttributeAtIndex([self textStorage], kQuote, cursorPosition, nil) length])
-		[customQueryInstance performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
+	if (cursorPosition < [[self string] length] && ![(NSString*)NSMutableAttributedStringAttributeAtIndex([self textStorage], kQuote, cursorPosition, nil) length]) {
+		id queryInstance = [self _effectiveCustomQueryInstance];
+		if([queryInstance respondsToSelector:@selector(showAutoHelpForCurrentWord:)])
+			[queryInstance performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
+	}
 
 }
 
@@ -2886,7 +2999,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		[self removeSyntaxHighlighting];
         if(taskCount > 0){
             SPLog(@"syntaxHighlighting removed, calling endtask. Count: %lu", (unsigned long)taskCount);
-            [tableDocumentInstance endTask];
+            id taskTableDocumentInstance = [self _effectiveTableDocumentInstance];
+            if([taskTableDocumentInstance respondsToSelector:@selector(endTask)])
+                [taskTableDocumentInstance endTask];
             taskCount--;
         }
 		return;
@@ -3120,7 +3235,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
     if(taskCount > 0){
         SPLog(@"syntaxHighlightingApplied, calling endtask. Count: %lu", (unsigned long)taskCount);
-        [tableDocumentInstance endTask];
+        id taskTableDocumentInstance = [self _effectiveTableDocumentInstance];
+        if([taskTableDocumentInstance respondsToSelector:@selector(endTask)])
+            [taskTableDocumentInstance endTask];
         taskCount--;
     }
 	[self setNeedsDisplayInRect:[self bounds]];
@@ -3182,45 +3299,53 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		[[self queryEditorBackgroundColor] setFill];
 		NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver);
 
-		if([[self delegate] isKindOfClass:[SPCustomQuery class]]) {
+		id queryInstance = [self _effectiveCustomQueryInstance];
+		BOOL canHighlightCurrentQuery = ([[self delegate] isKindOfClass:[SPCustomQuery class]]
+										 || [queryInstance respondsToSelector:@selector(currentQueryRange)]
+										 || [queryInstance respondsToSelector:@selector(selectCurrentQuery)]
+										 || [queryInstance respondsToSelector:@selector(selectCurrentQuery:)]);
 
-			// Highlights the current query if set in the Pref and no snippet session
-			// and if nothing is selected in the text view
-			if ([self shouldHiliteQuery] && snippetControlCounter<=-1 && ![self selectedRange].length && [[self string] length] < SP_MAX_TEXT_SIZE_FOR_SYNTAX_HIGHLIGHTING) {
+		// Highlights the current query if set in the Pref and no snippet session
+		// and if nothing is selected in the text view
+		if (canHighlightCurrentQuery && [self shouldHiliteQuery] && snippetControlCounter<=-1 && ![self selectedRange].length && [[self string] length] < SP_MAX_TEXT_SIZE_FOR_SYNTAX_HIGHLIGHTING) {
+			NSRange queryRange = [self queryRange];
+			if(queryRange.length && NSMaxRange(queryRange) <= [[self string] length]) {
 				NSUInteger rectCount;
-				[[self textStorage] ensureAttributesAreFixedInRange:[self queryRange]];
-				NSRectArray queryRects = [[self layoutManager] rectArrayForCharacterRange: [self queryRange]
-															 withinSelectedCharacterRange: [self queryRange]
-																		  inTextContainer: [self textContainer]
-																				rectCount: &rectCount ];
+				[[self textStorage] ensureAttributesAreFixedInRange:queryRange];
+				NSRectArray queryRects = [[self layoutManager] rectArrayForCharacterRange:queryRange
+															 withinSelectedCharacterRange:queryRange
+																		  inTextContainer:[self textContainer]
+																				rectCount:&rectCount ];
 				[[self queryHiliteColor] setFill];
 				NSRectFillListUsingOperation(queryRects, rectCount, NSCompositingOperationSourceOver);
 			}
+		}
 
-			// Highlight snippets coming from the Query Favorite text macro
-			if(snippetControlCounter > -1) {
-				// Is the caret still inside a snippet
-				if([self checkForCaretInsideSnippet]) {
-					for(NSInteger i=0; i<snippetControlMax; i++) {
-						if(snippetControlArray[i].location > -1) {
-							// choose the colors for the snippet parts
-							if(i == currentSnippetIndex) {
-								[[NSColor colorWithCalibratedRed:1.0f green:0.6f blue:0.0f alpha:0.4f] setFill];
-								[[NSColor colorWithCalibratedRed:1.0f green:0.6f blue:0.0f alpha:0.8f] setStroke];
-							} else {
-								[[NSColor colorWithCalibratedRed:1.0f green:0.8f blue:0.2f alpha:0.2f] setFill];
-								[[NSColor colorWithCalibratedRed:1.0f green:0.8f blue:0.2f alpha:0.5f] setStroke];
-							}
-							NSBezierPath *snippetPath = [self roundedBezierPathAroundRange: NSMakeRange(snippetControlArray[i].location,snippetControlArray[i].length) ];
-							[snippetPath fill];
-							[snippetPath stroke];
+		// Highlight snippets coming from the Query Favorite text macro
+		if(snippetControlCounter > -1) {
+			// Is the caret still inside a snippet
+			if([self checkForCaretInsideSnippet]) {
+				for(NSInteger i=0; i<snippetControlMax; i++) {
+					if(snippetControlArray[i].location > -1) {
+						NSRange snippetRange = NSMakeRange(snippetControlArray[i].location, snippetControlArray[i].length);
+						if(NSMaxRange(snippetRange) > [[self string] length])
+							continue;
+						// choose the colors for the snippet parts
+						if(i == currentSnippetIndex) {
+							[[NSColor colorWithCalibratedRed:1.0f green:0.6f blue:0.0f alpha:0.4f] setFill];
+							[[NSColor colorWithCalibratedRed:1.0f green:0.6f blue:0.0f alpha:0.8f] setStroke];
+						} else {
+							[[NSColor colorWithCalibratedRed:1.0f green:0.8f blue:0.2f alpha:0.2f] setFill];
+							[[NSColor colorWithCalibratedRed:1.0f green:0.8f blue:0.2f alpha:0.5f] setStroke];
 						}
+						NSBezierPath *snippetPath = [self roundedBezierPathAroundRange:snippetRange];
+						[snippetPath fill];
+						[snippetPath stroke];
 					}
-				} else {
-					[self endSnippetSession];
 				}
+			} else {
+				[self endSnippetSession];
 			}
-
 		}
 	}
 }
@@ -3310,6 +3435,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// - Select Active Query
 	// if it doesn't yet exist
 	NSMenu *menu = [[self class] defaultMenu];
+	id queryInstance = [self _effectiveCustomQueryInstance];
 
 	if ([[[self class] defaultMenu] itemWithTag:SP_CQ_SEARCH_IN_MYSQL_HELP_MENU_ITEM_TAG] == nil)
 	{
@@ -3336,7 +3462,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// Hide "Select Active Query" if self is not editable
 	[[menu itemAtIndex:4] setHidden:![self isEditable]];
 
-	if(customQueryInstance) {
+	if(queryInstance) {
 		[[menu itemAtIndex:5] setHidden:NO];
 		[[menu itemAtIndex:6] setHidden:NO];
 	} else {
@@ -3358,7 +3484,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSArray *bundleItems = [SPBundleManager.shared bundleItemsForScope:SPBundleScopeInputField];
 
 	// Add 'Bundles' sub menu for custom query editor only so far if bundles with scope 'editor' were found
-	if(customQueryInstance && bundleItems && [bundleItems count]) {
+	if(queryInstance && bundleItems && [bundleItems count]) {
 		[menu addItem:[NSMenuItem separatorItem]];
 
 		NSMenu *bundleMenu = [[NSMenu alloc] init];
@@ -3417,24 +3543,31 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	id helpTableDocumentInstance = [self _effectiveTableDocumentInstance];
 	// Enable or disable the search in the MySQL help menu item depending on whether there is a
 	// selection and whether it is a reasonable length.
-	if ([menuItem action] == @selector(showMySQLHelpForCurrentWord:)) {
-		if ([self selectedRange].length > 0) {
-			[menuItem setTitle:NSLocalizedString(@"MySQL Help for Selection", @"MySQL Help for Selection")];
-		} else {
-			[menuItem setTitle: NSLocalizedString(@"MySQL Help for Word", @"MySQL Help for Word")];
+		if ([menuItem action] == @selector(showMySQLHelpForCurrentWord:)) {
+			if ([self selectedRange].length > 0) {
+				[menuItem setTitle:NSLocalizedString(@"MySQL Help for Selection", @"MySQL Help for Selection")];
+			} else {
+				[menuItem setTitle: NSLocalizedString(@"MySQL Help for Word", @"MySQL Help for Word")];
+			}
+			NSUInteger stringSize = [self getRangeForCurrentWord].length;
+			return (0 < stringSize && stringSize < 65
+					&& ([helpTableDocumentInstance respondsToSelector:@selector(helpViewerClient)]
+						|| [queryInstance respondsToSelector:@selector(showMySQLHelpForCurrentWord:)])); // 1 ≤ stringSize ≤ 64
 		}
-		NSUInteger stringSize = [self getRangeForCurrentWord].length;
-		return (0 < stringSize && stringSize < 65); // 1 ≤ stringSize ≤ 64
-	}
 	// Enable Copy as RTF if something is selected
 	if ([menuItem action] == @selector(copyAsRTF)) {
 		return ([self selectedRange].length>0);
 	}
 	// Validate Select Active Query
 	if ([menuItem action] == @selector(selectCurrentQuery:)) {
-		return ([self isEditable] && [[self delegate] isKindOfClass:[SPCustomQuery class]]);
+		return ([self isEditable]
+				&& queryInstance
+				&& ([queryInstance respondsToSelector:@selector(selectCurrentQuery)]
+					|| [queryInstance respondsToSelector:@selector(selectCurrentQuery:)]));
 	}
 	// Disable "Copy with Column Names" and "Copy as SQL INSERT"
 	// in the main menu
@@ -3456,13 +3589,16 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	// If selection started/ended, redraw the background in the current query area
 	if ([self shouldHiliteQuery] && ((currentSelectionLength && !proposedSelRange.length) || (!currentSelectionLength && proposedSelRange.length))) {
-		NSUInteger i = 0, rectCount = 0;
-		NSRect* rectsToUpdate = [[self layoutManager] rectArrayForCharacterRange:[self queryRange]
-													withinSelectedCharacterRange:[self queryRange]
-																 inTextContainer:[self textContainer]
-																	   rectCount:&rectCount];
-		for (i = 0; i < rectCount; i++) {
-			[self setNeedsDisplayInRect:rectsToUpdate[i]];
+		NSRange queryRange = [self queryRange];
+		if(queryRange.length && NSMaxRange(queryRange) <= [[self string] length]) {
+			NSUInteger i = 0, rectCount = 0;
+			NSRect* rectsToUpdate = [[self layoutManager] rectArrayForCharacterRange:queryRange
+														withinSelectedCharacterRange:queryRange
+																	 inTextContainer:[self textContainer]
+																		   rectCount:&rectCount];
+			for (i = 0; i < rectCount; i++) {
+				[self setNeedsDisplayInRect:rectsToUpdate[i]];
+			}
 		}
 	}
 
@@ -3505,7 +3641,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// Do syntax highlighting/re-calculate snippet ranges only if the user really changed the text
 	if (editedMask != 1) {
 
-		[customQueryInstance setTextViewWasChanged:YES];
+		id queryInstance = [self _effectiveCustomQueryInstance];
+		if([queryInstance respondsToSelector:@selector(setTextViewWasChanged:)])
+			[queryInstance setTextViewWasChanged:YES];
 
 		// Re-calculate snippet ranges if snippet session is active
 		if(snippetControlCounter > -1 && !snippetWasJustInserted && !isProcessingMirroredSnippets) {
@@ -3571,7 +3709,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
         }
 
 	} else {
-		[customQueryInstance setTextViewWasChanged:NO];
+		id queryInstance = [self _effectiveCustomQueryInstance];
+		if([queryInstance respondsToSelector:@selector(setTextViewWasChanged:)])
+			[queryInstance setTextViewWasChanged:NO];
 		textBufferSizeIncreased = NO;
 	}
 }
@@ -3661,11 +3801,12 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 		NSString *currentDb = nil;
 		NSString *currentTable = nil;
+		id dragTablesListInstance = [self _effectiveTablesListInstance];
 
-		if (tablesListInstance && [tablesListInstance selectedDatabase])
-			currentDb = [tablesListInstance selectedDatabase];
-		if (tablesListInstance && [tablesListInstance tableName])
-			currentTable = [tablesListInstance tableName];
+		if ([dragTablesListInstance respondsToSelector:@selector(selectedDatabase)] && [dragTablesListInstance selectedDatabase])
+			currentDb = [dragTablesListInstance selectedDatabase];
+		if ([dragTablesListInstance respondsToSelector:@selector(tableName)] && [dragTablesListInstance tableName])
+			currentTable = [dragTablesListInstance tableName];
 
 		if(!currentDb) currentDb = @"";
 		if(!currentTable) currentTable = @"";
