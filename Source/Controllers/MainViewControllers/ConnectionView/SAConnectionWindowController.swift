@@ -253,5 +253,10 @@ private extension SPConnectionController {
         sshKeyLocationEnabled = info.sshKeyLocationEnabled
         sshKeyLocation = info.sshKeyLocation
         sshPort = info.sshPort
+        sshRemoteSocketPath = info.sshRemoteSocketPath
+        vaultHost = info.vaultHost
+        vaultPort = info.vaultPort
+        vaultOIDCMount = info.vaultOIDCMount
+        vaultCredentialsPath = info.vaultCredentialsPath
     }
 }

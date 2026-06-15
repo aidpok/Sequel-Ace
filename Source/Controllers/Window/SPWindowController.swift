@@ -98,6 +98,11 @@ enum SALightweightConnectionDictionaryKey {
     static let sshKeyLocationEnabled = "ssh_keyLocationEnabled"
     static let sshKeyLocation = "ssh_keyLocation"
     static let sshPort = "ssh_port"
+    static let sshRemoteSocketPath = "sshRemoteSocketPath"
+    static let vaultHost = "vault_host"
+    static let vaultPort = "vault_port"
+    static let vaultOIDCMount = "vault_oidc_mount"
+    static let vaultCredentialsPath = "vault_credentials_path"
     static let connectionKeychainItemName = "connectionKeychainItemName"
     static let connectionKeychainItemAccount = "connectionKeychainItemAccount"
     static let connectionSSHKeychainItemName = "connectionSSHKeychainItemName"
@@ -716,7 +721,11 @@ final class SALightweightSessionState {
     var lightweightTableTypes: [String: SALightweightTableObjectType] = [:]
     var lightweightTableComments: [String: String] = [:]
     var lightweightPinnedTables: Set<String> = []
-    var lightweightTableInfoRows: [String] = [NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane")]
+    var lightweightTableInfoRows: [String] = [NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane")] {
+        didSet {
+            lightweightTableInfoView.rows = lightweightTableInfoRows
+        }
+    }
     var lightweightTableInfoLoadToken = UUID()
     var selectedTable: String?
     var activeConnectionName: String?
@@ -809,39 +818,13 @@ final class SALightweightSessionState {
         return tableView
     }()
 
-    lazy var lightweightTableInfoView: NSTableView = {
-        let tableView = SPTableView(frame: .zero)
-        tableView.identifier = NSUserInterfaceItemIdentifier("LightweightTableInfo")
-        tableView.headerView = nil
-        tableView.focusRingType = .none
-        tableView.allowsExpansionToolTips = true
-        tableView.allowsColumnReordering = false
-        tableView.allowsTypeSelect = false
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.selectionHighlightStyle = .sourceList
-        tableView.allowsEmptySelection = true
-        tableView.allowsMultipleSelection = false
-        tableView.columnAutoresizingStyle = .sequentialColumnAutoresizingStyle
-        tableView.intercellSpacing = NSSize(width: 3, height: 2)
-        if #available(macOS 11.0, *) {
-            tableView.style = .sourceList
-        }
-        tableView.rowHeight = Self.lightweightInfoRowHeight(for: UserDefaults.getFont())
-        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tableInfo"))
-        tableColumn.width = 182
-        tableColumn.minWidth = 50
-        tableColumn.maxWidth = 3000
-        tableColumn.resizingMask = .autoresizingMask
-        let tableCell = SPTableTextFieldCell(textCell: "")
-        tableCell.lineBreakMode = .byTruncatingTail
-        tableCell.isSelectable = false
-        tableCell.isEditable = false
-        tableCell.controlSize = .small
-        tableCell.font = UserDefaults.getFont()
-        tableColumn.dataCell = tableCell
-        tableView.addTableColumn(tableColumn)
-        return tableView
+    lazy var lightweightTableInfoView: SALightweightTableInfoSidebarView = {
+        let view = SALightweightTableInfoSidebarView(frame: .zero)
+        let tableFont = UserDefaults.getFont()
+        view.rows = lightweightTableInfoRows
+        view.font = tableFont
+        view.rowHeight = Self.lightweightInfoRowHeight(for: tableFont)
+        return view
     }()
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
