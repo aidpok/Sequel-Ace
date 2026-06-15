@@ -479,8 +479,28 @@ extension SPWindowController {
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Toggle Pin Table", comment: "toggle pin table menu item"), #selector(togglePinLightweightTable(_:)), to: actionButton.menu)
         addLightweightSidebarAction(NSLocalizedString("Open Table in New Tab", comment: "open table in new tab title"), #selector(openLightweightTableInNewTab(_:)), to: actionButton.menu)
+        addLightweightSidebarAction(NSLocalizedString("Open Table in New Window", comment: "open table in new window title"), #selector(openLightweightTableInNewWindow(_:)), to: actionButton.menu)
+        actionButton.menu?.addItem(.separator())
+        let exportItem = NSMenuItem(title: NSLocalizedString("Export", comment: "export selected table submenu title"), action: nil, keyEquivalent: "")
+        let exportMenu = NSMenu(title: exportItem.title)
+        addLightweightSidebarAction(NSLocalizedString("As SQL dump...", comment: "export selected table as sql menu item"),
+                                    #selector(exportSelectedLightweightTableAs(_:)),
+                                    to: exportMenu,
+                                    tag: 0)
+        addLightweightSidebarAction(NSLocalizedString("As CSV file...", comment: "export selected table as csv menu item"),
+                                    #selector(exportSelectedLightweightTableAs(_:)),
+                                    to: exportMenu,
+                                    tag: 1)
+        addLightweightSidebarAction(NSLocalizedString("As XML file...", comment: "export selected table as xml menu item"),
+                                    #selector(exportSelectedLightweightTableAs(_:)),
+                                    to: exportMenu,
+                                    tag: 2)
+        exportItem.submenu = exportMenu
+        lightweightSelectedTableExportMenuItem = exportItem
+        actionButton.menu?.addItem(exportItem)
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Refresh Tables", comment: "refresh tables menu item"), #selector(refreshLightweightTables), to: actionButton.menu)
+        updateLightweightSidebarActionMenuState()
         lightweightSidebarButtonBar.addSubview(actionButton)
 
         let refreshButton = NSButton(frame: NSRect(x: 70, y: 0, width: 25, height: 25))
@@ -512,9 +532,10 @@ extension SPWindowController {
         lightweightSidebarButtonBar.addSubview(handle)
     }
 
-    func addLightweightSidebarAction(_ title: String, _ action: Selector, to menu: NSMenu?) {
+    func addLightweightSidebarAction(_ title: String, _ action: Selector, to menu: NSMenu?, tag: Int = 0) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
+        item.tag = tag
         menu?.addItem(item)
     }
 }

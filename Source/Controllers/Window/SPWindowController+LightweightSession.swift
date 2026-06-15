@@ -63,6 +63,12 @@ extension SPWindowController {
         return hasActiveLightweightConnection && selectedTable?.isEmpty == false
     }
 
+    @objc var selectedLightweightTableObjectType: Int {
+        guard hasSelectedLightweightTable, let selectedTable = selectedTable else { return SALightweightTableObjectType.none.rawValue }
+
+        return (lightweightTableTypes[selectedTable] ?? .table).rawValue
+    }
+
     @objc func chooseLightweightEncoding(_ sender: Any) {
         if let document = loadedDatabaseDocument {
             document.chooseEncoding(sender)
@@ -307,4 +313,3 @@ extension SPWindowController {
         return (value as? NSNumber)?.boolValue ?? (value as? Bool ?? defaultValue)
     }
 }
-

@@ -55,6 +55,7 @@
 #import "SPFavoritesOutlineView.h"
 #import "SPQueryController.h"
 #import "SPNavigatorController.h"
+#import "SPTablesList.h"
 
 #import "sequel-ace-Swift.h"
 
@@ -69,9 +70,14 @@ static NSString *SALightweightResumeConsoleKey = @"console";
 static NSString *SALightweightResumeConsoleVisibleKey = @"visible";
 static NSString *SALightweightResumeConsoleFrameKey = @"frame";
 static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
+static const NSInteger SALightweightTableObjectTypeTableValue = 0;
+static const NSInteger SALightweightTableObjectTypeViewValue = 1;
+static const NSInteger SALightweightTableObjectTypeProcedureValue = 2;
+static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
 
 @interface SPAppController ()
 @property (strong) IBOutlet NSMenu *mainMenu;
+@property (assign) BOOL lightweightTableMenuIsConfigured;
 
 - (void)_copyDefaultThemes;
 
@@ -101,6 +107,10 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 - (void)cancelScheduledLightweightResumeStateSave;
 - (BOOL)bundleCommandScope:(NSString *)scope canRunWithFirstResponder:(id)firstResponder;
 - (BOOL)bundleCommandMenuItemCanRun:(NSMenuItem *)menuItem;
+- (void)resetTableMenuState;
+- (void)restoreTableMenuStateForDatabaseDocument:(SPDatabaseDocument *)document;
+- (void)configureLightweightTableMenuForWindowController:(SPWindowController *)windowController;
+- (BOOL)validateLightweightTableMaintenanceMenuItem:(NSMenuItem *)menuItem forWindowController:(SPWindowController *)windowController;
 - (SPDatabaseDocument *)connectedDatabaseDocumentForWindowController:(SPWindowController *)windowController;
 - (BOOL)windowControllerHasActiveConnectionTarget:(SPWindowController *)windowController;
 - (SPWindowController *)keyWindowControllerWithActiveConnectionTarget;
@@ -997,6 +1007,157 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     return [self bundleCommandScope:scope canRunWithFirstResponder:[[NSApp keyWindow] firstResponder]];
 }
 
+- (void)configureMenuItemInMenu:(NSMenu *)menu action:(SEL)action title:(NSString *)title hidden:(BOOL)hidden
+{
+    for (NSMenuItem *item in [menu itemArray]) {
+        if ([item action] == action) {
+            [item setTitle:title];
+            [item setHidden:hidden];
+            return;
+        }
+    }
+}
+
+- (void)configureMenuItemInMenu:(NSMenu *)menu atIndex:(NSInteger)index hidden:(BOOL)hidden
+{
+    if (index < 0 || index >= (NSInteger)[menu numberOfItems]) return;
+
+    [[menu itemAtIndex:index] setHidden:hidden];
+}
+
+- (void)resetTableMenuState
+{
+    NSMenu *tableSubMenu = [[[NSApp mainMenu] itemWithTag:SPMainMenuTable] submenu];
+    if (!tableSubMenu) return;
+
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(copyCreateTableSyntax:)
+                            title:NSLocalizedString(@"Copy Create Table Syntax", @"copy create table syntax menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(showCreateTableSyntax:)
+                            title:NSLocalizedString(@"Show Create Table Syntax...", @"show create table syntax menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(checkTable:)
+                            title:NSLocalizedString(@"Check Table", @"check table menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(repairTable:)
+                            title:NSLocalizedString(@"Repair Table", @"repair table menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(analyzeTable:)
+                            title:NSLocalizedString(@"Analyze Table", @"analyze table menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(optimizeTable:)
+                            title:NSLocalizedString(@"Optimize Table", @"optimize table menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(flushTable:)
+                            title:NSLocalizedString(@"Flush Table", @"flush table menu item")
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(checksumTable:)
+                            title:NSLocalizedString(@"Checksum Table", @"checksum table menu item")
+                           hidden:NO];
+
+    [self configureMenuItemInMenu:tableSubMenu atIndex:6 hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu atIndex:9 hidden:NO];
+}
+
+- (void)restoreTableMenuStateForDatabaseDocument:(SPDatabaseDocument *)document
+{
+    SPTablesList *tablesList = [document tablesListInstance];
+    if (!tablesList) {
+        [self resetTableMenuState];
+        return;
+    }
+
+    NSString *tableName = [tablesList tableName];
+    if (tableName) {
+        [tablesList setSelectionState:@{
+            @"name": tableName,
+            @"type": @([tablesList tableType])
+        }];
+    } else {
+        [tablesList setSelectionState:nil];
+    }
+}
+
+- (void)configureLightweightTableMenuForWindowController:(SPWindowController *)windowController
+{
+    NSMenu *tableSubMenu = [[[NSApp mainMenu] itemWithTag:SPMainMenuTable] submenu];
+    if (!tableSubMenu) return;
+    self.lightweightTableMenuIsConfigured = YES;
+
+    NSInteger objectType = [windowController selectedLightweightTableObjectType];
+    BOOL hasSelection = [windowController hasSelectedLightweightTable];
+    BOOL selectedTable = hasSelection && objectType == SALightweightTableObjectTypeTableValue;
+    BOOL selectedView = hasSelection && objectType == SALightweightTableObjectTypeViewValue;
+    BOOL selectedProcedure = hasSelection && objectType == SALightweightTableObjectTypeProcedureValue;
+    BOOL selectedFunction = hasSelection && objectType == SALightweightTableObjectTypeFunctionValue;
+    BOOL selectedRoutine = selectedProcedure || selectedFunction;
+
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(copyCreateTableSyntax:)
+                            title:(selectedView ? NSLocalizedString(@"Copy Create View Syntax", @"copy create view syntax menu item") :
+                                   selectedProcedure ? NSLocalizedString(@"Copy Create Procedure Syntax", @"copy create proc syntax menu item") :
+                                   selectedFunction ? NSLocalizedString(@"Copy Create Function Syntax", @"copy create func syntax menu item") :
+                                   NSLocalizedString(@"Copy Create Table Syntax", @"copy create table syntax menu item"))
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(showCreateTableSyntax:)
+                            title:(selectedView ? NSLocalizedString(@"Show Create View Syntax...", @"show create view syntax menu item") :
+                                   selectedProcedure ? NSLocalizedString(@"Show Create Procedure Syntax...", @"show create proc syntax menu item") :
+                                   selectedFunction ? NSLocalizedString(@"Show Create Function Syntax...", @"show create func syntax menu item") :
+                                   NSLocalizedString(@"Show Create Table Syntax...", @"show create table syntax menu item"))
+                           hidden:NO];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(checkTable:)
+                            title:(selectedView ? NSLocalizedString(@"Check View", @"check view menu item") : NSLocalizedString(@"Check Table", @"check table menu item"))
+                           hidden:selectedRoutine];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(repairTable:)
+                            title:NSLocalizedString(@"Repair Table", @"repair table menu item")
+                           hidden:(hasSelection && !selectedTable)];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(analyzeTable:)
+                            title:NSLocalizedString(@"Analyze Table", @"analyze table menu item")
+                           hidden:(hasSelection && !selectedTable)];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(optimizeTable:)
+                            title:NSLocalizedString(@"Optimize Table", @"optimize table menu item")
+                           hidden:(hasSelection && !selectedTable)];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(flushTable:)
+                            title:(selectedView ? NSLocalizedString(@"Flush View", @"flush view menu item") : NSLocalizedString(@"Flush Table", @"flush table menu item"))
+                           hidden:selectedRoutine];
+    [self configureMenuItemInMenu:tableSubMenu
+                           action:@selector(checksumTable:)
+                            title:NSLocalizedString(@"Checksum Table", @"checksum table menu item")
+                           hidden:(hasSelection && !selectedTable)];
+
+    [self configureMenuItemInMenu:tableSubMenu atIndex:6 hidden:selectedRoutine];
+    [self configureMenuItemInMenu:tableSubMenu atIndex:9 hidden:(hasSelection && !selectedTable)];
+}
+
+- (BOOL)validateLightweightTableMaintenanceMenuItem:(NSMenuItem *)menuItem forWindowController:(SPWindowController *)windowController
+{
+    NSInteger objectType = [windowController selectedLightweightTableObjectType];
+    BOOL hasSelection = [windowController hasSelectedLightweightTable];
+    BOOL selectedTable = hasSelection && objectType == SALightweightTableObjectTypeTableValue;
+    BOOL selectedView = hasSelection && objectType == SALightweightTableObjectTypeViewValue;
+    SEL action = [menuItem action];
+
+    if (action == @selector(checkTable:) || action == @selector(flushTable:)) {
+        return selectedTable || selectedView;
+    }
+
+    return selectedTable;
+}
+
 /**
  * Menu item validation.
  */
@@ -1040,8 +1201,17 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
 
     activeDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
     if (activeDocument) {
+        if (self.lightweightTableMenuIsConfigured) {
+            [self restoreTableMenuStateForDatabaseDocument:activeDocument];
+            self.lightweightTableMenuIsConfigured = NO;
+        }
         isValid = [activeDocument validateMenuItem:menuItem];
         goto validateMenuItemDone;
+    }
+
+    if (![activeWindowController hasActiveLightweightConnection] && self.lightweightTableMenuIsConfigured) {
+        [self resetTableMenuState];
+        self.lightweightTableMenuIsConfigured = NO;
     }
 
     if (action == @selector(bundleCommandDispatcher:)) {
@@ -1050,6 +1220,8 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
     }
 
     if ([activeWindowController hasActiveLightweightConnection]) {
+        [self configureLightweightTableMenuForWindowController:activeWindowController];
+
         if (action == @selector(export:)) {
             isValid = [activeWindowController canExportLightweightData];
             goto validateMenuItemDone;
@@ -1116,6 +1288,17 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
             goto validateMenuItemDone;
         }
 
+        if (action == @selector(checkTable:) ||
+            action == @selector(analyzeTable:) ||
+            action == @selector(repairTable:) ||
+            action == @selector(optimizeTable:) ||
+            action == @selector(flushTable:) ||
+            action == @selector(checksumTable:))
+        {
+            isValid = [self validateLightweightTableMaintenanceMenuItem:menuItem forWindowController:activeWindowController];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(removeDatabase:) ||
             action == @selector(copyDatabase:) ||
             action == @selector(renameDatabase:) ||
@@ -1154,7 +1337,13 @@ static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
         action == @selector(showServerProcesses:) ||
         action == @selector(shutdownServer:) ||
         action == @selector(copyCreateTableSyntax:) ||
-        action == @selector(showCreateTableSyntax:))
+        action == @selector(showCreateTableSyntax:) ||
+        action == @selector(checkTable:) ||
+        action == @selector(analyzeTable:) ||
+        action == @selector(repairTable:) ||
+        action == @selector(optimizeTable:) ||
+        action == @selector(flushTable:) ||
+        action == @selector(checksumTable:))
     {
         isValid = NO;
         goto validateMenuItemDone;
@@ -1368,8 +1557,15 @@ validateMenuItemDone:
         [[NSUserDefaults standardUserDefaults] setInteger:[[encodingPopUp selectedItem] tag] forKey:SPLastSQLFileEncoding];
     }
 
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
+    if ([activeWindowController hasActiveLightweightConnection] && ![activeWindowController loadedDatabaseDocumentIfAvailable]) {
+        [activeWindowController doPerformLightweightLoadQueryService:sqlString];
+        [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+        return;
+    }
+
     // Check if at least one document exists.  If not, open one.
-    if (![self.tabManager activeWindowController]) {
+    if (!activeWindowController) {
         frontDocument = [self.tabManager newWindowForWindow].databaseDocument;
         [frontDocument initQueryEditorWithString:sqlString];
     }

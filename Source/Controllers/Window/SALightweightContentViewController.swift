@@ -67,6 +67,12 @@ final class SALightweightContentViewController: NSViewController {
         let columnFilter: String?
     }
 
+    private enum MutationReloadPolicy {
+        case reload
+        case leaveCurrentRows
+        case removeRows(IndexSet)
+    }
+
     fileprivate struct ContentFilterDefinition {
         let title: String
         let clause: String
@@ -133,7 +139,7 @@ final class SALightweightContentViewController: NSViewController {
     private var isApplyingProgrammaticColumnWidths = false
     private let autosizeCoordinator = SALightweightResultGridAutosizeCoordinator()
     private var displayedColumnSignature: [String] = []
-    private var isRuleFilterVisible = true
+    private var isRuleFilterVisible = UserDefaults.standard.bool(forKey: SPRuleFilterEditorLastVisibilityChoice)
     private var isRuleFilterActive = false
     private var advancedFilterWhereClause: String?
     private var isAdvancedFilterDistinct = false
@@ -526,6 +532,7 @@ final class SALightweightContentViewController: NSViewController {
             UserDefaults.standard.removeObserver(self, forKeyPath: SPDisplayBinaryDataAsHex)
             UserDefaults.standard.removeObserver(self, forKeyPath: SPNullValue)
             UserDefaults.standard.removeObserver(self, forKeyPath: SPLoadBlobsAsNeeded)
+            UserDefaults.standard.removeObserver(self, forKeyPath: SPEditInSheetEnabled)
         }
     }
 
@@ -547,6 +554,8 @@ final class SALightweightContentViewController: NSViewController {
             contentCache.removeAll()
             contentCacheOrder.removeAll()
             loadCurrentPage()
+        case SPEditInSheetEnabled:
+            updateControls()
         default:
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
@@ -1201,7 +1210,8 @@ private extension SALightweightContentViewController {
     @objc func addRow(_ sender: Any?) {
         guard connection != nil, canModifyRows else { return }
 
-        runMutation(status: NSLocalizedString("Adding row...", comment: "lightweight content adding row")) { [database, table] connection in
+        let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
+        runMutation(status: NSLocalizedString("Adding row...", comment: "lightweight content adding row"), reloadPolicy: reloadPolicy) { [database, table] connection in
             let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) () VALUES ()"
             _ = connection.queryString(query)
         }
@@ -1220,7 +1230,8 @@ private extension SALightweightContentViewController {
             return
         }
 
-        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row")) { [database, table] connection in
+        let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
+        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy) { [database, table] connection in
             let columnList = columnsToInsert.map { Self.backtickQuoted($0.element.name) }.joined(separator: ", ")
             let valueList = columnsToInsert.compactMap { Self.sqlValue(row.values[$0.offset], columnInfo: $0.element, connection: connection) }.joined(separator: ", ")
             let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) (\(columnList)) VALUES (\(valueList))"
@@ -1269,7 +1280,8 @@ private extension SALightweightContentViewController {
         }
 
         let rowsToDelete = selectedIndexes.compactMap { index in index < rows.count ? rows[index] : nil }
-        runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows")) { [database, table, columnInfo] connection in
+        let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterRemovingRow) ? .reload : .removeRows(selectedIndexes)
+        runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows"), reloadPolicy: reloadPolicy) { [database, table, columnInfo] connection in
             for row in rowsToDelete {
                 guard let whereClause = Self.rowIdentityWhereClause(for: row.originalValues, columnInfo: columnInfo, connection: connection) else { continue }
                 let limit = columnInfo.contains { $0.isPrimary } ? "" : " LIMIT 1"
@@ -1336,7 +1348,7 @@ private extension SALightweightContentViewController {
         SALightweightResultGrid.exportResult(fileExtension: fileExtension, content: content, defaultName: "\(table).\(fileExtension)")
     }
 
-    func runMutation(status: String, mutation: @escaping (SPMySQLConnection) -> Void) {
+    private func runMutation(status: String, reloadPolicy: MutationReloadPolicy = .reload, mutation: @escaping (SPMySQLConnection) -> Void) {
         guard let connection = connection else { return }
 
         statusLabel.stringValue = status
@@ -1359,11 +1371,44 @@ private extension SALightweightContentViewController {
                     return
                 }
 
-                self.invalidateCurrentContentCache()
-                self.tableContentDidChange?()
-                self.loadCurrentPage()
+                self.finishSuccessfulMutation(reloadPolicy: reloadPolicy)
             }
         }
+    }
+
+    private func finishSuccessfulMutation(reloadPolicy: MutationReloadPolicy) {
+        invalidateCurrentContentCache()
+        tableContentDidChange?()
+
+        switch reloadPolicy {
+        case .reload:
+            loadCurrentPage()
+        case .leaveCurrentRows:
+            statusLabel.stringValue = NSLocalizedString("Rows changed. Reload to view the latest data.", comment: "lightweight content mutation no reload status")
+            updateControls()
+        case .removeRows(let rowIndexes):
+            removeRowsLocally(rowIndexes)
+            statusLabel.stringValue = NSLocalizedString("Rows deleted.", comment: "lightweight content rows deleted status")
+            updateControls()
+        }
+    }
+
+    private func removeRowsLocally(_ rowIndexes: IndexSet) {
+        let validIndexes = rowIndexes.filter { $0 >= 0 && $0 < rows.count }
+        guard !validIndexes.isEmpty else { return }
+
+        for index in validIndexes.sorted(by: >) {
+            rows.remove(at: index)
+        }
+
+        if let totalRowCount = totalRowCount {
+            self.totalRowCount = max(0, totalRowCount - validIndexes.count)
+        }
+
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
+        tableView.reloadData()
+        tableView.noteNumberOfRowsChanged()
     }
 
     func applyColumnFilter() {
@@ -2131,6 +2176,7 @@ private extension SALightweightContentViewController {
         UserDefaults.standard.addObserver(self, forKeyPath: SPDisplayBinaryDataAsHex, options: .new, context: nil)
         UserDefaults.standard.addObserver(self, forKeyPath: SPNullValue, options: .new, context: nil)
         UserDefaults.standard.addObserver(self, forKeyPath: SPLoadBlobsAsNeeded, options: .new, context: nil)
+        UserDefaults.standard.addObserver(self, forKeyPath: SPEditInSheetEnabled, options: .new, context: nil)
         didRegisterPreferenceObservers = true
     }
 

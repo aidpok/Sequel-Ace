@@ -33,14 +33,15 @@ extension SPWindowController {
     }
 
     @objc func copyLightweightTableName(_ sender: Any?) {
-        guard let selectedTable = selectedTable else {
+        guard let selectedDatabase = selectedDatabase,
+              let selectedTable = selectedTable else {
             NSSound.beep()
             return
         }
 
         let pasteboard = NSPasteboard.general
         pasteboard.declareTypes([.string], owner: self)
-        pasteboard.setString(selectedTable, forType: .string)
+        pasteboard.setString("\(selectedDatabase).\(selectedTable)", forType: .string)
     }
 
     @objc func renameLightweightTable(_ sender: Any?) {
@@ -156,6 +157,67 @@ extension SPWindowController {
             "isLightweight": true,
             "lightweightState": state
         ])
+    }
+
+    @objc func openLightweightTableInNewWindow(_ sender: Any?) {
+        guard selectedTable != nil,
+              let state = lightweightConnectionStateDictionary(includePasswords: true, includeSession: true, includeQuery: true),
+              let appController = NSApp.delegate as? SPAppController else {
+            NSSound.beep()
+            return
+        }
+
+        let newWindowController = appController.tabManager.newWindowForWindow()
+        if !newWindowController.restoreLightweightConnectionStateDictionary(state) {
+            newWindowController.close()
+            NSSound.beep()
+        }
+    }
+
+    @objc func exportSelectedLightweightTableAs(_ sender: Any?) {
+        guard loadedDatabaseDocument == nil,
+              hasSelectedLightweightTable,
+              let selectedTable = selectedTable else {
+            NSSound.beep()
+            return
+        }
+
+        let objectType = lightweightTableTypes[selectedTable] ?? .table
+        guard objectType == .table || objectType == .view else {
+            NSSound.beep()
+            return
+        }
+
+        let tag = (sender as? NSMenuItem)?.tag ?? 0
+        guard tag >= 0, tag <= 2,
+              let format = SPExportType(rawValue: UInt(tag)),
+              let controller = configuredLightweightExportController(preferredSource: SALightweightExportSource.tableExport,
+                                                                     selectedTableItems: [selectedTable],
+                                                                     tableNames: [selectedTable]) else {
+            NSSound.beep()
+            return
+        }
+
+        lightweightExportController = controller
+        controller.exportTables([selectedTable], asFormat: format, using: SALightweightExportSource.tableExport)
+    }
+
+    var canExportSelectedLightweightTable: Bool {
+        guard loadedDatabaseDocument == nil,
+              hasSelectedLightweightTable,
+              let selectedTable = selectedTable else {
+            return false
+        }
+
+        let objectType = lightweightTableTypes[selectedTable] ?? .table
+        return objectType == .table || objectType == .view
+    }
+
+    func updateLightweightSidebarActionMenuState() {
+        let canExport = canExportSelectedLightweightTable
+        lightweightSelectedTableExportMenuItem?.isHidden = !canExport
+        lightweightSelectedTableExportMenuItem?.isEnabled = canExport
+        lightweightSelectedTableExportMenuItem?.submenu?.items.forEach { $0.isEnabled = canExport }
     }
 
     func promptForLightweightName(title: String,
@@ -385,7 +447,7 @@ extension SPWindowController {
         duplicateContent.frame = NSRect(x: 17, y: 43, width: 227, height: 18)
         duplicateContent.controlSize = .small
         duplicateContent.font = .messageFont(ofSize: 11)
-        duplicateContent.state = tableType == .table ? .on : .off
+        duplicateContent.state = (tableType == .table && UserDefaults.standard.bool(forKey: SPCopyContentOnTableCopy)) ? .on : .off
         duplicateContent.isEnabled = tableType == .table
         let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 61, y: 13, width: 91, height: 28), keyEquivalent: "\u{1b}")
         let duplicateButton = legacyButton(title: NSLocalizedString("Duplicate", comment: "duplicate table button"), frame: NSRect(x: 150, y: 13, width: 97, height: 28), keyEquivalent: "\r")
@@ -570,7 +632,14 @@ extension SPWindowController {
             case .content:
                 lightweightContentController.loadContent(for: selectedTable, database: selectedDatabase, connection: activeConnection)
             case .query:
-                lightweightQueryController.loadQuery(database: selectedDatabase, table: selectedTable, connection: activeConnection)
+                let fieldNames = lightweightStructureController.cachedColumnMetadata(for: selectedTable, database: selectedDatabase)?.compactMap { $0["name"] } ?? []
+                lightweightQueryController.loadQuery(database: selectedDatabase,
+                                                     table: selectedTable,
+                                                     connection: activeConnection,
+                                                     databases: lightweightDatabases,
+                                                     tables: lightweightTables,
+                                                     tableTypes: lightweightTableTypes,
+                                                     fieldNames: fieldNames)
             case .status:
                 lightweightTableInfoController.loadTableInfo(for: selectedTable, database: selectedDatabase, connection: activeConnection)
             case .relations:
