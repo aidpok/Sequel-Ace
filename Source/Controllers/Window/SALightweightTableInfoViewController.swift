@@ -29,6 +29,7 @@
 //
 
 import AppKit
+import SwiftUI
 
 struct SALightweightTableInfoRow {
     let label: String
@@ -58,6 +59,107 @@ struct SALightweightTableInfoSnapshot {
 struct SALightweightTableInfoEncodingOption {
     let title: String
     let name: String
+}
+
+final class SALightweightTableInfoSidebarView: NSView {
+    var rows: [String] = [] {
+        didSet {
+            updateContent()
+        }
+    }
+
+    var font: NSFont = UserDefaults.getFont() {
+        didSet {
+            updateContent()
+        }
+    }
+
+    var rowHeight: CGFloat = 17 {
+        didSet {
+            updateContent()
+        }
+    }
+
+    private lazy var hostingView = NSHostingView(rootView: contentView())
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureView()
+    }
+
+    func reloadData() {
+        updateContent()
+    }
+
+    private func configureView() {
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = [.width, .height]
+        addSubview(hostingView)
+    }
+
+    private func updateContent() {
+        hostingView.rootView = contentView()
+    }
+
+    private func contentView() -> SALightweightTableInfoSidebarContentView {
+        return SALightweightTableInfoSidebarContentView(rows: rows,
+                                                        fontName: font.fontName,
+                                                        fontSize: font.pointSize,
+                                                        rowHeight: rowHeight,
+                                                        propertyImage: NSImage(named: "table-property"))
+    }
+}
+
+private struct SALightweightTableInfoSidebarContentView: View {
+    let rows: [String]
+    let fontName: String
+    let fontSize: CGFloat
+    let rowHeight: CGFloat
+    let propertyImage: NSImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                rowView(row, isHeader: index == 0)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.clear)
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: String, isHeader: Bool) -> some View {
+        HStack(spacing: 5) {
+            if isHeader {
+                Spacer()
+                    .frame(width: 16, height: 16)
+            } else if let propertyImage {
+                Image(nsImage: propertyImage)
+                    .resizable()
+                    .frame(width: 16, height: 16)
+            } else {
+                Spacer()
+                    .frame(width: 16, height: 16)
+            }
+
+            Text(row)
+                .font(isHeader ? .system(size: NSFont.smallSystemFontSize, weight: .bold) : Font.custom(fontName, size: fontSize))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(row)
+        }
+        .padding(.leading, 2)
+        .padding(.trailing, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: isHeader ? 25 : rowHeight)
+    }
 }
 
 enum SALightweightTableInfoLoader {

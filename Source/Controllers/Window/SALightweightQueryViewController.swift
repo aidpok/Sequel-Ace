@@ -28,6 +28,7 @@
 //  More info at <https://github.com/Sequel-Ace/Sequel-Ace>
 
 import AppKit
+import UniformTypeIdentifiers
 
 @objcMembers
 private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
@@ -2700,7 +2701,9 @@ private extension SALightweightQueryViewController {
         let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
         let encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
         let panel = NSSavePanel()
-        panel.allowedFileTypes = [SPFileExtensionSQL]
+        if let contentType = UTType(filenameExtension: SPFileExtensionSQL as String) {
+            panel.allowedContentTypes = [contentType]
+        }
         panel.isExtensionHidden = false
         panel.allowsOtherFileTypes = true
         panel.canSelectHiddenExtension = true

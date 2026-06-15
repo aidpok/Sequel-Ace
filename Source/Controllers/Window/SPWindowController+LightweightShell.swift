@@ -4,6 +4,7 @@
 //
 
 import Cocoa
+import UniformTypeIdentifiers
 
 extension SPWindowController {
     func setupAppearance() {
@@ -65,7 +66,9 @@ extension SPWindowController {
         let panel = NSSavePanel()
         panel.allowsOtherFileTypes = false
         panel.canSelectHiddenExtension = true
-        panel.allowedFileTypes = [SPFileExtensionSQL as String]
+        if let contentType = UTType(filenameExtension: SPFileExtensionSQL as String) {
+            panel.allowedContentTypes = [contentType]
+        }
         panel.nameFieldStringValue = UserDefaults.standard.string(forKey: "lastSqlFileName") ?? ""
         panel.beginSheetModal(for: window ?? NSApp.keyWindow ?? NSApp.mainWindow ?? NSWindow()) { response in
             guard response == .OK, let url = panel.url else { return }
@@ -367,25 +370,14 @@ extension SPWindowController {
         lightweightTableInfoPane.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: tableInfoHeight)
         lightweightTableInfoPane.autoresizingMask = [.width, .height]
         lightweightTableInfoPane.wantsLayer = true
-        let tableInfoScrollView = NSScrollView(frame: lightweightTableInfoPane.bounds)
-        tableInfoScrollView.autoresizingMask = [.width, .height]
-        tableInfoScrollView.focusRingType = .none
-        tableInfoScrollView.borderType = .noBorder
-        tableInfoScrollView.autohidesScrollers = true
-        tableInfoScrollView.hasHorizontalScroller = false
-        tableInfoScrollView.hasVerticalScroller = false
-        tableInfoScrollView.drawsBackground = false
-        tableInfoScrollView.contentView.drawsBackground = false
-        lightweightTableInfoView.frame = tableInfoScrollView.bounds
+        lightweightTableInfoView.frame = lightweightTableInfoPane.bounds
         lightweightTableInfoView.autoresizingMask = [.width, .height]
-        tableInfoScrollView.documentView = lightweightTableInfoView
-        lightweightTableInfoPane.addSubview(tableInfoScrollView)
+        lightweightTableInfoPane.addSubview(lightweightTableInfoView)
 
         lightweightSidebarSplitView.addArrangedSubview(lightweightTablesPane)
         lightweightSidebarSplitView.addArrangedSubview(lightweightTableInfoPane)
         lightweightSidebarView.addSubview(lightweightSidebarSplitView)
         tablesListView.tableColumns.first?.width = tableScrollView.bounds.width
-        lightweightTableInfoView.tableColumns.first?.width = tableInfoScrollView.bounds.width
 
         lightweightSidebarButtonBar.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: sidebarButtonBarHeight)
         lightweightSidebarButtonBar.autoresizingMask = [.width, .maxYMargin]

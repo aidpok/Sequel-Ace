@@ -191,8 +191,26 @@ extension SPWindowController {
             if let sshPort = Int(info.sshPort), sshPort > 0 {
                 connection[SALightweightConnectionDictionaryKey.sshPort] = sshPort
             }
+            if !info.sshRemoteSocketPath.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.sshRemoteSocketPath] = info.sshRemoteSocketPath
+            }
             if includePasswords {
                 connection[SALightweightConnectionDictionaryKey.sshPassword] = info.sshPassword
+            }
+        }
+
+        if info.type == .vault {
+            if !info.vaultHost.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.vaultHost] = info.vaultHost
+            }
+            if !info.vaultPort.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.vaultPort] = info.vaultPort
+            }
+            if !info.vaultOIDCMount.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.vaultOIDCMount] = info.vaultOIDCMount
+            }
+            if !info.vaultCredentialsPath.isEmpty {
+                connection[SALightweightConnectionDictionaryKey.vaultCredentialsPath] = info.vaultCredentialsPath
             }
         }
 
@@ -251,6 +269,11 @@ extension SPWindowController {
         info.sshKeyLocationEnabled = Self.intValue(connection[SALightweightConnectionDictionaryKey.sshKeyLocationEnabled])
         info.sshKeyLocation = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshKeyLocation])
         info.sshPort = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshPort])
+        info.sshRemoteSocketPath = Self.stringValue(connection[SALightweightConnectionDictionaryKey.sshRemoteSocketPath])
+        info.vaultHost = Self.stringValue(connection[SALightweightConnectionDictionaryKey.vaultHost])
+        info.vaultPort = Self.stringValue(connection[SALightweightConnectionDictionaryKey.vaultPort])
+        info.vaultOIDCMount = Self.stringValue(connection[SALightweightConnectionDictionaryKey.vaultOIDCMount])
+        info.vaultCredentialsPath = Self.stringValue(connection[SALightweightConnectionDictionaryKey.vaultCredentialsPath])
         info.connectionKeychainItemName = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionKeychainItemName])
         info.connectionKeychainItemAccount = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionKeychainItemAccount])
         info.connectionSSHKeychainItemName = Self.stringValue(connection[SALightweightConnectionDictionaryKey.connectionSSHKeychainItemName])
@@ -266,6 +289,8 @@ extension SPWindowController {
             return "SPSSHTunnelConnection"
         case .awsIAM:
             return "SPAWSIAMConnection"
+        case .vault:
+            return "SPVaultConnection"
         case .tcpIP:
             return "SPTCPIPConnection"
         @unknown default:
@@ -281,6 +306,8 @@ extension SPWindowController {
             return .sshTunnel
         case "SPAWSIAMConnection":
             return .awsIAM
+        case "SPVaultConnection":
+            return .vault
         default:
             return .tcpIP
         }

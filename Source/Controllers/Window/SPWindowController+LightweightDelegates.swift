@@ -639,19 +639,10 @@ extension SPWindowController: NSSplitViewDelegate, AllowSplitViewResizing {
 
 extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        if isLightweightTableInfoView(tableView) {
-            return lightweightTableInfoRows.count
-        }
-
         return lightweightTables.isEmpty ? 1 : filteredLightweightTables.count + 1
     }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
-        if isLightweightTableInfoView(tableView) {
-            guard row >= 0, row < lightweightTableInfoRows.count else { return nil }
-            return lightweightTableInfoRows[row]
-        }
-
         if row == 0 {
             return lightweightTableTypes.values.contains(.view)
                 ? NSLocalizedString("TABLES & VIEWS", comment: "header for table & views list")
@@ -705,15 +696,9 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
         guard let cell = cell as? SPTableTextFieldCell else { return }
 
-        cell.font = isLightweightTableInfoView(tableView) && row == 0
-            ? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
-            : UserDefaults.getFont()
+        cell.font = UserDefaults.getFont()
         cell.setIndentationLevel(0)
         cell.setNote("")
-        if isLightweightTableInfoView(tableView) {
-            cell.image = row == 0 ? nil : NSImage(named: "table-property")
-            return
-        }
 
         guard row > 0, row - 1 < filteredLightweightTables.count else {
             cell.image = nil
@@ -739,10 +724,6 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if isLightweightTableInfoView(tableView) {
-            return false
-        }
-
         return row > 0
     }
 
@@ -763,9 +744,5 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
         let table = filteredLightweightTables[selectedRow - 1]
         selectLightweightTable(table)
-    }
-
-    func isLightweightTableInfoView(_ tableView: NSTableView) -> Bool {
-        return tableView.identifier == NSUserInterfaceItemIdentifier("LightweightTableInfo")
     }
 }

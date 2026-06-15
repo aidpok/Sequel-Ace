@@ -40,9 +40,6 @@ extension SPWindowController {
         if let tableColumn = tablesListView.tableColumns.first {
             tableColumn.width = max(tableColumn.minWidth, tablesListView.enclosingScrollView?.contentSize.width ?? tablesListView.bounds.width)
         }
-        if let tableColumn = lightweightTableInfoView.tableColumns.first {
-            tableColumn.width = max(tableColumn.minWidth, lightweightTableInfoView.enclosingScrollView?.contentSize.width ?? lightweightTableInfoView.bounds.width)
-        }
     }
 
     func currentLightweightSidebarWidth() -> CGFloat? {
@@ -147,13 +144,10 @@ extension SPWindowController {
     func applyLightweightSidebarFontPreference() {
         let tableFont = UserDefaults.getFont()
         tablesListView.rowHeight = 4.0 + "{ǞṶḹÜ∑zgyf".size(withAttributes: [.font: tableFont]).height
+        lightweightTableInfoView.font = tableFont
         lightweightTableInfoView.rowHeight = Self.lightweightInfoRowHeight(for: tableFont)
 
         for column in tablesListView.tableColumns {
-            (column.dataCell as? NSCell)?.font = tableFont
-        }
-
-        for column in lightweightTableInfoView.tableColumns {
             (column.dataCell as? NSCell)?.font = tableFont
         }
 

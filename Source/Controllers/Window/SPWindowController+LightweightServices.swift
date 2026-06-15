@@ -4,6 +4,7 @@
 //
 
 import Cocoa
+import UniformTypeIdentifiers
 
 @objc extension SPWindowController {
     func updateWindow(title: String, tabTitle: String) {
@@ -420,7 +421,9 @@ import Cocoa
         let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
         let encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
         let panel = NSOpenPanel()
-        panel.allowedFileTypes = [SPFileExtensionSQL as String]
+        if let contentType = UTType(filenameExtension: SPFileExtensionSQL as String) {
+            panel.allowedContentTypes = [contentType]
+        }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -513,7 +516,10 @@ import Cocoa
         let panel = NSSavePanel()
         panel.allowsOtherFileTypes = false
         panel.canSelectHiddenExtension = true
-        panel.allowedFileTypes = [isSessionSave ? (SPBundleFileExtension as String) : (SPFileExtensionDefault as String)]
+        let fileExtension = isSessionSave ? (SPBundleFileExtension as String) : (SPFileExtensionDefault as String)
+        if let contentType = UTType(filenameExtension: fileExtension) {
+            panel.allowedContentTypes = [contentType]
+        }
 
         let accessory = SALightweightSaveConnectionAccessory(includeQueryEnabled: !lightweightQueryText().isEmpty)
         panel.accessoryView = accessory.view
