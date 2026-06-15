@@ -231,9 +231,24 @@ extension SPWindowController {
             return SALightweightPrintTarget(sourceView: tableView,
                                             title: String(format: NSLocalizedString("Table Information - %@", comment: "lightweight table info print job title"), tableName))
 
-        case .relations, .triggers:
-            return nil
+        case .relations:
+            return lightweightMetadataPrintTarget(in: lightweightRelationsController.view,
+                                                  titleFormat: NSLocalizedString("Table Relations - %@", comment: "lightweight table relations print job title"))
+
+        case .triggers:
+            return lightweightMetadataPrintTarget(in: lightweightTriggersController.view,
+                                                  titleFormat: NSLocalizedString("Table Triggers - %@", comment: "lightweight table triggers print job title"))
         }
+    }
+
+    func lightweightMetadataPrintTarget(in view: NSView, titleFormat: String) -> SALightweightPrintTarget? {
+        guard let tableView = firstTableView(in: view),
+              tableView.numberOfColumns > 0,
+              tableView.numberOfRows > 0 else { return nil }
+
+        let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
+        return SALightweightPrintTarget(sourceView: tableView,
+                                        title: String(format: titleFormat, tableName))
     }
 
     func isLightweightQueryEditorActive() -> Bool {
@@ -360,7 +375,7 @@ extension SPWindowController {
     func showLightweightPrintUnsupportedAlert() {
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Nothing printable in the current lightweight view.", comment: "lightweight print unsupported alert title")
-        alert.informativeText = NSLocalizedString("Printing is currently available for lightweight content, query editor/results, table structure, and table information views.", comment: "lightweight print unsupported alert message")
+        alert.informativeText = NSLocalizedString("Printing is currently available for lightweight content, query editor/results, table structure, table information, relations, and triggers views.", comment: "lightweight print unsupported alert message")
         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
 
         if let window = window {

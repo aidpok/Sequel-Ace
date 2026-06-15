@@ -123,6 +123,7 @@ final class SALightweightStructureViewController: NSViewController {
     private var tableEngine = ""
     private var foreignKeyConstraints: [ForeignKeyConstraint] = []
     private var pendingAutoIncrementIndex: String?
+    private var pendingInsertedStructureRowID: UUID?
     private var indexSheetController: SALightweightStructureIndexSheetController?
 
     private weak var connection: SPMySQLConnection?
@@ -786,6 +787,9 @@ final class SALightweightStructureViewController: NSViewController {
         guard !isSaving, index >= 0, index < rows.count, let connection = connection else { return }
         var row = rows[index]
         guard !row.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if row.isNew, cancelPendingStructureInsert(rowID: row.id) {
+                return
+            }
             showError(title: NSLocalizedString("Field name required", comment: "field name required title"), message: NSLocalizedString("The field name cannot be empty.", comment: "field name required message"))
             rows[index] = oldRow
             reloadVisibleRow(withID: oldRow.id)
@@ -826,6 +830,9 @@ final class SALightweightStructureViewController: NSViewController {
                 row.isNew = false
                 row.originalName = row.name
                 self.rows[index] = row
+                if self.pendingInsertedStructureRowID == row.id {
+                    self.pendingInsertedStructureRowID = nil
+                }
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
                 self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
@@ -1088,7 +1095,7 @@ final class SALightweightStructureViewController: NSViewController {
     private func updateButtonState() {
         let hasStructureSelection = structureTableView.selectedRow >= 0
         removeFieldButton.isEnabled = !isSaving && hasStructureSelection && rows.count > 1
-        duplicateFieldButton.isEnabled = !isSaving && hasStructureSelection
+        duplicateFieldButton.isEnabled = !isSaving && !rows.isEmpty
         removeIndexButton.isEnabled = !isSaving && indexesTableView.selectedRow >= 0
         addIndexButton.isEnabled = !isSaving && !rows.isEmpty
     }
@@ -1209,6 +1216,9 @@ final class SALightweightStructureViewController: NSViewController {
         case #selector(addField(_:)):
             return !isSaving
         case #selector(duplicateField(_:)), #selector(removeField(_:)), #selector(showOptimizedFieldType(_:)):
+            if menuItem.action == #selector(duplicateField(_:)) {
+                return !isSaving && !rows.isEmpty
+            }
             return !isSaving && structureTableView.selectedRow >= 0
         case #selector(addIndex(_:)):
             return !isSaving && !rows.isEmpty
@@ -1398,6 +1408,7 @@ private extension SALightweightStructureViewController {
         ], originalName: nil, isNew: true)
 
         rows.insert(row, at: insertIndex)
+        pendingInsertedStructureRowID = row.id
         reloadVisibleRows()
         if let displayedIndex = displayedIndex(forRowID: row.id) {
             structureTableView.selectRowIndexes(IndexSet(integer: displayedIndex), byExtendingSelection: false)
@@ -1407,7 +1418,7 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func duplicateField(_ sender: Any?) {
-        let selectedRow = structureTableView.selectedRow
+        let selectedRow = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow : displayRows().count - 1
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow) else { return }
         resetStructureFilteringForInsertion()
         var values = rows[sourceIndex].values
@@ -1416,6 +1427,7 @@ private extension SALightweightStructureViewController {
         values["Extra"] = "None"
         let row = StructureRow(values: values, originalName: nil, isNew: true)
         rows.insert(row, at: sourceIndex + 1)
+        pendingInsertedStructureRowID = row.id
         reloadVisibleRows()
         if let displayedIndex = displayedIndex(forRowID: row.id) {
             structureTableView.selectRowIndexes(IndexSet(integer: displayedIndex), byExtendingSelection: false)
@@ -1667,6 +1679,30 @@ private extension SALightweightStructureViewController {
         let key = structureCacheKey()
         structureCache.removeValue(forKey: key)
         structureCacheOrder.removeAll { $0 == key }
+    }
+
+    private func cancelPendingStructureInsert(rowID: UUID? = nil) -> Bool {
+        guard let pendingRowID = pendingInsertedStructureRowID else { return false }
+        guard rowID == nil || rowID == pendingRowID else { return false }
+
+        guard let rowIndex = rows.firstIndex(where: { $0.id == pendingRowID }) else {
+            pendingInsertedStructureRowID = nil
+            return false
+        }
+
+        guard rows[rowIndex].isNew else {
+            pendingInsertedStructureRowID = nil
+            return false
+        }
+
+        rows.remove(at: rowIndex)
+        pendingInsertedStructureRowID = nil
+        reloadVisibleRows()
+        structureTableView.deselectAll(nil)
+        structureTableView.window?.makeFirstResponder(structureTableView)
+        updateButtonState()
+        cacheCurrentStructureState()
+        return true
     }
 
     @objc func addIndex(_ sender: Any?) {
@@ -1961,6 +1997,7 @@ private final class SALightweightStructureIndexSheetController: NSWindowControll
         advancedView.addSubview(keyBlockSizeField)
 
         let cancelButton = NSButton(title: NSLocalizedString("Cancel", comment: "cancel button"), target: self, action: #selector(cancel(_:)))
+        cancelButton.keyEquivalent = "\u{1B}"
         addButton.target = self
         addButton.action = #selector(confirm(_:))
         addButton.keyEquivalent = "\r"
@@ -2184,6 +2221,13 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
             newValue = "\(object ?? "")"
         }
 
+        if oldRow.isNew,
+           key == "name",
+           newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           cancelPendingStructureInsert(rowID: oldRow.id) {
+            return
+        }
+
         if rows[sourceIndex].values[key] == newValue {
             return
         }
@@ -2237,6 +2281,94 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
             updateCollationCell(for: rows[sourceIndex].values["encodingName"] ?? "")
         }
         return structureColumns.first(where: { $0.key == key })?.editable == true
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === structureTableView else { return false }
+        let editedRow = structureTableView.editedRow
+        let editedColumn = structureTableView.editedColumn
+        guard let sourceIndex = sourceIndex(forDisplayedRow: editedRow),
+              sourceIndex >= 0,
+              sourceIndex < rows.count else { return false }
+
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            structureTableView.abortEditing()
+            if cancelPendingStructureInsert(rowID: rows[sourceIndex].id) {
+                return true
+            }
+            reloadVisibleRow(withID: rows[sourceIndex].id)
+            structureTableView.window?.makeFirstResponder(structureTableView)
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let column = editedColumn >= 0 && editedColumn < structureTableView.tableColumns.count
+                ? structureTableView.tableColumns[editedColumn]
+                : nil
+            guard let columnKey = column?.identifier.rawValue,
+                  structureColumns.first(where: { $0.key == columnKey })?.isBoolean == false else {
+                return true
+            }
+
+            structureTableView.window?.makeFirstResponder(structureTableView)
+            structureTableView.selectRowIndexes(IndexSet(integer: editedRow), byExtendingSelection: false)
+            structureTableView.window?.makeFirstResponder(structureTableView)
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.insertTab(_:)),
+           editedColumn == lastEditableStructureColumnIndex() {
+            commitStructureEditAndMove(toDisplayedRow: nextDisplayedStructureRow(after: editedRow),
+                                       column: firstEditableStructureColumnIndex())
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.insertBacktab(_:)),
+           editedColumn == firstEditableStructureColumnIndex() {
+            commitStructureEditAndMove(toDisplayedRow: previousDisplayedStructureRow(before: editedRow),
+                                       column: lastEditableStructureColumnIndex())
+            return true
+        }
+
+        return false
+    }
+
+    private func firstEditableStructureColumnIndex() -> Int {
+        return editableStructureColumnIndices().first ?? 0
+    }
+
+    private func lastEditableStructureColumnIndex() -> Int {
+        return editableStructureColumnIndices().last ?? max(0, structureTableView.numberOfColumns - 1)
+    }
+
+    private func editableStructureColumnIndices() -> [Int] {
+        return structureTableView.tableColumns.enumerated().compactMap { index, column in
+            guard !column.isHidden,
+                  let structureColumn = structureColumns.first(where: { $0.key == column.identifier.rawValue }),
+                  structureColumn.editable else { return nil }
+            return index
+        }
+    }
+
+    private func nextDisplayedStructureRow(after row: Int) -> Int {
+        guard structureTableView.numberOfRows > 0 else { return 0 }
+        return row < structureTableView.numberOfRows - 1 ? row + 1 : 0
+    }
+
+    private func previousDisplayedStructureRow(before row: Int) -> Int {
+        guard structureTableView.numberOfRows > 0 else { return 0 }
+        return row > 0 ? row - 1 : structureTableView.numberOfRows - 1
+    }
+
+    private func commitStructureEditAndMove(toDisplayedRow row: Int, column: Int) {
+        structureTableView.window?.makeFirstResponder(structureTableView)
+        guard !isSaving,
+              row >= 0,
+              row < structureTableView.numberOfRows,
+              column >= 0,
+              column < structureTableView.numberOfColumns else { return }
+        structureTableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        structureTableView.editColumn(column, row: row, with: nil, select: true)
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {

@@ -114,11 +114,23 @@ extension SPAppController {
         if let document = windowController.loadedDatabaseDocumentIfAvailable() {
             if document.currentlySelectedView() == .content {
                 document.focusOnTableContentFilter()
+            } else if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+                textView.performFindPanelAction(sender)
             }
             return
         }
 
-        windowController.focusActiveLightweightContentFilter()
+        windowController.performActiveLightweightFindPanelAction(sender)
+    }
+
+    @IBAction func performTextFinderAction(_ sender: Any) {
+        guard let windowController = tabManager.activeWindowController else { return }
+        if windowController.loadedDatabaseDocumentIfAvailable() != nil {
+            (NSApp.keyWindow?.firstResponder as? NSTextView)?.performTextFinderAction(sender)
+            return
+        }
+
+        windowController.performActiveLightweightTextFinderAction(sender)
     }
 
     @IBAction func copy(_ sender: Any) {
