@@ -689,11 +689,9 @@ extension SPWindowController {
     }
 
     func showLightweightPlaceholder(_ message: String) {
-        lightweightStatusLabel.stringValue = message
-        lightweightStatusLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
+        lightweightPlaceholderView.message = message
         let placeholderKey = LightweightDetailKey(viewMode: nil, database: selectedDatabase, table: selectedTable, placeholder: message)
-        _ = installLightweightDetailSubview(lightweightStatusLabel, key: placeholderKey)
-        lightweightStatusLabel.frame = NSRect(x: 20, y: max(0, (lightweightDetailView.bounds.height - 60) / 2), width: max(0, lightweightDetailView.bounds.width - 40), height: 60)
+        _ = installLightweightDetailSubview(lightweightPlaceholderView, key: placeholderKey)
     }
 
     func showLightweightStructure(for table: String) {

@@ -274,6 +274,7 @@
 		51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */; };
 		51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */; };
 		51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */; };
+		C3D200022F90000100C4C14A /* SALightweightPlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D200012F90000100C4C14A /* SALightweightPlaceholderView.swift */; };
 		C3D000022F8D000100C4C14A /* SALightweightPreferenceObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D000012F8D000100C4C14A /* SALightweightPreferenceObserver.swift */; };
 		51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */; };
 		51BB391C25F82B060048CA69 /* SPAppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BB391B25F82B060048CA69 /* SPAppController.swift */; };
@@ -1085,6 +1086,7 @@
 		51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightStructureViewController.swift; sourceTree = "<group>"; };
 		51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightTableInfoViewController.swift; sourceTree = "<group>"; };
 		51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightMetadataViewController.swift; sourceTree = "<group>"; };
+		C3D200012F90000100C4C14A /* SALightweightPlaceholderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightPlaceholderView.swift; sourceTree = "<group>"; };
 		C3D000012F8D000100C4C14A /* SALightweightPreferenceObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightPreferenceObserver.swift; sourceTree = "<group>"; };
 		51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SADatabaseToolbarController.swift; sourceTree = "<group>"; };
 		51BC150525BE13C400F1CDC9 /* NSViewExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NSViewExtension.swift; sourceTree = "<group>"; };
@@ -1867,6 +1869,7 @@
 				51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */,
 				51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */,
 				51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */,
+				C3D200012F90000100C4C14A /* SALightweightPlaceholderView.swift */,
 				C3D000012F8D000100C4C14A /* SALightweightPreferenceObserver.swift */,
 				51BC14F725BE135500F1CDC9 /* SPWindowController.swift */,
 				C3D100012F8E000100C4C14A /* SPWindowController+LightweightSession.swift */,
@@ -3472,6 +3475,7 @@
 				51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */,
 				51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */,
 				51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */,
+				C3D200022F90000100C4C14A /* SALightweightPlaceholderView.swift in Sources */,
 				C3D000022F8D000100C4C14A /* SALightweightPreferenceObserver.swift in Sources */,
 				51BC14F825BE135500F1CDC9 /* SPWindowController.swift in Sources */,
 				C3D100022F8E000100C4C14A /* SPWindowController+LightweightSession.swift in Sources */,

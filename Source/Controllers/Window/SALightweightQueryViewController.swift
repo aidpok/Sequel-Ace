@@ -718,6 +718,18 @@ final class SALightweightQueryViewController: NSViewController {
 }
 
 private extension SALightweightQueryViewController {
+    static func editedString(from object: Any?) -> String {
+        if let string = object as? String {
+            return string
+        }
+
+        if let attributedString = object as? NSAttributedString {
+            return attributedString.string
+        }
+
+        return object.map { String(describing: $0) } ?? ""
+    }
+
     func showQueryProgressPanel(description: String, cancelButtonTitle: String) {
         guard let parentWindow = view.window else { return }
 
@@ -4120,7 +4132,7 @@ private extension SALightweightQueryViewController {
             return (connection.escapeAndQuoteData(data) ?? Self.singleQuoted(displayString(for: data, columnDefinition: columnDefinition, truncate: false)), data, false)
         }
 
-        let value = String(describing: object ?? "")
+        let value = Self.editedString(from: object)
         let typeGrouping = (columnDefinition["typegrouping"] as? String) ?? ""
         let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
 
@@ -4606,7 +4618,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
               columnIndex < columnDefinitions.count,
               canSaveResultCell(row: row, column: columnIndex) else { return }
 
-        let newValue = String(describing: object ?? "")
+        let newValue = Self.editedString(from: object)
         guard newValue != displayString(for: rows[row][columnIndex], columnDefinition: columnDefinition(at: columnIndex), truncate: false) else { return }
 
         guard let update = cellUpdate(for: object, row: row, column: columnIndex, connection: connection) else {
