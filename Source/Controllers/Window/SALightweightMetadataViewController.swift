@@ -75,13 +75,10 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         tableView.menu = menu
     }
 
-    private lazy var placeholderLabel: NSTextField = {
-        let label = NSTextField(labelWithString: "")
-        label.alignment = .center
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        return label
+    private lazy var placeholderView: SALightweightPlaceholderView = {
+        let view = SALightweightPlaceholderView(frame: .zero)
+        view.autoresizingMask = [.width, .height]
+        return view
     }()
 
     private lazy var tableView: NSTableView = {
@@ -189,11 +186,10 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         tableView.enclosingScrollView?.isHidden = true
         selectionDidChange?()
 
-        placeholderLabel.stringValue = message
-        placeholderLabel.frame = NSRect(x: 20, y: max(0, (view.bounds.height - 60) / 2), width: max(0, view.bounds.width - 40), height: 60)
-        placeholderLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
-        if placeholderLabel.superview == nil {
-            view.addSubview(placeholderLabel)
+        placeholderView.message = message
+        placeholderView.frame = view.bounds
+        if placeholderView.superview == nil {
+            view.addSubview(placeholderView)
         }
     }
 
@@ -202,7 +198,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
         let token = loadToken
         isLoading = true
 
-        placeholderLabel.removeFromSuperviewWithoutNeedingDisplay()
+        placeholderView.removeFromSuperviewWithoutNeedingDisplay()
         tableView.enclosingScrollView?.isHidden = false
         rows = []
         tableView.reloadData()
@@ -222,7 +218,7 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
                 if snapshot.rows.isEmpty {
                     self.showPlaceholder(snapshot.emptyMessage)
                 } else {
-                    self.placeholderLabel.removeFromSuperviewWithoutNeedingDisplay()
+                    self.placeholderView.removeFromSuperviewWithoutNeedingDisplay()
                 }
             }
         }
@@ -263,11 +259,10 @@ final class SALightweightMetadataTableViewController: NSViewController, NSTableV
     }
 
     private func showLoadingMessage() {
-        placeholderLabel.stringValue = loadingMessage
-        placeholderLabel.frame = NSRect(x: 20, y: max(0, (view.bounds.height - 60) / 2), width: max(0, view.bounds.width - 40), height: 60)
-        placeholderLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
-        if placeholderLabel.superview == nil {
-            view.addSubview(placeholderLabel)
+        placeholderView.message = loadingMessage
+        placeholderView.frame = view.bounds
+        if placeholderView.superview == nil {
+            view.addSubview(placeholderView)
         }
     }
 

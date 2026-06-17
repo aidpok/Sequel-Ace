@@ -637,6 +637,20 @@ extension SPWindowController: NSSplitViewDelegate, AllowSplitViewResizing {
     }
 }
 
+extension SPWindowController {
+    func lightweightEditedString(from object: Any?) -> String {
+        if let string = object as? String {
+            return string
+        }
+
+        if let attributedString = object as? NSAttributedString {
+            return attributedString.string
+        }
+
+        return object.map { String(describing: $0) } ?? ""
+    }
+}
+
 extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         return lightweightTables.isEmpty ? 1 : filteredLightweightTables.count + 1
@@ -659,7 +673,7 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
               let selectedDatabase = selectedDatabase else { return }
 
         let oldName = filteredLightweightTables[row - 1]
-        let newName = String(describing: object ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let newName = lightweightEditedString(from: object).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newName.isEmpty, oldName != newName else {
             tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
             return
@@ -672,7 +686,16 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
         }
 
         if tableType == .procedure || tableType == .function {
+            guard confirmLightweightRenameIfNeeded(from: oldName, to: newName, type: tableType) else {
+                tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+                return
+            }
             duplicateLightweightRoutine(oldName, to: newName, type: tableType, database: selectedDatabase, dropSource: true)
+            return
+        }
+
+        guard confirmLightweightRenameIfNeeded(from: oldName, to: newName, type: tableType) else {
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
             return
         }
 
@@ -687,6 +710,18 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
             self.handleLightweightPinnedTableRename(from: oldName, to: newName)
             self.loadTables(for: selectedDatabase, restoringTable: newName)
         }
+    }
+
+    private func confirmLightweightRenameIfNeeded(from oldName: String, to newName: String, type: SALightweightTableObjectType) -> Bool {
+        guard UserDefaults.standard.bool(forKey: SPQueryWarningEnabled) else { return true }
+
+        let alert = NSAlert()
+        alert.window.animationBehavior = .none
+        alert.messageText = String(format: NSLocalizedString("Rename %@", comment: "rename table/view/routine warning title"), type.localizedName)
+        alert.informativeText = String(format: NSLocalizedString("Do you want to rename '%@' %@ to '%@'?", comment: "rename table/view/routine description"), oldName, type.localizedName, newName)
+        alert.addButton(withTitle: NSLocalizedString("Confirm", comment: "Confirmation for renaming table"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        return runLightweightModalAlert(alert) == .alertFirstButtonReturn
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {

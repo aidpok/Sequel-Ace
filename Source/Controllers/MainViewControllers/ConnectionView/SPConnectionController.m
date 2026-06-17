@@ -126,6 +126,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 - (BOOL)_shouldShowLocalNetworkPermissionAlertForErrorMessage:(NSString *)errorMessage detail:(NSString *)errorDetail;
 - (BOOL)_isLocalNetworkAccessDeniedForCurrentConnectionAttempt;
 - (void)_failConnectionWithTitle:(NSString *)theTitle errorMessage:(NSString *)theErrorMessage detail:(NSString *)errorDetail localNetworkPermissionDenied:(BOOL)localNetworkPermissionDenied;
+- (void)_showConnectionWarningAlertWithTitle:(NSString *)title message:(NSString *)message;
 - (void)_showLocalNetworkPermissionAlert;
 - (BOOL)_openLocalNetworkPrivacySettings;
 
@@ -438,7 +439,7 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
             case SAConnectionValidationFailureKindSshHostMissing:
                 break;
         }
-        [NSAlert createWarningAlertWithTitle:failure.alertTitle message:failure.alertMessage callback:nil];
+        [self _showConnectionWarningAlertWithTitle:failure.alertTitle message:failure.alertMessage];
         return;
     }
 
@@ -448,28 +449,24 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
     // host-missing alert still beats this one for AWS IAM favorites
     // with an empty host (matches pre-refactor behavior).
     if ([self _isAWSIAMConnection] && ![self isAWSDirectoryAuthorized]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
-                                     message:NSLocalizedString(@"Authorize access to your ~/.aws directory before testing or connecting with an AWS IAM favorite.", @"AWS authorization required message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
+                                           message:NSLocalizedString(@"Authorize access to your ~/.aws directory before testing or connecting with an AWS IAM favorite.", @"AWS authorization required message")];
         return;
     }
 
     if ([self _isVaultConnection] && ![[self vaultHost] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"A Vault host is required to connect.", @"vault host required connect message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"A Vault host is required to connect.", @"vault host required connect message")];
         return;
     }
     if ([self _isVaultConnection] && ![[self vaultCredentialsPath] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"A Vault credentials path is required to connect.", @"vault creds path required connect message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"A Vault credentials path is required to connect.", @"vault creds path required connect message")];
         return;
     }
     if ([self _isVaultConnection] && ![[self host] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"A database host is required to connect.", @"vault db host required connect message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"A database host is required to connect.", @"vault db host required connect message")];
         return;
     }
 
@@ -2097,9 +2094,8 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
     NSURL *url = [ConnectionStringParser validateConnectionString:connectionString];
     if (!url) {
         NSBeep();
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
-                                     message:NSLocalizedString(@"The connection string is not valid.", @"The connection string is not valid")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
+                                           message:NSLocalizedString(@"The connection string is not valid.", @"The connection string is not valid")];
         return;
     }
 
@@ -2114,14 +2110,13 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
         NSBeep();
         if ([invalidParameters count] > 0) {
             NSArray<NSString *> *validParameters = [ConnectionStringParser validQueryParameters];
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
-                                         message:[NSString stringWithFormat:@"%@:\n\n%@: %@\n\n%@: %@",
-                                                  NSLocalizedString(@"Error parsing connection string", @"Error parsing connection string"),
-                                                  NSLocalizedString(@"Invalid query parameters given", @"Invalid query parameters given"),
-                                                  [invalidParameters componentsJoinedByString:@", "],
-                                                  NSLocalizedString(@"Allowed query parameters are", @"Allowed query parameters are"),
-                                                  [validParameters componentsJoinedByString:@", "]]
-                                        callback:nil];
+            [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
+                                               message:[NSString stringWithFormat:@"%@:\n\n%@: %@\n\n%@: %@",
+                                                        NSLocalizedString(@"Error parsing connection string", @"Error parsing connection string"),
+                                                        NSLocalizedString(@"Invalid query parameters given", @"Invalid query parameters given"),
+                                                        [invalidParameters componentsJoinedByString:@", "],
+                                                        NSLocalizedString(@"Allowed query parameters are", @"Allowed query parameters are"),
+                                                        [validParameters componentsJoinedByString:@", "]]];
         }
         return;
     }
@@ -2669,39 +2664,37 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
 
     // Ensure that host is not empty for connection types that require a MySQL host.
     if (validateDetails && [self _shouldRequireMySQLHost] && ![[self host] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message") message:NSLocalizedString(@"Insufficient details provided to establish a connection. Please provide at least a host.", @"insufficient details informative message") callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"Insufficient details provided to establish a connection. Please provide at least a host.", @"insufficient details informative message")];
         return;
     }
 
     if (validateDetails && [self _isAWSIAMConnection] && ![self isAWSDirectoryAuthorized]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
-                                     message:NSLocalizedString(@"Authorize access to your ~/.aws directory before saving an AWS IAM favorite.", @"AWS authorization required save message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
+                                           message:NSLocalizedString(@"Authorize access to your ~/.aws directory before saving an AWS IAM favorite.", @"AWS authorization required save message")];
         return;
     }
 
     if (validateDetails && [self type] == SPVaultConnection && ![[self host] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"Please provide a database host to save a Vault favorite.", @"vault db host required save message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"Please provide a database host to save a Vault favorite.", @"vault db host required save message")];
         return;
     }
     if (validateDetails && [self type] == SPVaultConnection && ![[self vaultHost] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"A Vault host is required to save a Vault favorite.", @"vault host required save message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"A Vault host is required to save a Vault favorite.", @"vault host required save message")];
         return;
     }
     if (validateDetails && [self type] == SPVaultConnection && ![[self vaultCredentialsPath] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
-                                     message:NSLocalizedString(@"A Vault credentials path is required to save a Vault favorite.", @"vault creds path required save message")
-                                    callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"A Vault credentials path is required to save a Vault favorite.", @"vault creds path required save message")];
         return;
     }
 
     // If SSH is enabled, ensure that the SSH host is not nil
     if (validateDetails && [self type] == SPSSHTunnelConnection && ![[self sshHost] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message") message:NSLocalizedString(@"Please enter the hostname for the SSH Tunnel, or disable the SSH Tunnel.", @"message of panel when ssh details are incomplete") callback:nil];
+        [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                           message:NSLocalizedString(@"Please enter the hostname for the SSH Tunnel, or disable the SSH Tunnel.", @"message of panel when ssh details are incomplete")];
         return;
     }
 
@@ -3445,7 +3438,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     BOOL requiresSSL = (useSSL || [self _isAWSIAMConnection]);
     if (requiresSSL && ([self type] == SPTCPIPConnection || [self type] == SPSocketConnection || [self type] == SPAWSIAMConnection || [self type] == SPVaultConnection)) {
         if (![mySQLConnection isConnectedViaSSL]) {
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSL connection not established", @"SSL requested but not used title") message:NSLocalizedString(@"You requested that the connection should be established using SSL, but MySQL made the connection without SSL.\n\nThis may be because the server does not support SSL connections, or has SSL disabled; or insufficient details were supplied to establish an SSL connection.\n\nThis connection is not encrypted.", @"SSL connection requested but not established error detail") callback:nil];
+            [self _showConnectionWarningAlertWithTitle:NSLocalizedString(@"SSL connection not established", @"SSL requested but not used title")
+                                               message:NSLocalizedString(@"You requested that the connection should be established using SSL, but MySQL made the connection without SSL.\n\nThis may be because the server does not support SSL connections, or has SSL disabled; or insufficient details were supplied to establish an SSL connection.\n\nThis connection is not encrypted.", @"SSL connection requested but not established error detail")];
         }
     }
 
@@ -3640,6 +3634,30 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 }
 
+- (void)_showConnectionWarningAlertWithTitle:(NSString *)title message:(NSString *)message
+{
+    void (^presentAlert)(void) = ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.alertStyle = NSAlertStyleWarning;
+        alert.messageText = title ?: @"";
+        alert.informativeText = message ?: @"";
+        [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+
+        NSWindow *parentWindow = [self->dbDocument parentWindowControllerWindow] ?: [self->connectionView window];
+        if (parentWindow) {
+            [alert beginSheetModalForWindow:parentWindow completionHandler:nil];
+        } else {
+            [alert runModal];
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        presentAlert();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), presentAlert);
+    }
+}
+
 /**
  * Ends a connection attempt by stopping the connection animation and
  * displaying a specified error message.
@@ -3727,31 +3745,40 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         if (isSSHTunnelBindError) {
             [alert addButtonWithTitle:NSLocalizedString(@"Use Standard Connection", @"use standard connection button")];
         }
-        NSModalResponse returnCode = [alert runModal];
-        if (returnCode == NSAlertSecondButtonReturn) {
-            // Extract the local port number that SSH attempted to bind to from the debug output
-            NSString *tunnelPort = [[[errorDetailText string] componentsMatchedByRegex:@"LOCALHOST:([0-9]+)" capture:1L] lastObject];
 
-            // Change the connection type to standard TCP/IP
-            [self setType:SPTCPIPConnection];
+        void (^handleAlertResponse)(NSModalResponse) = ^(NSModalResponse returnCode) {
+            if (returnCode == NSAlertSecondButtonReturn) {
+                // Extract the local port number that SSH attempted to bind to from the debug output
+                NSString *tunnelPort = [[[self->errorDetailText string] componentsMatchedByRegex:@"LOCALHOST:([0-9]+)" capture:1L] lastObject];
 
-            // Change connection details
-            [self setPort:tunnelPort];
-            [self setHost:SPLocalhostAddress];
+                // Change the connection type to standard TCP/IP
+                [self setType:SPTCPIPConnection];
 
-            // Change to standard TCP/IP connection view
-            [self resizeTabViewToConnectionType:SPTCPIPConnection animating:YES];
+                // Change connection details
+                [self setPort:tunnelPort];
+                [self setHost:SPLocalhostAddress];
 
-            // Initiate the connection after a half second delay to give the connection view a chance to resize
-            [self performSelector:@selector(initiateConnection:) withObject:self afterDelay:0.5];
+                // Change to standard TCP/IP connection view
+                [self resizeTabViewToConnectionType:SPTCPIPConnection animating:YES];
+
+                // Initiate the connection after a half second delay to give the connection view a chance to resize
+                [self performSelector:@selector(initiateConnection:) withObject:self afterDelay:0.5];
+            }
+
+            self->errorShowing = NO;
+
+            // we're not connecting anymore, it failed.
+            self->isConnecting = NO;
+            // update tab and window title
+            [self->dbDocument updateWindowTitle:self];
+        };
+
+        NSWindow *parentWindow = [dbDocument parentWindowControllerWindow];
+        if (parentWindow) {
+            [alert beginSheetModalForWindow:parentWindow completionHandler:handleAlertResponse];
+        } else {
+            handleAlertResponse([alert runModal]);
         }
-
-        errorShowing = NO;
-
-        // we're not connecting anymore, it failed.
-        isConnecting = NO;
-        // update tab and window title
-        [dbDocument updateWindowTitle:self];
     }
 }
 

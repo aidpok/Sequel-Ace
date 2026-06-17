@@ -681,13 +681,10 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         return textView
     }()
 
-    private lazy var placeholderLabel: NSTextField = {
-        let label = NSTextField(labelWithString: "")
-        label.alignment = .center
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        return label
+    private lazy var placeholderView: SALightweightPlaceholderView = {
+        let view = SALightweightPlaceholderView(frame: .zero)
+        view.autoresizingMask = [.width, .height]
+        return view
     }()
 
     private lazy var splitView: NSSplitView = {
@@ -848,11 +845,10 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         clearForm()
         formView.isHidden = true
 
-        placeholderLabel.stringValue = message
-        placeholderLabel.frame = NSRect(x: 20, y: max(0, (view.bounds.height - 60) / 2), width: max(0, view.bounds.width - 40), height: 60)
-        placeholderLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
-        if placeholderLabel.superview == nil {
-            view.addSubview(placeholderLabel)
+        placeholderView.message = message
+        placeholderView.frame = view.bounds
+        if placeholderView.superview == nil {
+            view.addSubview(placeholderView)
         }
     }
 
@@ -863,7 +859,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         self.database = database
         self.connection = connection
 
-        placeholderLabel.removeFromSuperviewWithoutNeedingDisplay()
+        placeholderView.removeFromSuperviewWithoutNeedingDisplay()
         formView.isHidden = false
         rows = [
             SALightweightTableInfoRow(NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane"), isGroup: true),

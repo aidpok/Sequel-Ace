@@ -736,6 +736,8 @@ private extension SALightweightContentViewController {
     func loadCurrentPage(preservingColumns: Bool = false) {
         guard connection != nil else { return }
 
+        cancelActiveContentEditBeforeReload()
+
         loadToken = UUID()
         let token = loadToken
         let pageSize = self.pageSize
@@ -1147,6 +1149,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func reloadContent(_ sender: Any?) {
+        cancelActiveContentEditBeforeReload()
         invalidateCurrentContentCache()
         loadCurrentPage()
     }
@@ -1239,7 +1242,7 @@ private extension SALightweightContentViewController {
     }
 
     @objc func duplicateRow(_ sender: Any?) {
-        guard connection != nil, canModifyRows else { return }
+        guard let connection = connection, canModifyRows else { return }
 
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0, selectedRow < rows.count else { return }
@@ -1251,11 +1254,13 @@ private extension SALightweightContentViewController {
             return
         }
 
+        let columnList = columnsToInsert.map { Self.backtickQuoted($0.element.name) }.joined(separator: ", ")
+        let valueList = columnsToInsert.compactMap { Self.sqlValue(row.values[$0.offset], columnInfo: $0.element, connection: connection) }.joined(separator: ", ")
+        let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) (\(columnList)) VALUES (\(valueList))"
+        guard confirmQueryWarningIfNeeded(query) else { return }
+
         let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
-        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy) { [database, table] connection in
-            let columnList = columnsToInsert.map { Self.backtickQuoted($0.element.name) }.joined(separator: ", ")
-            let valueList = columnsToInsert.compactMap { Self.sqlValue(row.values[$0.offset], columnInfo: $0.element, connection: connection) }.joined(separator: ", ")
-            let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) (\(columnList)) VALUES (\(valueList))"
+        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy) { connection in
             _ = connection.queryString(query)
         }
     }
@@ -1517,6 +1522,13 @@ private extension SALightweightContentViewController {
         tableView.reloadData()
         applySortDescriptorsFromCurrentState()
         scheduleVisibleColumnAutosize(delay: 0.01)
+    }
+
+    func cancelActiveContentEditBeforeReload() {
+        guard tableView.editedRow >= 0 || tableView.editedColumn >= 0 else { return }
+
+        tableView.abortEditing()
+        tableView.window?.makeFirstResponder(tableView)
     }
 
     @objc func resultGridBoundsDidChange(_ notification: Notification) {
@@ -2495,6 +2507,18 @@ private extension SALightweightContentViewController {
         return SALightweightResultGrid.displayString(for: value)
     }
 
+    static func editedString(from object: Any?) -> String {
+        if let string = object as? String {
+            return string
+        }
+
+        if let attributedString = object as? NSAttributedString {
+            return attributedString.string
+        }
+
+        return object.map { String(describing: $0) } ?? ""
+    }
+
     static func contentValue(for value: Any?) -> ContentValue {
         guard let value = value, !(value is NSNull) else { return .null }
         return .object(value)
@@ -2935,6 +2959,10 @@ private extension SALightweightContentViewController {
             insertQuery = "INSERT INTO \(tableReference) (\(insertColumns.joined(separator: ", "))) VALUES (\(insertValues.joined(separator: ", ")))"
         }
         let reloadAfterAdd = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow)
+        guard confirmQueryWarningIfNeeded(insertQuery) else {
+            cancelNewContentRow(row)
+            return
+        }
 
         statusLabel.stringValue = NSLocalizedString("Adding row...", comment: "lightweight content adding row")
         isLoading = true
@@ -2977,6 +3005,30 @@ private extension SALightweightContentViewController {
 
     private func showContentError(title: String, message: String) {
         NSAlert.createWarningAlert(title: title, message: message, callback: nil)
+    }
+
+    private func confirmQueryWarningIfNeeded(_ query: String) -> Bool {
+        guard UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
+              !SPCustomQuerySQLClassifier.isQuerySafeWithoutDestructiveWarning(query) else {
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.window.animationBehavior = .none
+        alert.messageText = NSLocalizedString("Edit row?", comment: "Edit row?")
+        alert.informativeText = queryWarningMessage(for: query)
+        alert.addButton(withTitle: NSLocalizedString("Proceed", comment: "Proceed"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        return alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn
+    }
+
+    private func queryWarningMessage(for query: String) -> String {
+        var queryText = query
+        if queryText.count > SPMaxQueryLengthForWarning {
+            queryText = String(queryText.prefix(Int(SPMaxQueryLengthForWarning))) + "..."
+        }
+
+        return String(format: NSLocalizedString("Do you really want to proceed with this query?\n\n %@", comment: "message of panel asking for confirmation for exec query"), queryText)
     }
 }
 
@@ -3113,7 +3165,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               canModifyRows else { return }
 
         let oldRowValues = rows[row].originalValues
-        let newValue = String(describing: object ?? "")
+        let newValue = Self.editedString(from: object)
         let currentDisplayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
         guard newValue != currentDisplayValue else {
             if rows[row].isNew {
@@ -3140,6 +3192,10 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(updatedValue.sql) WHERE \(whereClause)"
         let refreshQuery = "SELECT \(Self.backtickQuoted(columnName)) FROM \(tableReference) WHERE \(whereClause) LIMIT 1"
         let reloadAfterEdit = UserDefaults.standard.bool(forKey: SPReloadAfterEditingRow)
+        guard confirmQueryWarningIfNeeded(updateQuery) else {
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: columnIndex))
+            return
+        }
 
         statusLabel.stringValue = NSLocalizedString("Saving cell...", comment: "lightweight content saving cell")
         isLoading = true

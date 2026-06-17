@@ -846,13 +846,10 @@ final class SALightweightSessionState {
         super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
 
-    lazy var lightweightStatusLabel: NSTextField = {
-        let label = NSTextField(labelWithString: NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state"))
-        label.alignment = .center
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        return label
+    lazy var lightweightPlaceholderView: SALightweightPlaceholderView = {
+        let view = SALightweightPlaceholderView(frame: .zero)
+        view.message = NSLocalizedString("Choose a database to load tables.", comment: "lightweight database shell empty state")
+        return view
     }()
 
     var processing = false
