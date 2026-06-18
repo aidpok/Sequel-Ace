@@ -46,6 +46,7 @@
 #import "SPFileManagerAdditions.h"
 
 // Modernization — expose ObjC types needed by new Swift code
+#import "SPBundleCommandRunner.h"
 #import "SPConnectionController.h"
 #import "SPFavoritesController.h"
 #import "SPCompatibility.h"
