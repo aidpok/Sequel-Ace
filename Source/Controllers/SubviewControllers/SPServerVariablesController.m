@@ -42,6 +42,7 @@
 - (void)_getDatabaseServerVariables;
 - (void)_updateServerVariablesFilterForFilterString:(NSString *)filterString;
 - (void)_copyServerVariablesToPasteboardIncludingName:(BOOL)name andValue:(BOOL)value;
+- (NSString *)_serverDisplayName;
 
 @end
 
@@ -139,7 +140,7 @@
     [panel beginSheetModalForWindow:[self window] completionHandler:^(NSInteger returnCode) {
         if (returnCode == NSModalResponseOK) {
             if ([self->variablesFiltered count] > 0) {
-                NSMutableString *variablesString = [NSMutableString stringWithFormat:@"# MySQL server variables for %@\n\n", [[SPAppDelegate frontDocument] host]];
+                NSMutableString *variablesString = [NSMutableString stringWithFormat:@"# MySQL server variables for %@\n\n", [self _serverDisplayName]];
                 
                 for (NSDictionary *variable in self->variablesFiltered)
                 {
@@ -150,6 +151,18 @@
             }
         }
     }];
+}
+
+- (NSString *)_serverDisplayName
+{
+    SPDatabaseDocument *frontDocument = [SPAppDelegate frontDocument];
+    NSString *displayName = [frontDocument host];
+
+    if (![displayName length]) {
+        displayName = [connection host];
+    }
+
+    return [displayName length] ? displayName : NSLocalizedString(@"Unknown Host", @"fallback server display name");
 }
 
 #pragma mark -

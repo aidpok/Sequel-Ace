@@ -81,7 +81,7 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
     var lightweightAccessibilityLabel: String?
 
     @objc var supportsDataTableBundleCommands = false
-    @objc let dataTableBundleSource = "query"
+    @objc var dataTableBundleSource = "query"
 
     @objc(dataTableBundleInputForInputSource:blobHandling:onlySelectedRows:blobFileDirectory:)
     func dataTableBundleInput(for inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {

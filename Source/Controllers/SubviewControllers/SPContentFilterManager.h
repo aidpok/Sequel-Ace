@@ -31,12 +31,20 @@
 @class SPDatabaseDocument;
 @class SPSplitView;
 
+NS_ASSUME_NONNULL_BEGIN
+
+@protocol SPContentFilterManagerContext <NSObject>
+- (nullable NSURL *)contentFilterFileURL;
+- (BOOL)contentFilterIsUntitled;
+- (nullable id)contentFilterCustomQueryInstance;
+@end
+
 @interface SPContentFilterManager : NSWindowController <NSOpenSavePanelDelegate>
 {
 	NSUserDefaults *prefs;
 	
-	SPDatabaseDocument *tableDocumentInstance;
-	NSURL *documentFileURL;
+	id <SPContentFilterManagerContext> contentFilterContext;
+	NSURL *_Nullable documentFileURL;
 
 	IBOutlet id encodingPopUp;
 	IBOutlet id contentFilterTableView;
@@ -62,10 +70,11 @@
 }
 
 - (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document forFilterType:(NSString *)compareType;
+- (instancetype)initWithContentFilterContext:(id <SPContentFilterManagerContext>)context forFilterType:(NSString *)compareType;
 
 // Accessors
-- (NSMutableArray *)contentFilterForFileURL:(NSURL *)fileURL;
-- (id)customQueryInstance;
+- (NSMutableArray *)contentFilterForFileURL:(nullable NSURL *)fileURL;
+- (nullable id)customQueryInstance;
 
 // IBAction methods
 - (IBAction)addContentFilter:(id)sender;
@@ -78,3 +87,5 @@
 - (IBAction)suppressLeadingFieldPlaceholderWasChanged:(id)sender;
 
 @end
+
+NS_ASSUME_NONNULL_END

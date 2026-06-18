@@ -56,6 +56,8 @@
 #import "SPQueryController.h"
 #import "SPNavigatorController.h"
 #import "SPTablesList.h"
+#import "SPKeychain.h"
+#import "SPDataAdditions.h"
 
 #import "sequel-ace-Swift.h"
 
@@ -75,6 +77,12 @@ static const NSInteger SALightweightTableObjectTypeViewValue = 1;
 static const NSInteger SALightweightTableObjectTypeProcedureValue = 2;
 static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
 
+typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
+    SALightweightConnectionFileOpenUnsupported = 0,
+    SALightweightConnectionFileOpenSucceeded,
+    SALightweightConnectionFileOpenHandledFailure
+};
+
 @interface SPAppController ()
 @property (strong) IBOutlet NSMenu *mainMenu;
 @property (assign) BOOL lightweightTableMenuIsConfigured;
@@ -82,6 +90,20 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
 - (void)_copyDefaultThemes;
 
 - (void)openConnectionFileAtPath:(NSString *)filePath;
+- (SALightweightConnectionFileOpenResult)openLightweightConnectionFileAtPath:(NSString *)filePath windowController:(SPWindowController *)windowController;
+- (SALightweightConnectionFileOpenResult)openLightweightConnectionFileAtPath:(NSString *)filePath windowController:(SPWindowController *)windowController savedInBundle:(BOOL)savedInBundle;
+- (BOOL)applyLightweightStateDictionary:(NSDictionary *)state toWindowController:(SPWindowController *)windowController;
+- (BOOL)lightweightStateDictionaryRequestsAutoConnect:(NSDictionary *)state;
+- (BOOL)lightweightConnectionFileRequiresLegacyPreferences:(NSDictionary *)spf data:(NSDictionary *)data connection:(NSDictionary *)connection;
+- (NSDictionary *)lightweightConnectionDocumentContextFromSPF:(NSDictionary *)spf data:(NSDictionary *)data;
+- (NSDictionary *)lightweightSessionSnapshotFromLegacySession:(NSDictionary *)session connection:(NSDictionary *)connection;
+- (BOOL)lightweightConnectionDataIncludesQuery:(NSDictionary *)data lightweightSession:(NSDictionary *)lightweightSession;
+- (BOOL)lightweightLegacySessionQueriesObjectIsSupported:(id)queriesObject;
+- (NSString *)lightweightQueryStringFromLegacySessionQueriesObject:(id)queriesObject;
+- (void)populateLightweightKeychainReferencesInConnection:(NSMutableDictionary *)connection;
+- (NSString *)promptForLightweightEncryptedConnectionFilePasswordAtPath:(NSString *)filePath;
+- (NSDictionary *)lightweightConnectionDataFromEncryptedSPF:(NSDictionary *)spf password:(NSString *)password;
+- (void)showLightweightConnectionFileReadError:(NSString *)message;
 - (void)openSQLFileAtPath:(NSString *)filePath;
 - (void)openSessionBundleAtPath:(NSString *)filePath;
 - (void)openColorThemeFileAtPath:(NSString *)filePath;
@@ -351,13 +373,31 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
 
         SPWindowController *newWindowController = [self.tabManager replaceTabServiceWithInitialWindow];
 
+        BOOL appliedLaunchStateLightweight = NO;
         if (spfDict && !startEmptySession) {
-            [newWindowController.databaseDocument setState:spfDict];
+            appliedLaunchStateLightweight = [self applyLightweightStateDictionary:spfDict toWindowController:newWindowController];
+            if (!appliedLaunchStateLightweight) {
+                [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"Startup SPF restore required legacy database view"] setState:spfDict];
+            }
         }
 
         // Set autoconnection if appropriate
         if (!startEmptySession && [prefs boolForKey:SPAutoConnectToDefault] && secureBookmarkManager.staleBookmarks.count == 0) {
-            [newWindowController.databaseDocument connect];
+            if (spfDict) {
+                if (appliedLaunchStateLightweight) {
+                    if (![self lightweightStateDictionaryRequestsAutoConnect:spfDict]) {
+                        [newWindowController connectSelectedLightweightConnection];
+                    }
+                    return;
+                }
+            }
+            else {
+                if ([newWindowController connectSelectedLightweightConnection]) {
+                    return;
+                }
+            }
+
+            [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"Startup default autoconnect required legacy database view"] connect];
         }
     }
 
@@ -423,7 +463,11 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
         NSDictionary *spfStructure = [userInfo objectForKey:@"spfData"];
         if (spfStructure) {
             SPWindowController *windowController = [self.tabManager newWindowForWindow];
-            [windowController.databaseDocument setState:spfStructure];
+            if ([self applyLightweightStateDictionary:spfStructure toWindowController:windowController]) {
+                return;
+            }
+
+            [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"External SPF restore required legacy database view"] setState:spfStructure];
         }
     }
 }
@@ -821,7 +865,11 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
             return;
         }
 
-        [newWindowController.databaseDocument setState:userInfo];
+        if ([self applyLightweightStateDictionary:userInfo toWindowController:newWindowController]) {
+            return;
+        }
+
+        [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"Duplicate tab state required legacy database view"] setState:userInfo];
     }
 }
 
@@ -913,15 +961,39 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
             SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
 
             if ([windowController hasActiveLightweightConnection]) {
-                NSDictionary *lightweightState = [windowController lightweightConnectionStateDictionaryWithIncludePasswords:[[spfDocData_temp objectForKey:@"save_password"] boolValue]
-                                                                                                              includeSession:[[spfDocData_temp objectForKey:@"include_session"] boolValue]
-                                                                                                                includeQuery:[[spfDocData_temp objectForKey:@"save_editor_content"] boolValue]];
-                if (![lightweightState count]) {
+                NSURL *lightweightFileURL = [windowController lightweightConnectionFileURLForSessionBundle];
+                NSString *lightweightFilePath = nil;
+                BOOL isAbsolutePath = NO;
+
+                if (lightweightFileURL && [lightweightFileURL isFileURL] && [[lightweightFileURL path] length]) {
+                    lightweightFilePath = [lightweightFileURL path];
+                    isAbsolutePath = YES;
+                } else {
+                    NSString *newName = [NSString stringWithFormat:@"%@.%@", [NSString stringWithNewUUID], SPFileExtensionDefault];
+                    lightweightFilePath = [NSString stringWithFormat:@"%@/Contents/%@", fileName, newName];
+                    [tabData setObject:newName forKey:@"path"];
+                }
+
+                BOOL lightweightSaved = isAbsolutePath
+                    ? [windowController saveLightweightConnectionFileAtPathUsingCurrentSaveOptions:lightweightFilePath]
+                    : [windowController saveLightweightConnectionFileAtPath:lightweightFilePath
+                                                                  encrypted:[[spfDocData_temp objectForKey:@"encrypted"] boolValue]
+                                                         encryptionPassword:([spfDocData_temp objectForKey:@"e_string"] ?: @"")
+                                                                autoConnect:[[spfDocData_temp objectForKey:@"auto_connect"] boolValue]
+                                                               savePassword:[[spfDocData_temp objectForKey:@"save_password"] boolValue]
+                                                             includeSession:[[spfDocData_temp objectForKey:@"include_session"] boolValue]
+                                                               includeQuery:[[spfDocData_temp objectForKey:@"save_editor_content"] boolValue]];
+
+                if (!lightweightSaved) {
                     continue;
                 }
 
-                [tabData setObject:@YES forKey:@"isLightweight"];
-                [tabData setObject:lightweightState forKey:@"lightweightState"];
+                if (isAbsolutePath) {
+                    [tabData setObject:lightweightFilePath forKey:@"path"];
+                } else {
+                    [windowController setLightweightConnectionFileURL:[NSURL fileURLWithPath:lightweightFilePath] savedInBundle:YES];
+                }
+                [tabData setObject:[NSNumber numberWithBool:isAbsolutePath] forKey:@"isAbsolutePath"];
             } else if (!databaseDocument || ![databaseDocument mySQLVersion]) {
                 continue;
             } else if([databaseDocument isUntitled]) {
@@ -1092,70 +1164,71 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
     if (!tableSubMenu) return;
     self.lightweightTableMenuIsConfigured = YES;
 
-    NSInteger objectType = [windowController selectedLightweightTableObjectType];
-    BOOL hasSelection = [windowController hasSelectedLightweightTable];
-    BOOL selectedTable = hasSelection && objectType == SALightweightTableObjectTypeTableValue;
-    BOOL selectedView = hasSelection && objectType == SALightweightTableObjectTypeViewValue;
-    BOOL selectedProcedure = hasSelection && objectType == SALightweightTableObjectTypeProcedureValue;
-    BOOL selectedFunction = hasSelection && objectType == SALightweightTableObjectTypeFunctionValue;
-    BOOL selectedRoutine = selectedProcedure || selectedFunction;
+    NSInteger selectedCount = [windowController selectedLightweightTableCount];
+    NSInteger objectType = [windowController selectedLightweightTableSelectionObjectType];
+    BOOL hasSelection = selectedCount > 0;
+    BOOL hasSingleSelection = selectedCount == 1;
+    BOOL selectedView = hasSingleSelection && objectType == SALightweightTableObjectTypeViewValue;
+    BOOL selectedProcedure = hasSingleSelection && objectType == SALightweightTableObjectTypeProcedureValue;
+    BOOL selectedFunction = hasSingleSelection && objectType == SALightweightTableObjectTypeFunctionValue;
+    BOOL canCheck = [windowController canPerformLightweightTableMaintenanceAction:@selector(checkTable:)];
+    BOOL canRepair = [windowController canPerformLightweightTableMaintenanceAction:@selector(repairTable:)];
+    BOOL canAnalyze = [windowController canPerformLightweightTableMaintenanceAction:@selector(analyzeTable:)];
+    BOOL canOptimize = [windowController canPerformLightweightTableMaintenanceAction:@selector(optimizeTable:)];
+    BOOL canFlush = [windowController canPerformLightweightTableMaintenanceAction:@selector(flushTable:)];
+    BOOL canChecksum = [windowController canPerformLightweightTableMaintenanceAction:@selector(checksumTable:)];
 
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(copyCreateTableSyntax:)
-                            title:(selectedView ? NSLocalizedString(@"Copy Create View Syntax", @"copy create view syntax menu item") :
+                            title:(hasSelection && !hasSingleSelection ? NSLocalizedString(@"Copy Create Syntax", @"copy create selected items syntax menu item") :
+                                   selectedView ? NSLocalizedString(@"Copy Create View Syntax", @"copy create view syntax menu item") :
                                    selectedProcedure ? NSLocalizedString(@"Copy Create Procedure Syntax", @"copy create proc syntax menu item") :
                                    selectedFunction ? NSLocalizedString(@"Copy Create Function Syntax", @"copy create func syntax menu item") :
                                    NSLocalizedString(@"Copy Create Table Syntax", @"copy create table syntax menu item"))
                            hidden:NO];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(showCreateTableSyntax:)
-                            title:(selectedView ? NSLocalizedString(@"Show Create View Syntax...", @"show create view syntax menu item") :
+                            title:(hasSelection && !hasSingleSelection ? NSLocalizedString(@"Show Create Syntax...", @"show create selected items syntax menu item") :
+                                   selectedView ? NSLocalizedString(@"Show Create View Syntax...", @"show create view syntax menu item") :
                                    selectedProcedure ? NSLocalizedString(@"Show Create Procedure Syntax...", @"show create proc syntax menu item") :
                                    selectedFunction ? NSLocalizedString(@"Show Create Function Syntax...", @"show create func syntax menu item") :
                                    NSLocalizedString(@"Show Create Table Syntax...", @"show create table syntax menu item"))
                            hidden:NO];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(checkTable:)
-                            title:(selectedView ? NSLocalizedString(@"Check View", @"check view menu item") : NSLocalizedString(@"Check Table", @"check table menu item"))
-                           hidden:selectedRoutine];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Check Selected Items", @"check selected items menu item") :
+                                   selectedView ? NSLocalizedString(@"Check View", @"check view menu item") : NSLocalizedString(@"Check Table", @"check table menu item"))
+                           hidden:(hasSelection && !canCheck)];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(repairTable:)
-                            title:NSLocalizedString(@"Repair Table", @"repair table menu item")
-                           hidden:(hasSelection && !selectedTable)];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Repair Selected Tables", @"repair selected tables menu item") : NSLocalizedString(@"Repair Table", @"repair table menu item"))
+                           hidden:(hasSelection && !canRepair)];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(analyzeTable:)
-                            title:NSLocalizedString(@"Analyze Table", @"analyze table menu item")
-                           hidden:(hasSelection && !selectedTable)];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Analyze Selected Tables", @"analyze selected tables menu item") : NSLocalizedString(@"Analyze Table", @"analyze table menu item"))
+                           hidden:(hasSelection && !canAnalyze)];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(optimizeTable:)
-                            title:NSLocalizedString(@"Optimize Table", @"optimize table menu item")
-                           hidden:(hasSelection && !selectedTable)];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Optimize Selected Tables", @"optimize selected tables menu item") : NSLocalizedString(@"Optimize Table", @"optimize table menu item"))
+                           hidden:(hasSelection && !canOptimize)];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(flushTable:)
-                            title:(selectedView ? NSLocalizedString(@"Flush View", @"flush view menu item") : NSLocalizedString(@"Flush Table", @"flush table menu item"))
-                           hidden:selectedRoutine];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Flush Selected Items", @"flush selected items menu item") :
+                                   selectedView ? NSLocalizedString(@"Flush View", @"flush view menu item") : NSLocalizedString(@"Flush Table", @"flush table menu item"))
+                           hidden:(hasSelection && !canFlush)];
     [self configureMenuItemInMenu:tableSubMenu
                            action:@selector(checksumTable:)
-                            title:NSLocalizedString(@"Checksum Table", @"checksum table menu item")
-                           hidden:(hasSelection && !selectedTable)];
+                            title:(selectedCount > 1 ? NSLocalizedString(@"Checksum Selected Tables", @"checksum selected tables menu item") : NSLocalizedString(@"Checksum Table", @"checksum table menu item"))
+                           hidden:(hasSelection && !canChecksum)];
 
-    [self configureMenuItemInMenu:tableSubMenu atIndex:6 hidden:selectedRoutine];
-    [self configureMenuItemInMenu:tableSubMenu atIndex:9 hidden:(hasSelection && !selectedTable)];
+    [self configureMenuItemInMenu:tableSubMenu atIndex:6 hidden:(hasSelection && !canCheck && !canFlush)];
+    [self configureMenuItemInMenu:tableSubMenu atIndex:9 hidden:(hasSelection && !canRepair && !canAnalyze && !canOptimize && !canChecksum)];
 }
 
 - (BOOL)validateLightweightTableMaintenanceMenuItem:(NSMenuItem *)menuItem forWindowController:(SPWindowController *)windowController
 {
-    NSInteger objectType = [windowController selectedLightweightTableObjectType];
-    BOOL hasSelection = [windowController hasSelectedLightweightTable];
-    BOOL selectedTable = hasSelection && objectType == SALightweightTableObjectTypeTableValue;
-    BOOL selectedView = hasSelection && objectType == SALightweightTableObjectTypeViewValue;
     SEL action = [menuItem action];
-
-    if (action == @selector(checkTable:) || action == @selector(flushTable:)) {
-        return selectedTable || selectedView;
-    }
-
-    return selectedTable;
+    return [windowController canPerformLightweightTableMaintenanceAction:action];
 }
 
 /**
@@ -1222,6 +1295,49 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
     if ([activeWindowController hasActiveLightweightConnection]) {
         [self configureLightweightTableMenuForWindowController:activeWindowController];
 
+        if (action == @selector(viewStructure:) ||
+            action == @selector(viewContent:) ||
+            action == @selector(viewStatus:) ||
+            action == @selector(viewRelations:) ||
+            action == @selector(viewTriggers:) ||
+            action == @selector(viewStructure) ||
+            action == @selector(viewContent) ||
+            action == @selector(viewStatus) ||
+            action == @selector(viewRelations) ||
+            action == @selector(viewTriggers))
+        {
+            isValid = [activeWindowController hasSelectedLightweightTable];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(viewQuery:) ||
+            action == @selector(showMySQLHelp:) ||
+            action == @selector(viewQuery) ||
+            action == @selector(showMySQLHelp))
+        {
+            isValid = YES;
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(focusOnTableContentFilter:) ||
+            action == @selector(showFilterTable:) ||
+            action == @selector(focusOnTableContentFilter) ||
+            action == @selector(showFilterTable))
+        {
+            isValid = [activeWindowController hasSelectedLightweightTable];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(makeTableListFilterHaveFocus:)) {
+            isValid = YES;
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(backForwardInHistory:)) {
+            isValid = [activeWindowController canNavigateLightweightHistory:menuItem];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(export:)) {
             isValid = [activeWindowController canExportLightweightData];
             goto validateMenuItemDone;
@@ -1284,7 +1400,7 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
         if (action == @selector(copyCreateTableSyntax:) ||
             action == @selector(showCreateTableSyntax:))
         {
-            isValid = [activeWindowController hasSelectedLightweightTable];
+            isValid = [activeWindowController selectedLightweightTableCount] > 0;
             goto validateMenuItemDone;
         }
 
@@ -1338,6 +1454,16 @@ static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
         action == @selector(shutdownServer:) ||
         action == @selector(copyCreateTableSyntax:) ||
         action == @selector(showCreateTableSyntax:) ||
+        action == @selector(viewStructure:) ||
+        action == @selector(viewContent:) ||
+        action == @selector(viewQuery:) ||
+        action == @selector(viewStatus:) ||
+        action == @selector(viewRelations:) ||
+        action == @selector(viewTriggers:) ||
+        action == @selector(showMySQLHelp:) ||
+        action == @selector(focusOnTableContentFilter:) ||
+        action == @selector(showFilterTable:) ||
+        action == @selector(makeTableListFilterHaveFocus:) ||
         action == @selector(checkTable:) ||
         action == @selector(analyzeTable:) ||
         action == @selector(repairTable:) ||
@@ -1475,8 +1601,426 @@ validateMenuItemDone:
 
 - (void)openConnectionFileAtPath:(NSString *)filePath {
     SPWindowController *windowController = [self.tabManager newWindowForWindow];
-    [windowController.databaseDocument setStateFromConnectionFile:filePath];
-    [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+    switch ([self openLightweightConnectionFileAtPath:filePath windowController:windowController]) {
+        case SALightweightConnectionFileOpenSucceeded:
+            [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+            break;
+        case SALightweightConnectionFileOpenHandledFailure:
+            [windowController close];
+            break;
+        case SALightweightConnectionFileOpenUnsupported:
+            [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"Open connection file required legacy database view"] setStateFromConnectionFile:filePath];
+            [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+            break;
+    }
+}
+
+- (SALightweightConnectionFileOpenResult)openLightweightConnectionFileAtPath:(NSString *)filePath windowController:(SPWindowController *)windowController
+{
+    return [self openLightweightConnectionFileAtPath:filePath windowController:windowController savedInBundle:NO];
+}
+
+- (SALightweightConnectionFileOpenResult)openLightweightConnectionFileAtPath:(NSString *)filePath windowController:(SPWindowController *)windowController savedInBundle:(BOOL)savedInBundle {
+    NSError *error = nil;
+    NSData *pData = [NSData dataWithContentsOfFile:filePath
+                                           options:NSUncachedRead
+                                             error:&error];
+    if (!pData || error) {
+        NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Connection data file couldn't be read. (%@)", @"error while reading connection data file"), [error localizedDescription]];
+        [self showLightweightConnectionFileReadError:message];
+        return SALightweightConnectionFileOpenHandledFailure;
+    }
+
+    id propertyList = [NSPropertyListSerialization propertyListWithData:pData
+                                                                options:NSPropertyListImmutable
+                                                                 format:NULL
+                                                                  error:&error];
+    if (error || ![propertyList isKindOfClass:[NSDictionary class]]) {
+        NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Connection data file couldn't be read. (%@)", @"error while reading connection data file"), [error localizedDescription]];
+        [self showLightweightConnectionFileReadError:message];
+        return SALightweightConnectionFileOpenHandledFailure;
+    }
+
+    NSDictionary *spf = (NSDictionary *)propertyList;
+    if (![[spf objectForKey:SPFFormatKey] isEqualToString:SPFConnectionContentType]) return SALightweightConnectionFileOpenUnsupported;
+
+    id dataObject = [spf objectForKey:@"data"];
+    if (!dataObject) {
+        [self showLightweightConnectionFileReadError:NSLocalizedString(@"No data found.", @"no data found")];
+        return SALightweightConnectionFileOpenHandledFailure;
+    }
+
+    NSDictionary *data = nil;
+    NSString *encryptionPassword = @"";
+    if ([[spf objectForKey:@"encrypted"] boolValue]) {
+        if (![dataObject isKindOfClass:[NSData class]]) {
+            [self showLightweightConnectionFileReadError:NSLocalizedString(@"Wrong data format or password.", @"wrong data format or password")];
+            return SALightweightConnectionFileOpenHandledFailure;
+        }
+
+        NSString *password = nil;
+        if (savedInBundle && [[[self spfSessionDocData] objectForKey:@"e_string"] isKindOfClass:[NSString class]]) {
+            password = [[self spfSessionDocData] objectForKey:@"e_string"];
+            data = [self lightweightConnectionDataFromEncryptedSPF:spf password:password];
+        }
+
+	        if (!data) {
+	            password = [self promptForLightweightEncryptedConnectionFilePasswordAtPath:filePath];
+	            if (!password) return SALightweightConnectionFileOpenHandledFailure;
+
+	            data = [self lightweightConnectionDataFromEncryptedSPF:spf password:password];
+	        }
+
+        if (!data) {
+            [self showLightweightConnectionFileReadError:NSLocalizedString(@"Wrong data format or password.", @"wrong data format or password")];
+            return SALightweightConnectionFileOpenHandledFailure;
+        }
+
+	        NSMutableDictionary *spfSessionData = [NSMutableDictionary dictionary];
+	        [spfSessionData addEntriesFromDictionary:[self spfSessionDocData]];
+	        [spfSessionData setObject:password forKey:@"e_string"];
+	        [self setSpfSessionDocData:spfSessionData];
+        encryptionPassword = password ?: @"";
+	    }
+    else if ([dataObject isKindOfClass:[NSDictionary class]]) {
+        data = (NSDictionary *)dataObject;
+    }
+    else {
+        return SALightweightConnectionFileOpenUnsupported;
+    }
+
+    id connectionObject = [data objectForKey:@"connection"];
+    if (![connectionObject isKindOfClass:[NSDictionary class]]) {
+        [self showLightweightConnectionFileReadError:NSLocalizedString(@"No connection data found.", @"no connection data found")];
+        return SALightweightConnectionFileOpenHandledFailure;
+    }
+    NSMutableDictionary *connection = [(NSDictionary *)connectionObject mutableCopy];
+    [self populateLightweightKeychainReferencesInConnection:connection];
+    if ([self lightweightConnectionFileRequiresLegacyPreferences:spf data:data connection:connection]) return SALightweightConnectionFileOpenUnsupported;
+
+    NSDictionary *contextInfo = [self lightweightConnectionDocumentContextFromSPF:spf data:data];
+    if ([contextInfo count]) {
+        [[SPQueryController sharedQueryController] registerDocumentWithFileURL:[NSURL fileURLWithPath:filePath] andContextInfo:[contextInfo mutableCopy]];
+    }
+
+    id lightweightSession = [data objectForKey:@"lightweightSession"];
+    if (lightweightSession && ![lightweightSession isKindOfClass:[NSDictionary class]]) return SALightweightConnectionFileOpenUnsupported;
+    if (!lightweightSession && [[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) {
+        lightweightSession = [self lightweightSessionSnapshotFromLegacySession:[data objectForKey:@"session"] connection:connection];
+    }
+
+    BOOL autoConnect = [[spf objectForKey:@"auto_connect"] boolValue] || [[data objectForKey:@"auto_connect"] boolValue];
+    BOOL includeSession = (lightweightSession != nil) || [[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]];
+    BOOL includeQuery = [self lightweightConnectionDataIncludesQuery:data lightweightSession:lightweightSession];
+    BOOL savePassword = [[connection objectForKey:@"password"] length] > 0 || [[connection objectForKey:@"ssh_password"] length] > 0;
+    [windowController setLightweightConnectionSaveOptionsEncrypted:[[spf objectForKey:@"encrypted"] boolValue]
+                                               encryptionPassword:encryptionPassword
+                                                     autoConnect:autoConnect
+                                                    savePassword:savePassword
+                                                  includeSession:includeSession
+                                                    includeQuery:includeQuery];
+
+    if (lightweightSession && autoConnect && [windowController respondsToSelector:@selector(restoreLightweightConnectionStateDictionary:)]) {
+        BOOL restored = [windowController restoreLightweightConnectionStateDictionary:@{@"connection": connection, @"lightweightSession": lightweightSession}];
+        if (restored) {
+            [windowController setLightweightConnectionFileURL:[NSURL fileURLWithPath:filePath] savedInBundle:savedInBundle];
+        }
+        return restored ? SALightweightConnectionFileOpenSucceeded : SALightweightConnectionFileOpenUnsupported;
+    }
+
+    if (![windowController applyLightweightConnectionDictionary:connection autoConnect:autoConnect]) return SALightweightConnectionFileOpenUnsupported;
+    [windowController setLightweightConnectionFileURL:[NSURL fileURLWithPath:filePath] savedInBundle:savedInBundle];
+
+    if (lightweightSession && [windowController respondsToSelector:@selector(restoreLightweightSessionSnapshotDictionary:)]) {
+        [windowController restoreLightweightSessionSnapshotDictionary:lightweightSession];
+    }
+
+    return SALightweightConnectionFileOpenSucceeded;
+}
+
+- (BOOL)applyLightweightStateDictionary:(NSDictionary *)state toWindowController:(SPWindowController *)windowController
+{
+    if (![state isKindOfClass:[NSDictionary class]] || !windowController) return NO;
+
+    NSDictionary *data = state;
+    id dataObject = [state objectForKey:@"data"];
+    if (dataObject) {
+        if (![dataObject isKindOfClass:[NSDictionary class]]) return NO;
+        data = (NSDictionary *)dataObject;
+    }
+
+    id connectionObject = [data objectForKey:@"connection"];
+    if (![connectionObject isKindOfClass:[NSDictionary class]]) return NO;
+
+    NSMutableDictionary *connection = [(NSDictionary *)connectionObject mutableCopy];
+    [self populateLightweightKeychainReferencesInConnection:connection];
+    if ([self lightweightConnectionFileRequiresLegacyPreferences:state data:data connection:connection]) return NO;
+
+    id lightweightSession = [data objectForKey:@"lightweightSession"];
+    if (lightweightSession && ![lightweightSession isKindOfClass:[NSDictionary class]]) return NO;
+    if (!lightweightSession && [[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) {
+        lightweightSession = [self lightweightSessionSnapshotFromLegacySession:[data objectForKey:@"session"] connection:connection];
+    }
+
+    BOOL autoConnect = [self lightweightStateDictionaryRequestsAutoConnect:state];
+    if (lightweightSession && autoConnect && [windowController respondsToSelector:@selector(restoreLightweightConnectionStateDictionary:)]) {
+        return [windowController restoreLightweightConnectionStateDictionary:@{@"connection": connection, @"lightweightSession": lightweightSession}];
+    }
+
+    if (![windowController applyLightweightConnectionDictionary:connection autoConnect:autoConnect]) return NO;
+
+    if (lightweightSession && [windowController respondsToSelector:@selector(restoreLightweightSessionSnapshotDictionary:)]) {
+        [windowController restoreLightweightSessionSnapshotDictionary:lightweightSession];
+    }
+
+    return YES;
+}
+
+- (BOOL)lightweightStateDictionaryRequestsAutoConnect:(NSDictionary *)state
+{
+    if (![state isKindOfClass:[NSDictionary class]]) return NO;
+
+    id dataObject = [state objectForKey:@"data"];
+    NSDictionary *data = [dataObject isKindOfClass:[NSDictionary class]] ? (NSDictionary *)dataObject : state;
+    return [[state objectForKey:@"auto_connect"] boolValue] || [[data objectForKey:@"auto_connect"] boolValue];
+}
+
+- (NSString *)promptForLightweightEncryptedConnectionFilePasswordAtPath:(NSString *)filePath
+{
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setAlertStyle:NSAlertStyleInformational];
+    [alert setMessageText:NSLocalizedString(@"Connection file is encrypted", @"Connection file is encrypted")];
+    [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Please enter the password for ‘%@’:", @"Please enter the password"), [filePath lastPathComponent]]];
+    [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+
+    NSSecureTextField *passwordField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    [passwordField setStringValue:@""];
+    [alert setAccessoryView:passwordField];
+    [[alert window] setInitialFirstResponder:passwordField];
+
+    return [alert runModal] == NSAlertFirstButtonReturn ? [passwordField stringValue] : nil;
+}
+
+- (NSDictionary *)lightweightConnectionDataFromEncryptedSPF:(NSDictionary *)spf password:(NSString *)password
+{
+    NSData *encryptedData = [spf objectForKey:@"data"];
+    if (![encryptedData isKindOfClass:[NSData class]]) return nil;
+
+    NSDictionary *data = nil;
+    @try {
+        NSData *decryptedData = [encryptedData dataDecryptedWithPassword:password];
+        if ([decryptedData length]) {
+            NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:decryptedData];
+            id decodedData = [unarchiver decodeObjectForKey:@"data"];
+            [unarchiver finishDecoding];
+            if ([decodedData isKindOfClass:[NSDictionary class]]) {
+                data = (NSDictionary *)decodedData;
+            }
+        }
+    }
+    @catch(NSException *exception) {
+        data = nil;
+    }
+
+    return data;
+}
+
+- (void)showLightweightConnectionFileReadError:(NSString *)message
+{
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error while reading connection data file", @"error while reading connection data file") message:message callback:nil];
+}
+
+- (void)populateLightweightKeychainReferencesInConnection:(NSMutableDictionary *)connection {
+    NSString *kcid = [connection objectForKey:@"kcid"];
+    if (![kcid length]) return;
+
+    SPKeychain *keychain = [[SPKeychain alloc] init];
+    NSString *name = [connection objectForKey:@"name"];
+    if (![name length]) return;
+
+    if (![[connection objectForKey:@"password"] length] &&
+        ![[connection objectForKey:@"connectionKeychainItemName"] length] &&
+        ![[connection objectForKey:@"connectionKeychainItemAccount"] length])
+    {
+        NSString *keychainName = [keychain nameForFavoriteName:name id:kcid];
+        NSString *keychainAccount = [keychain accountForUser:[connection objectForKey:@"user"]
+                                                        host:[connection objectForKey:@"host"]
+                                                    database:[connection objectForKey:@"database"]];
+        if ([keychainName length] && [keychainAccount length]) {
+            [connection setObject:keychainName forKey:@"connectionKeychainItemName"];
+            [connection setObject:keychainAccount forKey:@"connectionKeychainItemAccount"];
+        }
+    }
+
+    if (![[connection objectForKey:@"ssh_password"] length] &&
+        ![[connection objectForKey:@"connectionSSHKeychainItemName"] length] &&
+        ![[connection objectForKey:@"connectionSSHKeychainItemAccount"] length])
+    {
+        NSString *sshKeychainName = [keychain nameForSSHForFavoriteName:name id:kcid];
+        NSString *sshKeychainAccount = [keychain accountForSSHUser:[connection objectForKey:@"ssh_user"]
+                                                           sshHost:[connection objectForKey:@"ssh_host"]];
+        if ([sshKeychainName length] && [sshKeychainAccount length]) {
+            [connection setObject:sshKeychainName forKey:@"connectionSSHKeychainItemName"];
+            [connection setObject:sshKeychainAccount forKey:@"connectionSSHKeychainItemAccount"];
+        }
+    }
+}
+
+- (BOOL)lightweightConnectionFileRequiresLegacyPreferences:(NSDictionary *)spf data:(NSDictionary *)data connection:(NSDictionary *)connection {
+    if ([spf objectForKey:SPQueryFavorites] && ![[spf objectForKey:SPQueryFavorites] isKindOfClass:[NSArray class]]) return YES;
+    if ([spf objectForKey:SPContentFilters] && ![[spf objectForKey:SPContentFilters] isKindOfClass:[NSDictionary class]]) return YES;
+    if ([spf objectForKey:SPQueryHistory]) {
+        if (![[spf objectForKey:SPQueryHistory] isKindOfClass:[NSArray class]]) return YES;
+        for (id queryHistoryItem in [spf objectForKey:SPQueryHistory]) {
+            if (![queryHistoryItem isKindOfClass:[NSString class]]) return YES;
+        }
+    }
+    if ([data objectForKey:SPQueryFavorites] && ![[data objectForKey:SPQueryFavorites] isKindOfClass:[NSArray class]]) return YES;
+    if ([data objectForKey:SPContentFilters] && ![[data objectForKey:SPContentFilters] isKindOfClass:[NSDictionary class]]) return YES;
+    if ([data objectForKey:SPQueryHistory]) {
+        if (![[data objectForKey:SPQueryHistory] isKindOfClass:[NSArray class]]) return YES;
+        for (id queryHistoryItem in [data objectForKey:SPQueryHistory]) {
+            if (![queryHistoryItem isKindOfClass:[NSString class]]) return YES;
+        }
+    }
+    if ([data objectForKey:@"session"] && ![[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) return YES;
+    if ([[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]] && ![self lightweightLegacySessionQueriesObjectIsSupported:[[data objectForKey:@"session"] objectForKey:@"queries"]]) return YES;
+
+    BOOL hasLegacyKeychainID = [[connection objectForKey:@"kcid"] length] > 0;
+    BOOL hasPassword = [[connection objectForKey:@"password"] length] > 0;
+    BOOL hasLightweightPasswordKeychain = [[connection objectForKey:@"connectionKeychainItemName"] length] > 0 && [[connection objectForKey:@"connectionKeychainItemAccount"] length] > 0;
+    if (hasLegacyKeychainID && !hasPassword && !hasLightweightPasswordKeychain) return YES;
+
+    BOOL hasSSHDetails = [[connection objectForKey:@"ssh_host"] length] > 0 || [[connection objectForKey:@"ssh_user"] length] > 0;
+    BOOL hasSSHPassword = [[connection objectForKey:@"ssh_password"] length] > 0;
+    BOOL hasLightweightSSHKeychain = [[connection objectForKey:@"connectionSSHKeychainItemName"] length] > 0 && [[connection objectForKey:@"connectionSSHKeychainItemAccount"] length] > 0;
+    if (hasLegacyKeychainID && hasSSHDetails && !hasSSHPassword && !hasLightweightSSHKeychain) return YES;
+
+    return NO;
+}
+
+- (NSDictionary *)lightweightConnectionDocumentContextFromSPF:(NSDictionary *)spf data:(NSDictionary *)data
+{
+    NSMutableDictionary *contextInfo = [NSMutableDictionary dictionary];
+
+    NSArray *queryFavorites = [spf objectForKey:SPQueryFavorites];
+    if (![queryFavorites isKindOfClass:[NSArray class]]) queryFavorites = [data objectForKey:SPQueryFavorites];
+    if ([queryFavorites isKindOfClass:[NSArray class]]) {
+        [contextInfo setObject:queryFavorites forKey:SPQueryFavorites];
+    }
+
+    NSDictionary *contentFilters = [spf objectForKey:SPContentFilters];
+    if (![contentFilters isKindOfClass:[NSDictionary class]]) contentFilters = [data objectForKey:SPContentFilters];
+    if ([contentFilters isKindOfClass:[NSDictionary class]]) {
+        [contextInfo setObject:contentFilters forKey:SPContentFilters];
+    }
+
+    NSArray *queryHistory = [spf objectForKey:SPQueryHistory];
+    if (![queryHistory isKindOfClass:[NSArray class]]) queryHistory = [data objectForKey:SPQueryHistory];
+    if ([queryHistory isKindOfClass:[NSArray class]]) {
+        [contextInfo setObject:queryHistory forKey:SPQueryHistory];
+    }
+
+    return contextInfo;
+}
+
+- (BOOL)lightweightConnectionDataIncludesQuery:(NSDictionary *)data lightweightSession:(NSDictionary *)lightweightSession
+{
+    NSDictionary *legacySession = [data objectForKey:@"session"];
+    if ([legacySession isKindOfClass:[NSDictionary class]]) {
+        id queries = [legacySession objectForKey:@"queries"];
+        if ([[self lightweightQueryStringFromLegacySessionQueriesObject:queries] length] > 0) return YES;
+    }
+
+    NSDictionary *sessionState = [lightweightSession objectForKey:@"state"];
+    if ([sessionState isKindOfClass:[NSDictionary class]]) {
+        id queries = [sessionState objectForKey:@"queries"];
+        if ([queries isKindOfClass:[NSArray class]] && [(NSArray *)queries count] > 0) return YES;
+    }
+
+    return NO;
+}
+
+- (BOOL)lightweightLegacySessionQueriesObjectIsSupported:(id)queriesObject
+{
+    if (!queriesObject) return YES;
+    if ([queriesObject isKindOfClass:[NSString class]]) return YES;
+    if ([queriesObject isKindOfClass:[NSData class]]) {
+        if (![(NSData *)queriesObject length]) return YES;
+        return [[self lightweightQueryStringFromLegacySessionQueriesObject:queriesObject] length] > 0;
+    }
+
+    return NO;
+}
+
+- (NSString *)lightweightQueryStringFromLegacySessionQueriesObject:(id)queriesObject
+{
+    if ([queriesObject isKindOfClass:[NSString class]]) return queriesObject;
+    if (![queriesObject isKindOfClass:[NSData class]] || ![(NSData *)queriesObject length]) return nil;
+
+    NSData *queryData = nil;
+    @try {
+        queryData = [(NSData *)queriesObject decompress];
+    }
+    @catch(NSException *exception) {
+        queryData = nil;
+    }
+
+    if (![queryData length]) return nil;
+    return [[NSString alloc] initWithData:queryData encoding:NSUTF8StringEncoding];
+}
+
+- (NSDictionary *)lightweightSessionSnapshotFromLegacySession:(NSDictionary *)session connection:(NSDictionary *)connection
+{
+    if (![session isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
+    id databaseObject = [session objectForKey:@"database"] ?: [connection objectForKey:@"database"];
+    id tableObject = [session objectForKey:@"table"];
+    id viewObject = [session objectForKey:@"view"];
+    NSString *database = [databaseObject isKindOfClass:[NSString class]] ? databaseObject : nil;
+    NSString *table = [tableObject isKindOfClass:[NSString class]] ? tableObject : nil;
+    NSString *view = [viewObject isKindOfClass:[NSString class]] ? viewObject : nil;
+
+    if ([database length]) [snapshot setObject:database forKey:@"selectedDatabase"];
+    if ([table length]) [snapshot setObject:table forKey:@"selectedTable"];
+
+    NSNumber *viewMode = @0;
+    if ([view isEqualToString:@"SP_VIEW_CONTENT"]) {
+        viewMode = @1;
+    } else if ([view isEqualToString:@"SP_VIEW_CUSTOMQUERY"]) {
+        viewMode = @2;
+    } else if ([view isEqualToString:@"SP_VIEW_STATUS"]) {
+        viewMode = @3;
+    } else if ([view isEqualToString:@"SP_VIEW_RELATIONS"]) {
+        viewMode = @4;
+    } else if ([view isEqualToString:@"SP_VIEW_TRIGGERS"]) {
+        viewMode = @5;
+    }
+    [snapshot setObject:viewMode forKey:@"viewMode"];
+
+    id queriesObject = [session objectForKey:@"queries"];
+    NSString *queries = [self lightweightQueryStringFromLegacySessionQueriesObject:queriesObject];
+    if ([queries length]) {
+        NSMutableDictionary *query = [NSMutableDictionary dictionary];
+        id connectionTypeObject = [connection objectForKey:@"type"];
+        NSString *connectionType = [connectionTypeObject isKindOfClass:[NSString class]] ? connectionTypeObject : nil;
+        BOOL socketConnection = [connectionType isEqualToString:@"SPSocketConnection"];
+        id port = [connection objectForKey:@"port"];
+
+        [query setObject:(socketConnection ? @"socket" : @"tcp") forKey:@"transport"];
+        [query setObject:(socketConnection ? ([connection objectForKey:@"socket"] ?: @"") : ([connection objectForKey:@"host"] ?: @"")) forKey:@"host"];
+        [query setObject:(port ? [port description] : @"") forKey:@"port"];
+        [query setObject:([connection objectForKey:@"user"] ?: @"") forKey:@"username"];
+        [query setObject:(database ?: @"") forKey:@"database"];
+        [query setObject:(table ?: @"") forKey:@"table"];
+        [query setObject:queries forKey:@"text"];
+
+        [snapshot setObject:@{@"version": @1, @"queries": @[query]} forKey:@"state"];
+    }
+
+    return [snapshot count] ? snapshot : nil;
 }
 
 - (void)openSQLFileAtPath:(NSString *)filePath
@@ -1484,7 +2028,12 @@ validateMenuItemDone:
     // Check size and NSFileType
     NSDictionary *attr = [fileManager attributesOfItemAtPath:filePath error:nil];
 
-    SPDatabaseDocument *frontDocument = [self frontDocument];
+    NSURL *sqlFileURL = [NSURL fileURLWithPath:filePath];
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
+    SPDatabaseDocument *frontDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
+
+    // If the user came from an openPanel use the chosen encoding, otherwise attempt to autodetect it.
+    NSStringEncoding sqlEncoding = encodingPopUp ? [[encodingPopUp selectedItem] tag] : [fileManager detectEncodingforFileAtPath:filePath];
 
     if (attr)
     {
@@ -1507,7 +2056,8 @@ validateMenuItemDone:
                 [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
 
                 // Show 'Import' button only if there's a connection available
-                if ([self frontDocument]) {
+                BOOL activeLightweightCanImportSQL = [activeWindowController canImportLightweightSQL];
+                if (frontDocument || activeLightweightCanImportSQL) {
                     [alert addButtonWithTitle:NSLocalizedString(@"Import", @"import button")];
                 }
 
@@ -1516,7 +2066,15 @@ validateMenuItemDone:
                     case NSAlertSecondButtonReturn: // Cancel
                         return;
                     case NSAlertThirdButtonReturn: { // Import
-                        [[frontDocument tableDumpInstance] startSQLImportProcessWithFile:filePath];
+                        if (frontDocument) {
+                            [[frontDocument tableDumpInstance] startSQLImportProcessWithFile:filePath];
+                        }
+                        else if (activeLightweightCanImportSQL) {
+                            if (encodingPopUp) {
+                                [[NSUserDefaults standardUserDefaults] setInteger:sqlEncoding forKey:SPLastSQLFileEncoding];
+                            }
+                            [activeWindowController importLightweightSQLFileAtURL:sqlFileURL encoding:@(sqlEncoding)];
+                        }
                         return;
                     }
                     default: // Ok - just proceed
@@ -1527,18 +2085,7 @@ validateMenuItemDone:
     }
 
     // Attempt to open the file into a string.
-    NSStringEncoding sqlEncoding;
     NSString *sqlString = nil;
-
-    // If the user came from an openPanel use the chosen encoding
-    if (encodingPopUp) {
-        sqlEncoding = [[encodingPopUp selectedItem] tag];
-
-        // Otherwise, attempt to autodetect the encoding
-    }
-    else {
-        sqlEncoding = [fileManager detectEncodingforFileAtPath:filePath];
-    }
 
     NSError *error = nil;
 
@@ -1557,26 +2104,28 @@ validateMenuItemDone:
         [[NSUserDefaults standardUserDefaults] setInteger:[[encodingPopUp selectedItem] tag] forKey:SPLastSQLFileEncoding];
     }
 
-    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
     if ([activeWindowController hasActiveLightweightConnection] && ![activeWindowController loadedDatabaseDocumentIfAvailable]) {
-        [activeWindowController doPerformLightweightLoadQueryService:sqlString];
-        [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+        [activeWindowController doPerformLightweightLoadQueryService:sqlString fileURL:sqlFileURL encoding:sqlEncoding];
+        [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:sqlFileURL];
         return;
     }
 
-    // Check if at least one document exists.  If not, open one.
-    if (!activeWindowController) {
-        frontDocument = [self.tabManager newWindowForWindow].databaseDocument;
-        [frontDocument initQueryEditorWithString:sqlString];
-    }
-    else {
-        // Pass query to the Query editor of the current document
-        [frontDocument doPerformLoadQueryService:sqlString];
+    frontDocument = [activeWindowController loadedDatabaseDocumentIfAvailable];
+
+    // If there is no loaded legacy document, keep the new/active window lightweight and load the SQL after connect.
+    if (!frontDocument) {
+        SPWindowController *targetWindowController = activeWindowController ?: [self.tabManager newWindowForWindow];
+        [targetWindowController queueLightweightSQLFileOpenWithString:sqlString fileURL:sqlFileURL encoding:sqlEncoding];
+        [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:sqlFileURL];
+        return;
     }
 
-    [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+    // Pass query to the Query editor of the current document
+    [frontDocument doPerformLoadQueryService:sqlString];
 
-    [frontDocument setSqlFileURL:[NSURL fileURLWithPath:filePath]];
+    [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:sqlFileURL];
+
+    [frontDocument setSqlFileURL:sqlFileURL];
     [frontDocument setSqlFileEncoding:sqlEncoding];
 }
 
@@ -1652,9 +2201,16 @@ validateMenuItemDone:
 
                     // Security check if file really exists
                     if ([fileManager fileExistsAtPath:fileName]) {
-                        [newWindowController.databaseDocument setIsSavedInBundle:isBundleFile];
-                        if (![newWindowController.databaseDocument setStateFromConnectionFile:fileName]) {
+                        SALightweightConnectionFileOpenResult openResult = [self openLightweightConnectionFileAtPath:fileName windowController:newWindowController savedInBundle:isBundleFile];
+                        if (openResult == SALightweightConnectionFileOpenHandledFailure) {
                             break;
+                        }
+                        if (openResult == SALightweightConnectionFileOpenUnsupported) {
+                            SPDatabaseDocument *document = [newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"SPFS bundle connection file required legacy database view"];
+                            [document setIsSavedInBundle:isBundleFile];
+                            if (![document setStateFromConnectionFile:fileName]) {
+                                break;
+                            }
                         }
                         window = newWindowController.window;
                     } else {
@@ -1752,7 +2308,11 @@ validateMenuItemDone:
     }
 
     SPWindowController *windowController = [self.tabManager newWindowForWindow];
-    [windowController.databaseDocument setState:@{@"connection":details,@"auto_connect": @(connect)} fromFile:NO];
+    if ([windowController applyLightweightConnectionDictionary:details autoConnect:connect]) {
+        return;
+    }
+
+    [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"URL scheme connection required legacy database view"] setState:@{@"connection":details,@"auto_connect": @(connect)} fromFile:NO];
 }
 
 - (void)handleEventWithURL:(NSURL*)url
@@ -1830,9 +2390,15 @@ validateMenuItemDone:
             
             if (targetFavoriteNode) {
                 SPWindowController *windowController = [self.tabManager newWindowForWindow];
-                SPFavoritesOutlineView *favoritesOutlineView = windowController.databaseDocument.connectionController.favoritesOutlineView;
+                if ([windowController applyLightweightFavoriteDictionary:targetFavoriteNode.dictionaryRepresentation autoConnect:YES]) {
+                    return;
+                }
+
+                SPDatabaseDocument *document = [windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"LaunchFavorite URL scheme required legacy database view"];
+                SPConnectionController *connectionController = document.connectionController;
+                SPFavoritesOutlineView *favoritesOutlineView = connectionController.favoritesOutlineView;
                 [favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:[favoritesOutlineView rowForItem:targetFavoriteNode]] byExtendingSelection:NO];
-                [windowController.databaseDocument.connectionController initiateConnection:windowController.databaseDocument.connectionController];
+                [connectionController initiateConnection:connectionController];
                 return;
             }
         }
@@ -2636,9 +3202,15 @@ validateMenuItemDone:
 
     for (NSWindow *aWindow in [self orderedWindows]) {
         if ([[aWindow windowController] isMemberOfClass:[SPWindowController class]]) {
-            SPDatabaseDocument *databaseDocument = [(SPWindowController *)[aWindow windowController] loadedDatabaseDocumentIfAvailable];
+            SPWindowController *windowController = (SPWindowController *)[aWindow windowController];
+            SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
             if (databaseDocument) {
                 [orderedDocuments addObject:databaseDocument];
+            } else if ([windowController hasActiveLightweightConnection]) {
+                id lightweightDocument = [windowController lightweightAppleScriptDocumentProxy];
+                if (lightweightDocument) {
+                    [orderedDocuments addObject:lightweightDocument];
+                }
             }
         }
     }
@@ -2682,10 +3254,14 @@ validateMenuItemDone:
  */
 - (id)handlePrintScriptCommand:(NSScriptCommand *)command
 {
-    SPDatabaseDocument *frontDoc = [self frontDocument];
+    SPWindowController *activeWindowController = [self.tabManager activeWindowController];
+    SPDatabaseDocument *frontDoc = [activeWindowController loadedDatabaseDocumentIfAvailable];
 
     if (frontDoc && ![frontDoc isWorking] && ![[frontDoc connectionID] isEqualToString:@"_"]) {
         [frontDoc startPrintDocumentOperation];
+    }
+    else if ([activeWindowController canPrintLightweightDocument]) {
+        [activeWindowController printLightweightDocument:nil];
     }
 
     return nil;

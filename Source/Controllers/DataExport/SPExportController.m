@@ -166,6 +166,8 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 - (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source;
 - (BOOL)_canStartLightweightExportWithCurrentOptions;
 - (BOOL)_lightweightSelectedTableExportHasSelection;
+- (SPTableType)_lightweightTableTypeForItemName:(NSString *)itemName;
+- (BOOL)_lightweightCanExportItemType:(SPTableType)itemType usingExportType:(SPExportType)type;
 - (BOOL)_lightweightSupportsExportType:(SPExportType)type;
 - (NSArray *)_lightweightResultForSource:(SPExportSource)source;
 - (void)_enforceLightweightExportUIState;
@@ -725,7 +727,8 @@ set_input:
 
 - (BOOL)_lightweightResultAvailableForSource:(SPExportSource)source
 {
-	return [[self _lightweightResultForSource:source] count] > 1;
+	NSArray *result = [self _lightweightResultForSource:source];
+	return [result count] > 0 && [[result firstObject] count] > 0;
 }
 
 - (BOOL)_canStartLightweightExportWithCurrentOptions
@@ -746,12 +749,15 @@ set_input:
 
 	for (NSArray *table in tables)
 	{
+		SPTableType itemType = (SPTableType)[[table safeObjectAtIndex:4] intValue];
+		if (![self _lightweightCanExportItemType:itemType usingExportType:exportType]) continue;
+
 		if (exportType == SPSQLExport) {
 			if ([[table safeObjectAtIndex:1] boolValue] || [[table safeObjectAtIndex:2] boolValue] || [[table safeObjectAtIndex:3] boolValue]) {
 				return YES;
 			}
 		}
-		else if ([[table safeObjectAtIndex:2] boolValue]) {
+		else if (exportType == SPDotExport || [[table safeObjectAtIndex:2] boolValue]) {
 			return YES;
 		}
 	}
@@ -759,10 +765,28 @@ set_input:
 	return NO;
 }
 
+- (SPTableType)_lightweightTableTypeForItemName:(NSString *)itemName
+{
+	if ([lightweightProcedures containsObject:itemName]) return SPTableTypeProc;
+	if ([lightweightFunctions containsObject:itemName]) return SPTableTypeFunc;
+	return SPTableTypeTable;
+}
+
+- (BOOL)_lightweightCanExportItemType:(SPTableType)itemType usingExportType:(SPExportType)type
+{
+	if (type == SPSQLExport) {
+		return itemType == SPTableTypeTable || itemType == SPTableTypeView || itemType == SPTableTypeProc || itemType == SPTableTypeFunc;
+	}
+	if (type == SPCSVExport || type == SPXMLExport || type == SPDotExport) {
+		return itemType == SPTableTypeTable || itemType == SPTableTypeView;
+	}
+	return NO;
+}
+
 - (BOOL)_lightweightSupportsExportType:(SPExportType)type
 {
 	if ([self _isLightweightSelectedTableExport]) {
-		return type == SPSQLExport || type == SPCSVExport || type == SPXMLExport;
+		return type == SPSQLExport || type == SPCSVExport || type == SPXMLExport || type == SPDotExport;
 	}
 	return type == SPCSVExport || type == SPXMLExport;
 }
@@ -868,7 +892,7 @@ set_input:
 	NSAlert *alert = [[NSAlert alloc] init];
 	[alert setAlertStyle:NSAlertStyleInformational];
 	[alert setMessageText:NSLocalizedString(@"Export is unavailable for this lightweight view.", @"lightweight export unavailable title")];
-	[alert setInformativeText:NSLocalizedString(@"Load a Content or Query result first. Full table, SQL and Dot export still require the legacy database view and are not opened automatically.", @"lightweight export unavailable message")];
+	[alert setInformativeText:NSLocalizedString(@"Select one or more exportable objects, or load a Content or Query result first. Lightweight SQL export supports tables, views, procedures, functions, and table triggers; CSV, XML, and Dot export support tables/views only.", @"lightweight export unavailable message")];
 	[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
 
 	NSWindow *parentWindow = [self _exportParentWindow];
@@ -996,12 +1020,13 @@ set_input:
 	if ([self _isLightweightExport]) {
 		if ([self _isLightweightSelectedTableExport]) {
 			for (id itemName in lightweightSelectedTableItems) {
+				SPTableType itemType = [self _lightweightTableTypeForItemName:itemName];
 				[tables safeAddObject:[NSMutableArray arrayWithObjects:
 									   itemName,
 									   @NO,
 									   @NO,
 									   @NO,
-									   [NSNumber numberWithInt:SPTableTypeTable],
+									   [NSNumber numberWithInt:itemType],
 									   nil]];
 			}
 
@@ -1756,36 +1781,41 @@ set_input:
 			// Create an array of tables to export
 			for (NSMutableArray *table in tables)
 			{
+				SPTableType itemType = (SPTableType)[[table safeObjectAtIndex:4] intValue];
+				if ([self _isLightweightExport] && ![self _lightweightCanExportItemType:itemType usingExportType:exportType]) {
+					continue;
+				}
+
 				if (exportType == SPSQLExport) {
-					if ([[table safeObjectAtIndex:1] boolValue] || [[table safeObjectAtIndex:2] boolValue] || [[table safeObjectAtIndex:3] boolValue]) {
+						if ([[table safeObjectAtIndex:1] boolValue] || [[table safeObjectAtIndex:2] boolValue] || [[table safeObjectAtIndex:3] boolValue]) {
 
-						// Check the overall export settings
-						if ([[table safeObjectAtIndex:1] boolValue] && (![exportSQLIncludeStructureCheck state])) {
-							[table safeReplaceObjectAtIndex:1 withObject:@NO];
+							// Check the overall export settings
+							if ([[table safeObjectAtIndex:1] boolValue] && (![exportSQLIncludeStructureCheck state])) {
+								[table safeReplaceObjectAtIndex:1 withObject:@NO];
+							}
+
+							if ([[table safeObjectAtIndex:2] boolValue] && (![exportSQLIncludeContentCheck state])) {
+								[table safeReplaceObjectAtIndex:2 withObject:@NO];
+							}
+
+							if ([[table safeObjectAtIndex:3] boolValue] && (![exportSQLIncludeDropSyntaxCheck state])) {
+								[table safeReplaceObjectAtIndex:3 withObject:@NO];
+							}
+
+							[exportTables safeAddObject:table];
+						}
 					}
-
-						if ([[table safeObjectAtIndex:2] boolValue] && (![exportSQLIncludeContentCheck state])) {
-							[table safeReplaceObjectAtIndex:2 withObject:@NO];
-					}
-
-						if ([[table safeObjectAtIndex:3] boolValue] && (![exportSQLIncludeDropSyntaxCheck state])) {
-							[table safeReplaceObjectAtIndex:3 withObject:@NO];
-					}
-
-						[exportTables safeAddObject:table];
-				}
-			}
-				else if (exportType == SPDotExport) {
-					[exportTables safeAddObject:[table firstObject]];
-			}
-				else {
-					if ([[table safeObjectAtIndex:2] boolValue]) {
+					else if (exportType == SPDotExport) {
 						[exportTables safeAddObject:[table firstObject]];
+					}
+					else {
+						if ([[table safeObjectAtIndex:2] boolValue]) {
+							[exportTables safeAddObject:[table firstObject]];
+						}
+					}
 				}
-			}
-			}
 
-			break;
+				break;
 	}
 
 	// Set the export type label

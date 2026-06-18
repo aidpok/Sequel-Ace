@@ -107,7 +107,7 @@
 
 #pragma mark - SPAppleScriptSupport
 
-- (NSArray <SPDatabaseDocument *> *)orderedDocuments;
+- (NSArray *)orderedDocuments;
 - (NSArray *)orderedWindows;
 - (id)handleQuitScriptCommand:(NSScriptCommand *)command;
 - (id)handleOpenScriptCommand:(NSScriptCommand *)command;

@@ -231,6 +231,7 @@ NSString *SPCSVImportFieldTerminator             = @"CSVImportFieldTerminator";
 NSString *SPCSVImportFirstLineIsHeader           = @"CSVImportFirstLineIsHeader";
 NSString *SPCSVImportLineTerminator              = @"CSVImportLineTerminator";
 NSString *SPCSVFieldImportMappingAlignment       = @"CSVFieldImportMappingAlignment";
+NSString *SPSQLImportErrorHandlingSelection      = @"SQLImportErrorHandlingSelection";
 NSString *SPImportClipboardTempFileNamePrefix    = @"~/tmp/_SP_ClipBoard_Import_File_";
 NSString *SPLastExportSettings                   = @"LastExportSettings";
 NSString *SPAutoCheckClipboardForConnectionStrings = @"AutoCheckClipboardForConnectionStrings";

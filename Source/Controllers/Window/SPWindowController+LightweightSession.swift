@@ -122,6 +122,55 @@ extension SPWindowController {
         return true
     }
 
+    @objc(applyLightweightConnectionDictionary:autoConnect:)
+    func applyLightweightConnectionDictionary(_ connectionDictionary: NSDictionary?, autoConnect: Bool) -> Bool {
+        guard loadedDatabaseDocument == nil,
+              let connectionDictionary = connectionDictionary,
+              let info = lightweightConnectionInfo(from: connectionDictionary),
+              let connectionController = connectionController else { return false }
+
+        selectedDatabase = info.database.isEmpty ? nil : info.database
+        if autoConnect {
+            activeConnectionInfo = info
+        }
+        connectionController.applyLightweightConnectionInfo(info)
+        if autoConnect {
+            connectionController.initiateConnection(nil)
+        }
+        return true
+    }
+
+    @objc(applyLightweightFavoriteDictionary:autoConnect:)
+    func applyLightweightFavoriteDictionary(_ favoriteDictionary: NSDictionary?, autoConnect: Bool) -> Bool {
+        guard let favoriteDictionary = favoriteDictionary else { return false }
+
+        let info = SAConnectionInfoObjC.info(fromFavoriteDictionary: favoriteDictionary)
+        return applyLightweightConnectionInfo(info, autoConnect: autoConnect)
+    }
+
+    @objc func connectSelectedLightweightConnection() -> Bool {
+        guard loadedDatabaseDocument == nil,
+              let connectionController = connectionController else { return false }
+
+        connectionController.initiateConnection(nil)
+        return true
+    }
+
+    private func applyLightweightConnectionInfo(_ info: SAConnectionInfoObjC, autoConnect: Bool) -> Bool {
+        guard loadedDatabaseDocument == nil,
+              let connectionController = connectionController else { return false }
+
+        selectedDatabase = info.database.isEmpty ? nil : info.database
+        if autoConnect {
+            activeConnectionInfo = info
+        }
+        connectionController.applyLightweightConnectionInfo(info)
+        if autoConnect {
+            connectionController.initiateConnection(nil)
+        }
+        return true
+    }
+
     func lightweightConnectionDictionary(for info: SAConnectionInfoObjC, includePasswords: Bool) -> NSDictionary {
         let connection = NSMutableDictionary()
         connection[SALightweightConnectionDictionaryKey.rdbmsType] = "mysql"

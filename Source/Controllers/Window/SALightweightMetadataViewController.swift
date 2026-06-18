@@ -371,7 +371,7 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
         self.connection = connection
         titleLabel.stringValue = String(format: NSLocalizedString("Relations for table: %@", comment: "Relations tab subtitle showing table name"), table)
 
-        switch SALightweightSchemaMetadataLoader.relationsSupportState(table: table, database: database, connection: connection) {
+        switch SALightweightMetadataReadService.relationsSupportState(table: table, database: database, connection: connection) {
         case .supported:
             relationsSupported = true
         case .unsupported(let message), .unavailable(let message):
@@ -383,7 +383,7 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
 
         updateButtonState()
         tableController.load {
-            SALightweightSchemaMetadataLoader.relations(for: table, database: database, connection: connection)
+            SALightweightMetadataReadService.relations(for: table, database: database, connection: connection)
         }
     }
 
@@ -394,6 +394,10 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
     @objc private func refreshRelations(_ sender: Any) {
         guard let connection = connection, !table.isEmpty, !database.isEmpty else { return }
         loadRelations(for: table, database: database, connection: connection)
+    }
+
+    func refreshActiveRelationsDetail() {
+        refreshRelations(self)
     }
 
     @objc private func removeRelation(_ sender: Any) {
@@ -919,7 +923,7 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
         titleLabel.stringValue = String(format: NSLocalizedString("Triggers for table: %@", comment: "triggers for table label"), table)
         updateButtonState()
         tableController.load {
-            SALightweightSchemaMetadataLoader.triggers(for: table, database: database, connection: connection)
+            SALightweightMetadataReadService.triggers(for: table, database: database, connection: connection)
         }
     }
 
@@ -930,6 +934,10 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     @objc private func refreshTriggers(_ sender: Any) {
         guard let connection = connection, !table.isEmpty, !database.isEmpty else { return }
         loadTriggers(for: table, database: database, connection: connection)
+    }
+
+    func refreshActiveTriggersDetail() {
+        refreshTriggers(self)
     }
 
     @objc private func removeTrigger(_ sender: Any) {
@@ -1284,8 +1292,8 @@ fileprivate enum SALightweightRelationsSupportState {
     case unavailable(String)
 }
 
-enum SALightweightSchemaMetadataLoader {
-    fileprivate static func relationsSupportState(table: String, database: String, connection: SPMySQLConnection) -> SALightweightRelationsSupportState {
+private enum SALightweightMetadataReadService {
+    static func relationsSupportState(table: String, database: String, connection: SPMySQLConnection) -> SALightweightRelationsSupportState {
         let query = """
             SELECT ENGINE, TABLE_TYPE \
             FROM information_schema.TABLES \
@@ -1380,6 +1388,64 @@ enum SALightweightSchemaMetadataLoader {
         return SALightweightMetadataSnapshot(rows: rows, emptyMessage: NSLocalizedString("No relations for this table.", comment: "relations empty placeholder"))
     }
 
+    static func triggers(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
+        let query = """
+            SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT, CREATED, DEFINER, SQL_MODE \
+            FROM information_schema.TRIGGERS \
+            WHERE TRIGGER_SCHEMA = \(sqlString(database, connection: connection)) \
+              AND EVENT_OBJECT_TABLE = \(sqlString(table, connection: connection)) \
+            ORDER BY TRIGGER_NAME
+            """
+
+        guard let result = connection.queryString(query) else {
+            return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load triggers.", comment: "triggers error placeholder"), connection: connection))
+        }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        var rows: [[String: String]] = []
+        while let row = result.getRowAsDictionary() as? [String: Any] {
+            rows.append([
+                "TriggerName": displayString(row["TRIGGER_NAME"]),
+                "TriggerEvent": displayString(row["EVENT_MANIPULATION"]),
+                "TriggerActionTime": displayString(row["ACTION_TIMING"]),
+                "TriggerStatement": displayString(row["ACTION_STATEMENT"]),
+                "TriggerDefiner": displayString(row["DEFINER"]),
+                "TriggerCreated": displayDate(row["CREATED"]),
+                "TriggerSQLMode": displayString(row["SQL_MODE"])
+            ])
+        }
+
+        if connection.queryErrored() {
+            return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load triggers.", comment: "triggers error placeholder"), connection: connection))
+        }
+
+        return SALightweightMetadataSnapshot(rows: rows, emptyMessage: NSLocalizedString("No triggers for this table.", comment: "triggers empty placeholder"))
+    }
+
+    private static func displayDate(_ value: Any?) -> String {
+        let rawValue = displayString(value)
+        guard let date = DateFormatter.naturalLanguageFormatter.date(from: rawValue) else { return rawValue }
+        return DateFormatter.shortStyleFormatter.string(from: date)
+    }
+
+    private static func displayString(_ value: Any?) -> String {
+        guard let value = value, !(value is NSNull) else { return "" }
+
+        let stringValue = String(describing: value)
+        return stringValue.isEmpty ? "" : stringValue
+    }
+
+    private static func errorMessage(prefix: String, connection: SPMySQLConnection) -> String {
+        guard let error = connection.lastErrorMessage(), !error.isEmpty else { return prefix }
+        return "\(prefix)\n\nMySQL said: \(error)"
+    }
+
+    private static func sqlString(_ value: String, connection: SPMySQLConnection) -> String {
+        return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+}
+
+enum SALightweightSchemaMetadataLoader {
     fileprivate static func relationConstraintNames(for table: String, database: String, connection: SPMySQLConnection) -> Set<String> {
         let query = """
             SELECT CONSTRAINT_NAME \
@@ -1455,56 +1521,11 @@ enum SALightweightSchemaMetadataLoader {
         return columns
     }
 
-    static func triggers(for table: String, database: String, connection: SPMySQLConnection) -> SALightweightMetadataSnapshot {
-        let query = """
-            SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT, CREATED, DEFINER, SQL_MODE \
-            FROM information_schema.TRIGGERS \
-            WHERE TRIGGER_SCHEMA = \(sqlString(database, connection: connection)) \
-              AND EVENT_OBJECT_TABLE = \(sqlString(table, connection: connection)) \
-            ORDER BY TRIGGER_NAME
-            """
-
-        guard let result = connection.queryString(query) else {
-            return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load triggers.", comment: "triggers error placeholder"), connection: connection))
-        }
-
-        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
-        var rows: [[String: String]] = []
-        while let row = result.getRowAsDictionary() as? [String: Any] {
-            rows.append([
-                "TriggerName": displayString(row["TRIGGER_NAME"]),
-                "TriggerEvent": displayString(row["EVENT_MANIPULATION"]),
-                "TriggerActionTime": displayString(row["ACTION_TIMING"]),
-                "TriggerStatement": displayString(row["ACTION_STATEMENT"]),
-                "TriggerDefiner": displayString(row["DEFINER"]),
-                "TriggerCreated": displayDate(row["CREATED"]),
-                "TriggerSQLMode": displayString(row["SQL_MODE"])
-            ])
-        }
-
-        if connection.queryErrored() {
-            return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load triggers.", comment: "triggers error placeholder"), connection: connection))
-        }
-
-        return SALightweightMetadataSnapshot(rows: rows, emptyMessage: NSLocalizedString("No triggers for this table.", comment: "triggers empty placeholder"))
-    }
-
-    private static func displayDate(_ value: Any?) -> String {
-        let rawValue = displayString(value)
-        guard let date = DateFormatter.naturalLanguageFormatter.date(from: rawValue) else { return rawValue }
-        return DateFormatter.shortStyleFormatter.string(from: date)
-    }
-
     private static func displayString(_ value: Any?) -> String {
         guard let value = value, !(value is NSNull) else { return "" }
 
         let stringValue = String(describing: value)
         return stringValue.isEmpty ? "" : stringValue
-    }
-
-    private static func errorMessage(prefix: String, connection: SPMySQLConnection) -> String {
-        guard let error = connection.lastErrorMessage(), !error.isEmpty else { return prefix }
-        return "\(prefix)\n\nMySQL said: \(error)"
     }
 
     private static func sqlString(_ value: String, connection: SPMySQLConnection) -> String {

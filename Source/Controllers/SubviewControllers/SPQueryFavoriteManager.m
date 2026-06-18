@@ -46,6 +46,43 @@
 #define SP_MULTIPLE_SELECTION_PLACEHOLDER_STRING NSLocalizedString(@"[multiple selection]", @"[multiple selection]")
 #define SP_NO_SELECTION_PLACEHOLDER_STRING       NSLocalizedString(@"[no selection]", @"[no selection]")
 
+@interface SPDatabaseDocumentQueryFavoriteContext : NSObject <SPQueryFavoriteManagerContext>
+{
+	SPDatabaseDocument *databaseDocument;
+}
+
+- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document;
+
+@end
+
+@implementation SPDatabaseDocumentQueryFavoriteContext
+
+- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document
+{
+	if ((self = [super init])) {
+		databaseDocument = document;
+	}
+
+	return self;
+}
+
+- (NSURL *)queryFavoriteFileURL
+{
+	return [databaseDocument fileURL];
+}
+
+- (BOOL)queryFavoriteIsUntitled
+{
+	return [databaseDocument isUntitled] || ![databaseDocument fileURL];
+}
+
+- (id)queryFavoriteCustomQueryInstance
+{
+	return [databaseDocument customQueryInstance];
+}
+
+@end
+
 @interface SPQueryFavoriteManager ()
 
 - (void)_initWithNoSelection;
@@ -59,19 +96,39 @@
  */
 - (instancetype)initWithDelegate:(id)managerDelegate
 {
+	if(managerDelegate == nil) {
+		NSBeep();
+		NSLog(@"Query Favorite Manager was called without a delegate.");
+		return nil;
+	}
+
+	id delegateContext = [managerDelegate valueForKeyPath:@"tableDocumentInstance"];
+	if ([delegateContext conformsToProtocol:@protocol(SPQueryFavoriteManagerContext)]) {
+		return [self initWithQueryFavoriteContext:delegateContext];
+	}
+
+	return [self initWithQueryFavoriteContext:[[SPDatabaseDocumentQueryFavoriteContext alloc] initWithDatabaseDocument:delegateContext]];
+}
+
+/**
+ * Initialize the manager with a narrow query-favorite document context.
+ */
+- (instancetype)initWithQueryFavoriteContext:(id <SPQueryFavoriteManagerContext>)context
+{
+	if (context == nil) {
+		NSBeep();
+		NSLog(@"Query Favorite Manager was called without a query favorite context.");
+
+		return nil;
+	}
+
 	if ((self = [super initWithWindowNibName:@"QueryFavoriteManager"])) {
 
 		prefs = [NSUserDefaults standardUserDefaults];
 
 		favorites = [[NSMutableArray alloc] init];
-		
-		if(managerDelegate == nil) {
-			NSBeep();
-			NSLog(@"Query Favorite Manager was called without a delegate.");
-			return nil;
-		}
-		tableDocumentInstance = [managerDelegate valueForKeyPath:@"tableDocumentInstance"];
-		delegatesFileURL = [tableDocumentInstance fileURL];
+		queryFavoriteContext = context;
+		delegatesFileURL = [[queryFavoriteContext queryFavoriteFileURL] copy];
 	}
 	
 	return self;
@@ -101,21 +158,23 @@
 			[favorites addObject:[fav mutableCopy]];
 	}
 
-	NSString *delegatesFileURLStr = [delegatesFileURL absoluteString];
-	
-	if(delegatesFileURLStr.isPercentEncoded){
-		delegatesFileURLStr = delegatesFileURLStr.stringByRemovingPercentEncoding;
-	}
+	if (delegatesFileURL) {
+		NSString *delegatesFileURLStr = [delegatesFileURL absoluteString];
 
-	[favorites addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-		[delegatesFileURLStr lastPathComponent], @"name",
-		[delegatesFileURL absoluteString], @"headerOfFileURL", 
-		@"", @"query",
-		nil]];
+		if(delegatesFileURLStr.isPercentEncoded){
+			delegatesFileURLStr = delegatesFileURLStr.stringByRemovingPercentEncoding;
+		}
 
-	if([[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL]) {
-		for(id fav in [[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL])
-			[favorites addObject:[fav mutableCopy]];
+		[favorites addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+			[delegatesFileURLStr lastPathComponent], @"name",
+			[delegatesFileURL absoluteString], @"headerOfFileURL",
+			@"", @"query",
+			nil]];
+
+		if([[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL]) {
+			for(id fav in [[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL])
+				[favorites addObject:[fav mutableCopy]];
+		}
 	}
 
 	// Select the first query if any		
@@ -184,7 +243,7 @@
  */
 - (id)customQueryInstance
 {
-	return [tableDocumentInstance customQueryInstance];
+	return [queryFavoriteContext queryFavoriteCustomQueryInstance];
 }
 
 #pragma mark -
@@ -223,7 +282,7 @@
 	} 
 
 	// If the DatabaseDocument is an on-disk document, add the favourite to the bottom of it
-	else if (![tableDocumentInstance isUntitled]) {
+	else if (![queryFavoriteContext queryFavoriteIsUntitled]) {
 		insertIndex = [favorites count] - 1;
 		[favorites addObject:favorite];
 	}
@@ -231,7 +290,7 @@
 	// Otherwise, add to the bottom of the Global array by default
 	else {
 		insertIndex = 1;
-		while (![[favorites objectAtIndex:insertIndex] objectForKey:@"headerOfFileURL"]) {
+		while (insertIndex < [favorites count] && ![[favorites objectAtIndex:insertIndex] objectForKey:@"headerOfFileURL"]) {
 			insertIndex++;
 		}
 		[favorites insertObject:favorite atIndex:insertIndex];
@@ -452,9 +511,11 @@
 			[[self window] makeFirstResponder:favoritesTableView];
 		}
 
-		// Update current document's query favorites in the SPQueryController
-		[[SPQueryController sharedQueryController] replaceFavoritesByArray:
-			[self queryFavoritesForFileURL:delegatesFileURL] forFileURL:delegatesFileURL];
+		if (delegatesFileURL) {
+			// Update current document's query favorites in the SPQueryController
+			[[SPQueryController sharedQueryController] replaceFavoritesByArray:
+				[self queryFavoritesForFileURL:delegatesFileURL] forFileURL:delegatesFileURL];
+		}
 
 		// Update global preferences' list
 		[prefs setObject:[self queryFavoritesForFileURL:nil] forKey:SPQueryFavorites];
@@ -782,7 +843,7 @@
 			if([spf objectForKey:SPQueryFavorites] && [[spf objectForKey:SPQueryFavorites] count]) {
 
 				// If the DatabaseDocument is an on-disk document, add the favourites to the bottom of it
-				if (![tableDocumentInstance isUntitled]) {
+				if (![queryFavoriteContext queryFavoriteIsUntitled]) {
 					insertionIndexStart = [favorites count];
 					[favorites addObjectsFromArray:[spf objectForKey:SPQueryFavorites]];
 					insertionIndexEnd = [favorites count] - 1;
@@ -792,7 +853,7 @@
 				else {
 					NSUInteger i, l;
 					insertionIndexStart = 1;
-					while (![[favorites objectAtIndex:insertionIndexStart] objectForKey:@"headerOfFileURL"]) {
+					while (insertionIndexStart < [favorites count] && ![[favorites objectAtIndex:insertionIndexStart] objectForKey:@"headerOfFileURL"]) {
 						insertionIndexStart++;
 					}
 					for (i = 0, l = [[spf objectForKey:SPQueryFavorites] count]; i < l; i++) {

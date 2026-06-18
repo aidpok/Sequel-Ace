@@ -46,22 +46,28 @@ extension SPWindowController {
     }
 
     @objc func copyLightweightTableName(_ sender: Any?) {
-        guard let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else {
+        guard let selectedDatabase = selectedDatabase else {
+            NSSound.beep()
+            return
+        }
+
+        let selectedTables = selectedLightweightTableItems()
+        guard !selectedTables.isEmpty else {
             NSSound.beep()
             return
         }
 
         let pasteboard = NSPasteboard.general
         pasteboard.declareTypes([.string], owner: self)
-        pasteboard.setString("\(selectedDatabase).\(selectedTable)", forType: .string)
+        pasteboard.setString(selectedTables.map { "\(selectedDatabase).\($0)" }.joined(separator: "\n"), forType: .string)
     }
 
     @objc func renameLightweightTable(_ sender: Any?) {
         guard let selectedDatabase = selectedDatabase,
+              selectedLightweightTableCount == 1,
               let selectedTable = selectedTable else { return }
 
-        guard let row = filteredLightweightTables.firstIndex(of: selectedTable).map({ $0 + 1 }) else {
+        guard let row = lightweightSidebarRowIndex(for: selectedTable) else {
             return
         }
 
@@ -70,6 +76,7 @@ extension SPWindowController {
 
     @objc func duplicateLightweightTable(_ sender: Any?) {
         guard let selectedDatabase = selectedDatabase,
+              selectedLightweightTableCount == 1,
               let selectedTable = selectedTable else { return }
 
         let tableType = lightweightTableTypes[selectedTable] ?? .table
@@ -93,39 +100,85 @@ extension SPWindowController {
     }
 
     @objc func truncateLightweightTable(_ sender: Any?) {
-        guard let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else { return }
+        guard let selectedDatabase = selectedDatabase else { return }
 
-        guard (lightweightTableTypes[selectedTable] ?? .table) == .table else {
+        let selectedTables = selectedLightweightTableItems()
+        guard !selectedTables.isEmpty,
+              selectedTables.allSatisfy({ (lightweightTableTypes[$0] ?? .table) == .table }) else {
             NSSound.beep()
             return
         }
 
+        let hasSingleSelection = selectedTables.count == 1
+        let tableToRestore = primarySelectedLightweightTable()
+        let hasAutoIncrement = selectedTables.contains { lightweightTableHasAutoIncrement($0, database: selectedDatabase) }
+
         let alert = NSAlert()
-        alert.messageText = String(format: NSLocalizedString("Truncate table '%@'?", comment: "truncate table message"), selectedTable)
-        alert.informativeText = String(format: NSLocalizedString("Are you sure you want to delete ALL records in the table '%@'? This operation cannot be undone.", comment: "truncate table informative message"), selectedTable)
+        alert.messageText = hasSingleSelection
+            ? String(format: NSLocalizedString("Truncate table '%@'?", comment: "truncate table message"), selectedTables[0])
+            : NSLocalizedString("Truncate selected tables?", comment: "truncate selected tables message")
+        if hasAutoIncrement {
+            alert.informativeText = hasSingleSelection
+                ? String(format: NSLocalizedString("Are you sure you want to delete ALL records in the table '%@'? This operation cannot be undone. TRUNCATE also resets AUTO_INCREMENT; the checkbox below only updates the Delete ALL ROWS preference.", comment: "truncate table informative message with auto increment preference"), selectedTables[0])
+                : String(format: NSLocalizedString("Are you sure you want to delete ALL records in the selected %d tables? This operation cannot be undone. TRUNCATE also resets AUTO_INCREMENT; the checkbox below only updates the Delete ALL ROWS preference.", comment: "truncate selected tables informative message with auto increment preference"), selectedTables.count)
+            alert.showsSuppressionButton = true
+            alert.suppressionButton?.state = UserDefaults.standard.bool(forKey: SPResetAutoIncrementAfterDeletionOfAllRows) ? .on : .off
+            alert.suppressionButton?.title = NSLocalizedString("Remember reset preference for Delete ALL ROWS\n(TRUNCATE always resets AUTO_INCREMENT)", comment: "truncate table auto increment preference checkbox")
+            alert.suppressionButton?.toolTip = NSLocalizedString("Matches the legacy Delete ALL ROWS reset preference. This truncate action always resets AUTO_INCREMENT.", comment: "truncate table auto increment preference checkbox tooltip")
+        } else {
+            alert.informativeText = hasSingleSelection
+                ? String(format: NSLocalizedString("Are you sure you want to delete ALL records in the table '%@'? This operation cannot be undone.", comment: "truncate table informative message"), selectedTables[0])
+                : String(format: NSLocalizedString("Are you sure you want to delete ALL records in the selected %d tables? This operation cannot be undone.", comment: "truncate selected tables informative message"), selectedTables.count)
+        }
         alert.addButton(withTitle: NSLocalizedString("Truncate", comment: "truncate button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
         guard runLightweightModalAlert(alert) == .alertFirstButtonReturn else { return }
 
-        let statement = "TRUNCATE TABLE \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable))"
-        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Truncating %@...", comment: "Truncating table task string"), selectedTable), statement: statement) { [weak self] success in
+        let shouldRememberAutoIncrementReset = alert.suppressionButton?.state == .on
+        let statements = selectedTables.map {
+            "TRUNCATE TABLE \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted($0))"
+        }
+        let status = hasSingleSelection
+            ? String(format: NSLocalizedString("Truncating %@...", comment: "Truncating table task string"), selectedTables[0])
+            : NSLocalizedString("Truncating selected tables...", comment: "Truncating selected tables task string")
+        runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
             guard let self = self, success else { return }
-            self.loadTables(for: selectedDatabase, restoringTable: selectedTable, restoringViewMode: self.activeLightweightViewMode)
+            if hasAutoIncrement {
+                UserDefaults.standard.set(shouldRememberAutoIncrementReset, forKey: SPResetAutoIncrementAfterDeletionOfAllRows)
+            }
+            self.loadTables(for: selectedDatabase, restoringTable: tableToRestore, restoringViewMode: self.activeLightweightViewMode)
         }
     }
 
     @objc func removeLightweightTable(_ sender: Any?) {
-        guard let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else { return }
+        guard let selectedDatabase = selectedDatabase else { return }
 
-        let tableType = lightweightTableTypes[selectedTable] ?? .table
-        guard let dropKeyword = tableType.sqlDropKeyword else { return }
+        let selectedItems = selectedLightweightTableItems()
+        guard !selectedItems.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let tableToRestore = primarySelectedLightweightTable()
+
+        let selectedObjects = selectedItems.compactMap { item -> (name: String, type: SALightweightTableObjectType, dropKeyword: String)? in
+            let type = lightweightTableTypes[item] ?? .table
+            guard let dropKeyword = type.sqlDropKeyword else { return nil }
+            return (item, type, dropKeyword)
+        }
+        guard selectedObjects.count == selectedItems.count else {
+            NSSound.beep()
+            return
+        }
+        let hasSingleSelection = selectedObjects.count == 1
 
         let alert = NSAlert()
-        alert.messageText = String(format: NSLocalizedString("Delete %@ '%@'?", comment: "delete table/view message"), tableType.localizedName, selectedTable)
-        alert.informativeText = String(format: NSLocalizedString("Are you sure you want to delete the %@ '%@'? This operation cannot be undone.", comment: "delete table/view informative message"), tableType.localizedName, selectedTable)
+        alert.messageText = hasSingleSelection
+            ? String(format: NSLocalizedString("Delete %@ '%@'?", comment: "delete table/view message"), selectedObjects[0].type.localizedName, selectedObjects[0].name)
+            : NSLocalizedString("Delete selected items?", comment: "delete selected items message")
+        alert.informativeText = hasSingleSelection
+            ? String(format: NSLocalizedString("Are you sure you want to delete the %@ '%@'? This operation cannot be undone.", comment: "delete table/view informative message"), selectedObjects[0].type.localizedName, selectedObjects[0].name)
+            : String(format: NSLocalizedString("Are you sure you want to delete the selected %d items? This operation cannot be undone.", comment: "delete selected items informative message"), selectedObjects.count)
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         alert.alertStyle = .critical
@@ -136,30 +189,45 @@ extension SPWindowController {
         guard runLightweightModalAlert(alert) == .alertFirstButtonReturn else { return }
 
         let force = alert.suppressionButton?.state == .on
-        let statement = "DROP \(dropKeyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable))"
-        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Deleting %@...", comment: "Deleting table task string"), selectedTable), statements: [
-            force ? "/*!32352 SET FOREIGN_KEY_CHECKS=0 */" : nil,
-            statement,
-            force ? "/*!32352 SET FOREIGN_KEY_CHECKS=1 */" : nil
-        ].compactMap { $0 }) { [weak self] success in
+        let dropStatements = selectedObjects.map {
+            "DROP \($0.dropKeyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted($0.name))"
+        }
+        let status = hasSingleSelection
+            ? String(format: NSLocalizedString("Deleting %@...", comment: "Deleting table task string"), selectedObjects[0].name)
+            : NSLocalizedString("Deleting selected items...", comment: "Deleting selected items task string")
+        var statements: [String] = []
+        if force {
+            statements.append("/*!32352 SET FOREIGN_KEY_CHECKS=0 */")
+        }
+        statements.append(contentsOf: dropStatements)
+        if force {
+            statements.append("/*!32352 SET FOREIGN_KEY_CHECKS=1 */")
+        }
+        runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
             guard let self = self, success else { return }
-            self.unpinLightweightTable(selectedTable, database: selectedDatabase)
+            selectedItems.forEach { self.unpinLightweightTable($0, database: selectedDatabase) }
             self.selectedTable = nil
             self.loadTables(for: selectedDatabase)
         }
     }
 
     @objc func togglePinLightweightTable(_ sender: Any?) {
-        guard let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else { return }
+        guard let selectedDatabase = selectedDatabase else { return }
 
-        if lightweightPinnedTables.contains(selectedTable) {
-            unpinLightweightTable(selectedTable, database: selectedDatabase)
+        let selectedItems = selectedLightweightTableItems()
+        guard !selectedItems.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let tableToRestore = primarySelectedLightweightTable()
+
+        if selectedItems.allSatisfy({ lightweightPinnedTables.contains($0) }) {
+            selectedItems.forEach { unpinLightweightTable($0, database: selectedDatabase) }
         } else {
-            pinLightweightTable(selectedTable, database: selectedDatabase)
+            selectedItems.forEach { pinLightweightTable($0, database: selectedDatabase) }
         }
 
-        loadTables(for: selectedDatabase, preservingSelection: true)
+        loadTables(for: selectedDatabase, restoringTable: tableToRestore)
     }
 
     @objc func openLightweightTableInNewTab(_ sender: Any?) {
@@ -189,48 +257,199 @@ extension SPWindowController {
 
     @objc func exportSelectedLightweightTableAs(_ sender: Any?) {
         guard loadedDatabaseDocument == nil,
-              hasSelectedLightweightTable,
-              let selectedTable = selectedTable else {
+              selectedDatabase != nil else {
             NSSound.beep()
             return
         }
 
-        let objectType = lightweightTableTypes[selectedTable] ?? .table
-        guard objectType == .table || objectType == .view else {
-            NSSound.beep()
-            return
-        }
-
+        let selectedItems = selectedLightweightTableItems()
         let tag = (sender as? NSMenuItem)?.tag ?? 0
-        guard tag >= 0, tag <= 2,
+        guard !selectedItems.isEmpty,
+              tag >= 0,
               let format = SPExportType(rawValue: UInt(tag)),
-              let controller = configuredLightweightExportController(preferredSource: SALightweightExportSource.tableExport,
-                                                                     selectedTableItems: [selectedTable],
-                                                                     tableNames: [selectedTable]) else {
+              canExportSelectedLightweightItems(selectedItems, formatTag: tag) else {
+            NSSound.beep()
+            return
+        }
+
+        let tableNames = selectedItems.filter { item in
+            let objectType = lightweightTableTypes[item] ?? .table
+            return objectType == .table || objectType == .view
+        }
+        let procedureNames = selectedItems.filter { lightweightTableTypes[$0] == .procedure }
+        let functionNames = selectedItems.filter { lightweightTableTypes[$0] == .function }
+
+        guard let controller = configuredLightweightExportController(preferredSource: SALightweightExportSource.tableExport,
+                                                                     selectedTableItems: selectedItems,
+                                                                     tableNames: tableNames,
+                                                                     procedureNames: procedureNames,
+                                                                     functionNames: functionNames) else {
             NSSound.beep()
             return
         }
 
         lightweightExportController = controller
-        controller.exportTables([selectedTable], asFormat: format, using: SALightweightExportSource.tableExport)
+        controller.exportTables(selectedItems, asFormat: format, using: SALightweightExportSource.tableExport)
     }
 
     var canExportSelectedLightweightTable: Bool {
         guard loadedDatabaseDocument == nil,
-              hasSelectedLightweightTable,
-              let selectedTable = selectedTable else {
+              selectedDatabase != nil else {
             return false
         }
 
-        let objectType = lightweightTableTypes[selectedTable] ?? .table
-        return objectType == .table || objectType == .view
+        let selectedItems = selectedLightweightTableItems()
+        return !selectedItems.isEmpty && canExportSelectedLightweightItems(selectedItems, formatTag: 0)
+    }
+
+    private func canExportSelectedLightweightItems(_ selectedItems: [String], formatTag: Int) -> Bool {
+        guard !selectedItems.isEmpty else { return false }
+
+        switch formatTag {
+        case 0:
+            return selectedItems.allSatisfy {
+                let objectType = lightweightTableTypes[$0] ?? .table
+                return objectType == .table || objectType == .view || objectType == .procedure || objectType == .function
+            }
+        case 1, 2, 3:
+            return selectedItems.allSatisfy {
+                let objectType = lightweightTableTypes[$0] ?? .table
+                return objectType == .table || objectType == .view
+            }
+        default:
+            return false
+        }
     }
 
     func updateLightweightSidebarActionMenuState() {
+        let menu = lightweightSelectedTableExportMenuItem?.menu
+        let selectedItems = selectedLightweightTableItems()
+        let hasSelection = loadedDatabaseDocument == nil && selectedDatabase != nil && !selectedItems.isEmpty
+        let hasSingleSelection = selectedItems.count == 1
+        let selectedObjectType = hasSingleSelection ? (selectedItems.first.map { lightweightTableTypes[$0] ?? .table } ?? .none) : .none
+        let objectTitle = hasSingleSelection
+            ? lightweightSidebarActionObjectTitle(for: selectedObjectType)
+            : NSLocalizedString("Selected Items", comment: "selected items menu title component")
+        let isTableSelection = hasSelection && selectedItems.allSatisfy { (lightweightTableTypes[$0] ?? .table) == .table }
+        let isPinned = hasSelection && selectedItems.allSatisfy { lightweightPinnedTables.contains($0) }
+        let canRemoveSelection = hasSelection && selectedItems.allSatisfy { (lightweightTableTypes[$0] ?? .table).sqlDropKeyword != nil }
+        let multiSafeCreateSyntax = hasSelection
+        let singleOnlySelection = hasSelection && hasSingleSelection
+
+        updateLightweightSidebarAction(#selector(copyLightweightTableName(_:)),
+                                       title: hasSingleSelection
+                                           ? String(format: NSLocalizedString("Copy %@ Name", comment: "copy selected object name menu item"), objectTitle)
+                                           : NSLocalizedString("Copy Item Names", comment: "copy selected object names menu item"),
+                                       enabled: hasSelection,
+                                       hidden: !hasSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(copyLightweightCreateTableSyntax(_:)),
+                                       title: hasSingleSelection
+                                           ? String(format: NSLocalizedString("Copy Create %@ Syntax", comment: "copy selected object create syntax menu item"), objectTitle)
+                                           : NSLocalizedString("Copy Create Syntax", comment: "copy selected objects create syntax menu item"),
+                                       enabled: multiSafeCreateSyntax,
+                                       hidden: !hasSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(showLightweightCreateTableSyntax(_:)),
+                                       title: hasSingleSelection
+                                           ? String(format: NSLocalizedString("Show Create %@ Syntax...", comment: "show selected object create syntax menu item"), objectTitle)
+                                           : NSLocalizedString("Show Create Syntax...", comment: "show selected objects create syntax menu item"),
+                                       enabled: multiSafeCreateSyntax,
+                                       hidden: !hasSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(renameLightweightTable(_:)),
+                                       title: String(format: NSLocalizedString("Rename %@...", comment: "rename selected object menu title"), objectTitle),
+                                       enabled: singleOnlySelection,
+                                       hidden: !singleOnlySelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(duplicateLightweightTable(_:)),
+                                       title: String(format: NSLocalizedString("Duplicate %@...", comment: "duplicate selected object menu title"), objectTitle),
+                                       enabled: singleOnlySelection,
+                                       hidden: !singleOnlySelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(truncateLightweightTable(_:)),
+                                       title: hasSingleSelection
+                                           ? NSLocalizedString("Truncate Table...", comment: "truncate table menu title")
+                                           : NSLocalizedString("Truncate Selected Tables...", comment: "truncate selected tables menu title"),
+                                       enabled: isTableSelection,
+                                       hidden: !isTableSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(removeLightweightTable(_:)),
+                                       title: String(format: NSLocalizedString("Remove %@...", comment: "remove selected object menu title"), objectTitle),
+                                       enabled: canRemoveSelection,
+                                       hidden: !canRemoveSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(togglePinLightweightTable(_:)),
+                                       title: String(format: isPinned
+                                                     ? NSLocalizedString("Unpin %@", comment: "unpin selected object menu item")
+                                                     : NSLocalizedString("Pin %@", comment: "pin selected object menu item"),
+                                                     objectTitle),
+                                       enabled: hasSelection,
+                                       hidden: !hasSelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(openLightweightTableInNewTab(_:)),
+                                       title: String(format: NSLocalizedString("Open %@ in New Tab", comment: "open selected object in new tab title"), objectTitle),
+                                       enabled: singleOnlySelection,
+                                       hidden: !singleOnlySelection,
+                                       in: menu)
+        updateLightweightSidebarAction(#selector(openLightweightTableInNewWindow(_:)),
+                                       title: String(format: NSLocalizedString("Open %@ in New Window", comment: "open selected object in new window title"), objectTitle),
+                                       enabled: singleOnlySelection,
+                                       hidden: !singleOnlySelection,
+                                       in: menu)
+
         let canExport = canExportSelectedLightweightTable
         lightweightSelectedTableExportMenuItem?.isHidden = !canExport
         lightweightSelectedTableExportMenuItem?.isEnabled = canExport
-        lightweightSelectedTableExportMenuItem?.submenu?.items.forEach { $0.isEnabled = canExport }
+        lightweightSelectedTableExportMenuItem?.submenu?.items.forEach { item in
+            item.isEnabled = canExport && canExportSelectedLightweightItems(selectedItems, formatTag: item.tag)
+        }
+        updateLightweightSidebarActionMenuSeparators(in: menu)
+    }
+
+    private func updateLightweightSidebarAction(_ action: Selector, title: String, enabled: Bool, hidden: Bool, in menu: NSMenu?) {
+        guard let item = menu?.items.first(where: { $0.action == action }) else { return }
+
+        item.title = title
+        item.isEnabled = enabled
+        item.isHidden = hidden
+    }
+
+    private func updateLightweightSidebarActionMenuSeparators(in menu: NSMenu?) {
+        guard let menu = menu else { return }
+
+        menu.items.filter { $0.isSeparatorItem }.forEach { $0.isHidden = false }
+
+        var sawVisibleAction = false
+        var lastVisibleSeparator: NSMenuItem?
+        for item in menu.items where !item.isHidden {
+            if item.isSeparatorItem {
+                if sawVisibleAction {
+                    lastVisibleSeparator?.isHidden = true
+                    lastVisibleSeparator = item
+                } else {
+                    item.isHidden = true
+                }
+            } else {
+                sawVisibleAction = true
+                lastVisibleSeparator = nil
+            }
+        }
+
+        lastVisibleSeparator?.isHidden = true
+    }
+
+    private func lightweightSidebarActionObjectTitle(for type: SALightweightTableObjectType) -> String {
+        switch type {
+        case .view:
+            return NSLocalizedString("View", comment: "selected view menu title component")
+        case .procedure:
+            return NSLocalizedString("Procedure", comment: "selected procedure menu title component")
+        case .function:
+            return NSLocalizedString("Function", comment: "selected function menu title component")
+        case .none, .table:
+            return NSLocalizedString("Table", comment: "selected table menu title component")
+        }
     }
 
     func promptForLightweightName(title: String,
@@ -873,6 +1092,24 @@ extension SPWindowController {
         guard let row = result.getRowAsDictionary() as? [String: Any] else { return "InnoDB" }
         let value = Self.displayString(for: row["Value"])
         return value.isEmpty ? "InnoDB" : value
+    }
+
+    func lightweightTableHasAutoIncrement(_ table: String, database: String) -> Bool {
+        guard let activeConnection = activeConnection,
+              let result = activeConnection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) WHERE Name = \(Self.sqlString(table))") else {
+            return false
+        }
+
+        result.returnDataAsStrings = true
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+
+        guard let row = result.getRowAsDictionary() as? [String: Any],
+              let autoIncrement = row["Auto_increment"],
+              !(autoIncrement is NSNull) else {
+            return false
+        }
+
+        return !Self.displayString(for: autoIncrement).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func runLightweightModalAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {

@@ -3500,7 +3500,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 - (void)setFileURL:(NSURL *)theURL
 {
     spfFileURL = theURL;
-    if ([self.parentWindowController databaseDocument] == self) {
+    if ([self.parentWindowController loadedDatabaseDocumentIfAvailable] == self) {
         if (spfFileURL && [spfFileURL isFileURL]) {
             [[self.parentWindowController window] setRepresentedURL:spfFileURL];
         } else {

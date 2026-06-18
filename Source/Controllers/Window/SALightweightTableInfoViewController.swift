@@ -617,6 +617,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     private weak var connection: SPMySQLConnection?
     private var currentSnapshot: SALightweightTableInfoSnapshot?
     private var isApplyingSnapshot = false
+    var tableInfoDidChange: (() -> Void)?
 
     private let formView = NSView(frame: .zero)
     private let tableContainerView = NSView(frame: .zero)
@@ -1179,6 +1180,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
             }
 
             self.reloadCurrentTableInfo()
+            self.tableInfoDidChange?()
         }
 
         if useQueryWarning && UserDefaults.standard.bool(forKey: SPQueryWarningEnabled) {
@@ -1197,6 +1199,10 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         } else {
             executeChange()
         }
+    }
+
+    func refreshActiveTableInfoDetail() {
+        reloadCurrentTableInfo()
     }
 
     private func reloadCurrentTableInfo() {
