@@ -308,6 +308,59 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         return env
     }
 
+    @nonobjc func activeLightweightBundleDataTableResponder() -> SPCopyTable? {
+        switch activeLightweightViewMode {
+        case .content:
+            return lightweightContentController.lightweightBundleDataTableResponder()
+        case .query:
+            return lightweightQueryController.lightweightBundleDataTableResponder()
+        default:
+            return nil
+        }
+    }
+
+    @nonobjc func runLightweightBundleTrigger(_ trigger: String, preferredDataTable: SPCopyTable? = nil) {
+        guard hasActiveLightweightConnection else { return }
+        guard let bundleManager = SPBundleManager.shared() else { return }
+        let commands = (bundleManager.bundleCommands(forTrigger: trigger) as? [String]) ?? []
+        guard !commands.isEmpty else { return }
+
+        for commandPath in commands {
+            let data = commandPath.components(separatedBy: "|")
+            guard data.count > 2 else { continue }
+
+            if !data[2].isEmpty,
+               !NSApp.windows.contains(where: { window in
+                   guard let htmlDelegate = window.delegate as? SABundleHTMLOutputWindowController else { return false }
+                   return htmlDelegate.windowUUID == data[2]
+               }) {
+                continue
+            }
+
+            let menuItem = NSMenuItem()
+            menuItem.tag = 0
+            menuItem.toolTip = data[0]
+
+            let scope = data.count > 1 ? data[1] : ""
+            if scope == SPBundleScopeGeneral {
+                _ = bundleManager.perform(Selector(("executeBundleItemForApp:")), with: menuItem)
+            }
+            else if scope == SPBundleScopeDataTable {
+                guard let tableView = preferredDataTable
+                    ?? activeLightweightBundleDataTableResponder()
+                    ?? (window?.firstResponder as? SPCopyTable)
+                    ?? (NSApp.keyWindow?.firstResponder as? SPCopyTable) else { continue }
+                _ = tableView.perform(Selector(("executeBundleItemForDataTable:")), with: menuItem)
+            }
+            else if scope == SPBundleScopeInputField {
+                let inputSelector = Selector(("executeBundleItemForInputField:"))
+                guard let responder = (window?.firstResponder ?? NSApp.keyWindow?.firstResponder),
+                      responder.responds(to: inputSelector) else { continue }
+                _ = responder.perform(inputSelector, with: menuItem)
+            }
+        }
+    }
+
     @objc func handleLightweightSchemeCommand(_ commandDict: NSDictionary) -> Bool {
         guard hasActiveLightweightConnection else { return false }
         guard let params = commandDict["parameter"] as? [String], !params.isEmpty else {
