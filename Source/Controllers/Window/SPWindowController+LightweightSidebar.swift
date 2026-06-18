@@ -618,6 +618,7 @@ extension SPWindowController {
         saveCurrentLightweightViewState()
 
         let tableToRestore = restoringTable ?? (preservingSelection ? selectedTable : nil)
+        let databaseChanged = selectedDatabase != database
         if selectedDatabase != database {
             resetLightweightTableHistory()
         }
@@ -660,6 +661,9 @@ extension SPWindowController {
                 self.lightweightPinnedTables = pinnedTables
                 self.applyLightweightTableFilter()
                 self.tablesListView.reloadData()
+                if databaseChanged {
+                    self.runLightweightBundleTrigger(SPBundleTriggerActionDatabaseChanged)
+                }
                 if let tableToRestore = tableToRestore, tables.contains(tableToRestore) {
                     if let restoringViewMode = restoringViewMode {
                         self.setActiveLightweightViewMode(restoringViewMode, persist: false)
@@ -714,6 +718,9 @@ extension SPWindowController {
             showLightweightTriggers(for: table)
         default:
             showLightweightStructure(for: table)
+        }
+        if tableChanged {
+            runLightweightBundleTrigger(SPBundleTriggerActionTableChanged)
         }
     }
 

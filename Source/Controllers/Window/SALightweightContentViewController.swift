@@ -3538,8 +3538,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let notificationTableView = notification.object as? NSTableView,
+              notificationTableView === tableView else { return }
         updateStatus()
         updateControls()
+        (view.window?.windowController as? SPWindowController)?.runLightweightBundleTrigger(SPBundleTriggerActionTableRowChanged, preferredDataTable: tableView)
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -3665,6 +3668,12 @@ extension SALightweightContentViewController: NSMenuItemValidation {
         default:
             return true
         }
+    }
+}
+
+extension SALightweightContentViewController {
+    func lightweightBundleDataTableResponder() -> SPCopyTable? {
+        return tableView
     }
 }
 

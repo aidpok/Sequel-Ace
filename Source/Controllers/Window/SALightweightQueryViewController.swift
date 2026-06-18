@@ -5136,6 +5136,12 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
     }
 }
 
+extension SALightweightQueryViewController {
+    func lightweightBundleDataTableResponder() -> SPCopyTable? {
+        return tableView
+    }
+}
+
 extension SALightweightQueryViewController: SALightweightResultGridTableViewDelegate {
     func resultGridTableViewCopyRows(_ sender: Any?) {
         copySelectedResultRows(sender)
@@ -5363,8 +5369,11 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let notificationTableView = notification.object as? NSTableView,
+              notificationTableView === tableView else { return }
         updateStatusSelectionSuffix()
         updateControls()
+        (view.window?.windowController as? SPWindowController)?.runLightweightBundleTrigger(SPBundleTriggerActionTableRowChanged, preferredDataTable: tableView)
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
