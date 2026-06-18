@@ -428,17 +428,6 @@ extension SPAppController {
         windowController.showLightweightMySQLHelp()
     }
 
-    private func performLegacyBackedDocumentAction(_ action: (SPDatabaseDocument) -> Void) {
-        guard let windowController = tabManager.activeWindowController else { return }
-        if let document = windowController.loadedDatabaseDocumentIfAvailable() {
-            action(document)
-            return
-        }
-
-        guard windowController.hasActiveLightweightConnection else { return }
-        action(windowController.legacyDatabaseDocumentForMenuAction())
-    }
-
     private func performTableMaintenanceAction(legacy: (SPDatabaseDocument) -> Void, lightweight: (SPWindowController) -> Void) {
         guard let windowController = tabManager.activeWindowController else { return }
         if let document = windowController.loadedDatabaseDocumentIfAvailable() {

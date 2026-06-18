@@ -44,6 +44,7 @@
 #import "SPConstants.h"
 
 #import "SPFileManagerAdditions.h"
+#import "SPFileHandle.h"
 
 // Modernization — expose ObjC types needed by new Swift code
 #import "SPConnectionController.h"
@@ -64,6 +65,7 @@
 #import "SPComboBoxCell.h"
 #import "SPTextAndLinkCell.h"
 #import "SPDataCellFormatter.h"
+#import "SPContentFilterManager.h"
 #import "SPRuleFilterController.h"
 #import "SPTableFilterParser.h"
 #import "SPTextView.h"
@@ -79,6 +81,9 @@
 #import "SPNavigatorController.h"
 #import "SPServerSupport.h"
 #import "SPExportController.h"
+#import "SPFieldMapperController.h"
+#import "SALightweightCSVImportController.h"
+#import "SALightweightImportProxies.h"
 #import "SPDataAdditions.h"
 #import <SPMySQL/SPMySQL.h>
 #import <SPMySQL/SPMySQLConstants.h>

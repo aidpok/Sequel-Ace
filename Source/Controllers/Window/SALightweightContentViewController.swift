@@ -149,6 +149,9 @@ final class SALightweightContentViewController: NSViewController {
     private var ruleFilterColumnsKey = ""
     private var filterRules: [FilterRule] = []
     private var defaultContentFilters: [String: [ContentFilterDefinition]] = [:]
+    private lazy var lightweightContentFilterContext = SALightweightContentFilterManagerContext(contentController: self)
+    private var contentFilterManager: SPContentFilterManager?
+    private var contentFilterDocumentURL: URL?
     var sessionState = SALightweightSessionState()
     private var currentTableKey: SALightweightSessionState.TableKey?
     private var contentCache: [SALightweightSessionState.TableKey: ContentCacheEntry] = [:]
@@ -157,6 +160,9 @@ final class SALightweightContentViewController: NSViewController {
     private let maximumContentCacheEntries = 6
     private let initialRowLoadPublishSize = 200
     private let remainingRowLoadPublishSize = 1_000
+    private let bundleBlobHandlingInclude = 2
+    private let bundleBlobHandlingFileReference = 3
+    private let bundleBlobHandlingImageFileReference = 4
     private var ruleFilterHeightConstraint: NSLayoutConstraint?
     private var isRestoringCachedContent = false
     private lazy var fieldEditor = SPFieldEditorController()
@@ -254,9 +260,10 @@ final class SALightweightContentViewController: NSViewController {
         return field
     }()
 
-    private lazy var tableView: NSTableView = {
+    private lazy var tableView: SALightweightResultGridTableView = {
         let tableView = SALightweightResultGridTableView(frame: .zero)
         tableView.resultGridDelegate = self
+        tableView.dataTableBundleSource = "content"
         tableView.identifier = NSUserInterfaceItemIdentifier("TableContentTableView")
         tableView.dataSource = self
         tableView.delegate = self
@@ -620,6 +627,56 @@ final class SALightweightContentViewController: NSViewController {
         pageIndex = 0
         invalidateCurrentContentCache()
         loadCurrentPage()
+    }
+
+    func setContentFilterDocumentURL(_ documentURL: URL?) {
+        guard contentFilterDocumentURL != documentURL else { return }
+
+        contentFilterDocumentURL = documentURL
+        for index in filterRules.indices {
+            normalizeFilterRule(at: index)
+        }
+        rebuildFilterRows()
+        storeCurrentRuleFilterState()
+    }
+
+    var effectiveContentFilterDocumentURL: URL? {
+        guard let contentFilterDocumentURL,
+              !contentFilterDocumentURL.absoluteString.hasPrefix(NSLocalizedString("Untitled", comment: "Title of a new Sequel Ace Document")) else {
+            return nil
+        }
+
+        return contentFilterDocumentURL
+    }
+
+    func documentScopedContentFiltersForSPF() -> NSDictionary? {
+        guard let documentURL = effectiveContentFilterDocumentURL,
+              let contentFilters = SPQueryController.shared().contentFilter(forFileURL: documentURL),
+              contentFilters.allValues.contains(where: { ($0 as? [Any])?.isEmpty == false }) else {
+            return nil
+        }
+
+        return contentFilters
+    }
+}
+
+private final class SALightweightContentFilterManagerContext: NSObject, SPContentFilterManagerContext {
+    weak var contentController: SALightweightContentViewController?
+
+    init(contentController: SALightweightContentViewController) {
+        self.contentController = contentController
+    }
+
+    func contentFilterFileURL() -> URL? {
+        return contentController?.effectiveContentFilterDocumentURL
+    }
+
+    func contentFilterIsUntitled() -> Bool {
+        return contentController?.effectiveContentFilterDocumentURL == nil
+    }
+
+    func contentFilterCustomQueryInstance() -> Any? {
+        return nil
     }
 }
 
@@ -1141,7 +1198,16 @@ private extension SALightweightContentViewController {
     @objc func contentFiltersHaveBeenUpdated(_ notification: Notification) {
         defaultContentFilters.removeAll()
         loadDefaultContentFilters()
-        configureRuleFilterColumnsIfNeeded()
+        for index in filterRules.indices {
+            normalizeFilterRule(at: index)
+        }
+        if isRuleFilterVisible, filterRules.isEmpty, !columnInfo.isEmpty {
+            filterRules = [defaultFilterRule()]
+        }
+        rebuildFilterRows()
+        storeCurrentRuleFilterState()
+        sessionStateDidChange?()
+        updateRuleFilterVisibility(animated: false)
     }
 
     @objc func toggleEditMode(_ sender: NSButton) {
@@ -1260,7 +1326,7 @@ private extension SALightweightContentViewController {
         guard confirmQueryWarningIfNeeded(query) else { return }
 
         let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
-        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy) { connection in
+        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy, requiresAffectedRows: true) { connection in
             _ = connection.queryString(query)
         }
     }
@@ -1395,7 +1461,7 @@ private extension SALightweightContentViewController {
     }
 
     func exportContentResult(fileExtension: String, content: String) {
-        guard !rows.isEmpty else {
+        guard !tableView.tableColumns.isEmpty else {
             NSSound.beep()
             return
         }
@@ -1403,7 +1469,7 @@ private extension SALightweightContentViewController {
         SALightweightResultGrid.exportResult(fileExtension: fileExtension, content: content, defaultName: "\(table).\(fileExtension)")
     }
 
-    private func runMutation(status: String, reloadPolicy: MutationReloadPolicy = .reload, mutation: @escaping (SPMySQLConnection) -> Void) {
+    private func runMutation(status: String, reloadPolicy: MutationReloadPolicy = .reload, requiresAffectedRows: Bool = false, mutation: @escaping (SPMySQLConnection) -> Void) {
         guard let connection = connection else { return }
 
         statusLabel.stringValue = status
@@ -1416,6 +1482,7 @@ private extension SALightweightContentViewController {
             _ = connection.selectDatabase(self.database)
             mutation(connection)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            let affectedRows: UInt64? = error == nil && requiresAffectedRows ? connection.rowsAffectedByLastQuery() : nil
 
             DispatchQueue.main.async {
                 self.isLoading = false
@@ -1423,6 +1490,11 @@ private extension SALightweightContentViewController {
                 if let error = error, !error.isEmpty {
                     self.statusLabel.stringValue = error
                     self.updateControls()
+                    return
+                }
+
+                if let affectedRows = affectedRows, affectedRows == 0 {
+                    self.handleNoAffectedRowsAfterContentMutation()
                     return
                 }
 
@@ -1638,6 +1710,10 @@ private extension SALightweightContentViewController {
         previousPageButton.isEnabled = limitResults && !isLoading && pageIndex > 0
         paginationButton.isEnabled = limitResults && !isLoading
         nextPageButton.isEnabled = limitResults && !isLoading && hasNextPage
+        self.tableView.supportsDataTableBundleCommands = !isLoading
+            && !rows.isEmpty
+            && !columnInfo.isEmpty
+            && tableView.tableColumns.count > 0
         if !limitResults {
             pageLabel.stringValue = ""
         } else if totalRowCount != nil {
@@ -1806,6 +1882,12 @@ private extension SALightweightContentViewController {
             filters.append(contentsOf: typedUserFilters.compactMap { contentFilterDefinition(from: $0, filterType: filterType) })
         }
 
+        if let documentURL = effectiveContentFilterDocumentURL,
+           let documentFilters = SPQueryController.shared().contentFilter(forFileURL: documentURL) as? [String: Any],
+           let typedDocumentFilters = documentFilters[filterType] as? [NSDictionary] {
+            filters.append(contentsOf: typedDocumentFilters.compactMap { contentFilterDefinition(from: $0, filterType: filterType) })
+        }
+
         return filters.map {
             ContentFilterDefinition(
                 title: $0.title,
@@ -1816,6 +1898,36 @@ private extension SALightweightContentViewController {
                 filterType: filterType,
                 rawDefinition: $0.rawDefinition
             )
+        }
+    }
+
+    func openContentFilterManager(forRuleID id: UUID) {
+        guard let rule = filterRules.first(where: { $0.id == id }),
+              let column = columnInfo(named: rule.columnName) else {
+            NSSound.beep()
+            return
+        }
+
+        openContentFilterManager(forFilterType: filterType(for: column))
+    }
+
+    func openContentFilterManager(forFilterType filterType: String) {
+        guard !filterType.isEmpty,
+              let parentWindow = view.window else {
+            NSSound.beep()
+            return
+        }
+
+        let manager = SPContentFilterManager(contentFilterContext: lightweightContentFilterContext, forFilterType: filterType)
+        guard let managerWindow = manager.window else {
+            NSSound.beep()
+            return
+        }
+
+        contentFilterManager = manager
+        parentWindow.beginSheet(managerWindow) { [weak self, weak manager] _ in
+            guard let self = self, self.contentFilterManager === manager else { return }
+            self.contentFilterManager = nil
         }
     }
 
@@ -1945,6 +2057,9 @@ private extension SALightweightContentViewController {
                     $0.operatorTitle = operatorTitle
                     $0.values = []
                 }
+            }
+            rowView.onEditFilters = { [weak self] id in
+                self?.openContentFilterManager(forRuleID: id)
             }
             rowView.onValuesChanged = { [weak self] id, values in
                 guard let self = self, let index = self.filterRules.firstIndex(where: { $0.id == id }) else { return }
@@ -2599,6 +2714,11 @@ private extension SALightweightContentViewController {
                             limitResults: limitResults)
     }
 
+    @objc(dataColumnDefinitions)
+    func dataColumnDefinitionsForLegacyConsumers() -> [NSDictionary] {
+        return columnInfo.map { $0.legacyDefinition }
+    }
+
     func xmlStringForCurrentContent() -> String {
         return SALightweightResultGrid.xmlString(rowCount: rows.count,
                                                  tableColumns: tableView.tableColumns,
@@ -2613,6 +2733,105 @@ private extension SALightweightContentViewController {
                                                  rowCount: rows.count,
                                                  columnName: { self.columnName(for: $0) },
                                                  value: { self.contentDisplayValue(row: $0, tableColumn: $1) })
+    }
+
+    func contentRowsAsCSVString(includeHeaders: Bool, rowIndexes: IndexSet) -> String? {
+        guard !rowIndexes.isEmpty else { return nil }
+
+        var lines: [String] = []
+        if includeHeaders {
+            lines.append(tableView.tableColumns.map { SALightweightResultGrid.csvEscaped(columnName(for: $0)) }.joined(separator: ","))
+        }
+
+        rowIndexes.forEach { rowIndex in
+            guard rowIndex < rows.count else { return }
+            lines.append(tableView.tableColumns.map { tableColumn in
+                SALightweightResultGrid.csvEscaped(contentDisplayValue(row: rowIndex, tableColumn: tableColumn) ?? "")
+            }.joined(separator: ","))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    func contentRowsAsTabStringForBundle(includeHeaders: Bool, rowIndexes: IndexSet, requireRows: Bool, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard !requireRows || !rowIndexes.isEmpty else { return nil }
+
+        var lines: [String] = []
+        if includeHeaders {
+            lines.append(tableView.tableColumns.map { SALightweightResultGrid.copyEscaped(columnName(for: $0)) }.joined(separator: "\t"))
+        }
+
+        for (displayRow, rowIndex) in rowIndexes.enumerated() where rowIndex < rows.count {
+            lines.append(tableView.tableColumns.map { tableColumn in
+                guard let value = bundleDisplayValue(row: rowIndex, displayRow: displayRow, tableColumn: tableColumn, blobHandling: blobHandling, blobFileDirectory: blobFileDirectory) else { return "" }
+                return SALightweightResultGrid.copyEscaped(value)
+            }.joined(separator: "\t"))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    func contentRowsAsCSVStringForBundle(includeHeaders: Bool, rowIndexes: IndexSet, requireRows: Bool, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard !requireRows || !rowIndexes.isEmpty else { return nil }
+
+        var lines: [String] = []
+        if includeHeaders {
+            lines.append(tableView.tableColumns.map { SALightweightResultGrid.csvEscaped(columnName(for: $0)) }.joined(separator: ","))
+        }
+
+        for (displayRow, rowIndex) in rowIndexes.enumerated() where rowIndex < rows.count {
+            lines.append(tableView.tableColumns.map { tableColumn in
+                SALightweightResultGrid.csvEscaped(bundleDisplayValue(row: rowIndex,
+                                                                     displayRow: displayRow,
+                                                                     tableColumn: tableColumn,
+                                                                     blobHandling: blobHandling,
+                                                                     blobFileDirectory: blobFileDirectory) ?? "")
+            }.joined(separator: ","))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    func bundleDisplayValue(row rowIndex: Int, displayRow: Int, tableColumn: NSTableColumn, blobHandling: Int, blobFileDirectory: String?) -> String? {
+        guard rowIndex >= 0,
+              rowIndex < rows.count,
+              let columnIndex = Int(tableColumn.identifier.rawValue),
+              columnIndex < rows[rowIndex].values.count else { return nil }
+
+        let value = rows[rowIndex].values[columnIndex]
+        switch value {
+        case .null, .notLoaded:
+            return displayString(for: value, columnIndex: columnIndex, truncate: false)
+        case .object(let object):
+            guard let data = object as? Data else {
+                return displayString(for: value, columnIndex: columnIndex, truncate: false)
+            }
+
+            switch blobHandling {
+            case bundleBlobHandlingInclude:
+                return displayString(for: value, columnIndex: columnIndex, truncate: false)
+            case bundleBlobHandlingFileReference:
+                return writeBundleBlob(data, row: displayRow, column: columnIndex, fileExtension: "dat", blobFileDirectory: blobFileDirectory)
+            case bundleBlobHandlingImageFileReference:
+                let imageData = NSImage(data: data)?.tiffRepresentation ?? Data()
+                return writeBundleBlob(imageData, row: displayRow, column: columnIndex, fileExtension: "tif", blobFileDirectory: blobFileDirectory)
+            default:
+                return "BLOB"
+            }
+        }
+    }
+
+    func writeBundleBlob(_ data: Data, row: Int, column: Int, fileExtension: String, blobFileDirectory: String?) -> String {
+        guard let blobFileDirectory, !blobFileDirectory.isEmpty else { return "" }
+
+        do {
+            try FileManager.default.createDirectory(atPath: blobFileDirectory, withIntermediateDirectories: true)
+            let path = (blobFileDirectory as NSString).appendingPathComponent("\(row)_\(column).\(fileExtension)")
+            try data.write(to: URL(fileURLWithPath: path), options: [])
+            return path
+        } catch {
+            return ""
+        }
     }
 
     func contentRowsAsSQLInserts(rowIndexes: IndexSet, skipAutoIncrement: Bool) -> String? {
@@ -2972,6 +3191,7 @@ private extension SALightweightContentViewController {
             guard let self = self, let connection = connection else { return }
             connection.queryString(insertQuery)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            let affectedRows = error == nil ? connection.rowsAffectedByLastQuery() : 0
             let lastInsertID = connection.lastInsertID()
 
             DispatchQueue.main.async {
@@ -2980,6 +3200,11 @@ private extension SALightweightContentViewController {
                     self.statusLabel.stringValue = error
                     self.showContentError(title: NSLocalizedString("Unable to add row", comment: "lightweight content add row error title"), message: error)
                     self.cancelNewContentRow(row)
+                    return
+                }
+
+                guard affectedRows > 0 else {
+                    self.handleNoAffectedRowsAfterContentMutation(row: row, columnIndex: editedColumnIndex, cancelsNewRow: true)
                     return
                 }
 
@@ -3005,6 +3230,30 @@ private extension SALightweightContentViewController {
 
     private func showContentError(title: String, message: String) {
         NSAlert.createWarningAlert(title: title, message: message, callback: nil)
+    }
+
+    private func handleNoAffectedRowsAfterContentMutation(row: Int? = nil, columnIndex: Int? = nil, cancelsNewRow: Bool = false) {
+        let message = NSLocalizedString("The row was not written to the MySQL database. You probably haven't changed anything.\nReload the table to be sure that the row exists and use a primary key for your table.\n(This error can be turned off in the preferences.)", comment: "message of panel when no rows have been affected after writing to the db")
+
+        if UserDefaults.standard.bool(forKey: SPShowNoAffectedRowsError) {
+            let alert = NSAlert()
+            alert.window.animationBehavior = .none
+            alert.messageText = NSLocalizedString("Warning", comment: "warning")
+            alert.informativeText = message
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+            alert.runModalCenteredInKeyWindow()
+        } else {
+            NSSound.beep()
+        }
+
+        if let row = row, cancelsNewRow {
+            cancelNewContentRow(row)
+        } else if let row = row, let columnIndex = columnIndex {
+            reloadCell(row: row, columnIndex: columnIndex)
+        }
+
+        statusLabel.stringValue = NSLocalizedString("No rows were affected.", comment: "lightweight content no affected rows mutation status")
+        updateControls()
     }
 
     private func confirmQueryWarningIfNeeded(_ query: String) -> Bool {
@@ -3033,6 +3282,22 @@ private extension SALightweightContentViewController {
 }
 
 extension SALightweightContentViewController {
+    func refreshActiveContentDetail() {
+        reloadContent(nil)
+    }
+
+    func commitActiveContentEditBeforeSidebarSelection() -> Bool {
+        guard !isFieldEditorPresented else { return false }
+        guard tableView.editedRow >= 0 || tableView.editedColumn >= 0 else { return true }
+        guard let window = tableView.window else { return true }
+
+        guard window.makeFirstResponder(tableView) else {
+            return false
+        }
+
+        return !isLoading
+    }
+
     func canCopySelectedContentRows(_ sender: Any?) -> Bool {
         let skipAutoIncrement = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
         let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag || skipAutoIncrement
@@ -3056,6 +3321,10 @@ extension SALightweightContentViewController {
 
     func exportResultRowCount() -> Int {
         return currentResultRowCount()
+    }
+
+    func exportResultColumnCount() -> Int {
+        return tableView.tableColumns.count
     }
 
     func exportDataResult(withNULLs includeNULLs: Bool) -> [[Any]] {
@@ -3207,12 +3476,16 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             _ = connection.selectDatabase(self.database)
             let matchingRows = SALightweightResultGrid.matchingRowCount(for: countQuery, connection: connection)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            var affectedRows: UInt64 = 0
             if error == nil, matchingRows == 1 {
                 _ = connection.queryString(updateQuery)
+                if !connection.queryErrored() {
+                    affectedRows = connection.rowsAffectedByLastQuery()
+                }
             }
             let updateError = connection.queryErrored() ? connection.lastErrorMessage() : error
             var refreshedValue: ContentValue?
-            if updateError == nil, matchingRows == 1, updatedValue.requiresReload, !reloadAfterEdit {
+            if updateError == nil, matchingRows == 1, affectedRows > 0, updatedValue.requiresReload, !reloadAfterEdit {
                 let result = connection.queryString(refreshQuery)
                 result?.defaultRowReturnType = SPMySQLResultRowAsArray
                 if !connection.queryErrored(),
@@ -3236,6 +3509,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                     self.statusLabel.stringValue = NSLocalizedString("Cannot edit row without identifying exactly one matching row", comment: "lightweight content edit no unique row")
                     self.updateControls()
                     self.reloadCell(row: row, columnIndex: columnIndex)
+                    return
+                }
+
+                guard affectedRows > 0 else {
+                    self.handleNoAffectedRowsAfterContentMutation(row: row, columnIndex: columnIndex)
                     return
                 }
 
@@ -3365,7 +3643,7 @@ extension SALightweightContentViewController: NSMenuItemValidation {
             return canCopySelectedContentRows(menuItem)
 
         case #selector(exportContentResultAsCSV(_:)), #selector(exportContentResultAsXML(_:)):
-            return !isLoading && !rows.isEmpty
+            return !isLoading && exportResultColumnCount() > 0
 
         case #selector(removeRow(_:)), #selector(deleteRows(_:)), #selector(deleteBackward(_:)), #selector(deleteForward(_:)):
             menuItem.title = tableView.numberOfSelectedRows > 1
@@ -3406,10 +3684,39 @@ extension SALightweightContentViewController: SALightweightResultGridTableViewDe
     func resultGridTableViewPrepareContextMenu(_ tableView: NSTableView, for event: NSEvent) {
         prepareContentContextMenu(for: event)
     }
+
+    func resultGridTableView(_ tableView: NSTableView, bundleInputFor inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {
+        let rowIndexes = onlySelectedRows
+            ? self.tableView.selectedRowIndexes
+            : IndexSet(integersIn: 0..<rows.count)
+
+        switch inputSource {
+        case SPBundleInputSourceSelectedTableRowsAsTab, SPBundleInputSourceTableRowsAsTab:
+            return contentRowsAsTabStringForBundle(includeHeaders: true,
+                                                   rowIndexes: rowIndexes,
+                                                   requireRows: onlySelectedRows,
+                                                   blobHandling: blobHandling,
+                                                   blobFileDirectory: blobFileDirectory)
+        case SPBundleInputSourceSelectedTableRowsAsCsv, SPBundleInputSourceTableRowsAsCsv:
+            return contentRowsAsCSVStringForBundle(includeHeaders: true,
+                                                   rowIndexes: rowIndexes,
+                                                   requireRows: onlySelectedRows,
+                                                   blobHandling: blobHandling,
+                                                   blobFileDirectory: blobFileDirectory)
+        case SPBundleInputSourceSelectedTableRowsAsSqlInsert, SPBundleInputSourceTableRowsAsSqlInsert:
+            return contentRowsAsSQLInserts(rowIndexes: rowIndexes, skipAutoIncrement: false)
+        default:
+            return ""
+        }
+    }
 }
 
 fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegate {
     static let rowHeight: CGFloat = 29
+    private static let editFiltersTag = -1
+    private static var editFiltersTitle: String {
+        return NSLocalizedString("Edit Filters…", comment: "edit filter")
+    }
 
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let columnPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -3424,10 +3731,12 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
     var onEnabledChanged: ((UUID, Bool) -> Void)?
     var onColumnChanged: ((UUID, String) -> Void)?
     var onOperatorChanged: ((UUID, String) -> Void)?
+    var onEditFilters: ((UUID) -> Void)?
     var onValuesChanged: ((UUID, [String]) -> Void)?
     var onAdd: ((UUID) -> Void)?
     var onRemove: ((UUID) -> Void)?
     var onApply: (() -> Void)?
+    private var selectedOperatorTitle = ""
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -3500,7 +3809,14 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
 
         operatorPopup.removeAllItems()
         operatorPopup.addItems(withTitles: operators.map { $0.title })
+        if let menu = operatorPopup.menu {
+            menu.addItem(.separator())
+            let editItem = NSMenuItem(title: Self.editFiltersTitle, action: nil, keyEquivalent: "")
+            editItem.tag = Self.editFiltersTag
+            menu.addItem(editItem)
+        }
         operatorPopup.selectItem(withTitle: selectedOperator.title)
+        selectedOperatorTitle = selectedOperator.title
 
         let values = rule.values
         firstValueField.stringValue = values.indices.contains(0) ? values[0] : ""
@@ -3569,7 +3885,15 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
     }
 
     @objc private func operatorChanged(_ sender: Any?) {
-        guard let ruleID = ruleID, let title = operatorPopup.selectedItem?.title else { return }
+        guard let ruleID = ruleID, let selectedItem = operatorPopup.selectedItem else { return }
+        if selectedItem.tag == Self.editFiltersTag {
+            operatorPopup.selectItem(withTitle: selectedOperatorTitle)
+            onEditFilters?(ruleID)
+            return
+        }
+
+        let title = selectedItem.title
+        selectedOperatorTitle = title
         onOperatorChanged?(ruleID, title)
     }
 

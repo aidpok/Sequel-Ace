@@ -63,6 +63,18 @@ extension SPWindowController {
         let queryText = lightweightQueryText()
         guard !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
+        if let openedSQLFileURL = lightweightQueryController.openedSQLFileURL,
+           !openedSQLFileURL.path.isEmpty {
+            do {
+                try queryText.write(to: openedSQLFileURL,
+                                    atomically: true,
+                                    encoding: lightweightQueryController.openedSQLFileEncoding ?? .utf8)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+            return
+        }
+
         let panel = NSSavePanel()
         panel.allowsOtherFileTypes = false
         panel.canSelectHiddenExtension = true
@@ -74,6 +86,7 @@ extension SPWindowController {
             guard response == .OK, let url = panel.url else { return }
             do {
                 try queryText.write(to: url, atomically: true, encoding: .utf8)
+                self.lightweightQueryController.setSQLFile(url: url, encoding: .utf8)
                 UserDefaults.standard.set(url.lastPathComponent, forKey: "lastSqlFileName")
                 UserDefaults.standard.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
@@ -97,9 +110,98 @@ extension SPWindowController {
     }
 
     func saveLightweightConnection(to url: URL, options: SALightweightSaveConnectionOptions) {
+        synchronizeLightweightDocumentScope(for: url)
+
+        do {
+            try writeLightweightConnection(to: url, options: options)
+            lightweightConnectionSaveOptions = options
+            (NSApp.delegate as? SPAppController)?.setSpfSessionDocData([
+                "encrypted": options.encrypt,
+                "e_string": options.encryptionPassword,
+                "auto_connect": options.autoConnect,
+                "save_password": options.savePassword,
+                "include_session": options.includeSession,
+                "save_editor_content": options.includeQuery
+            ])
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            lightweightConnectionFileURL = url
+            updateLightweightWindowTitle()
+            markLightweightResumeStateChanged()
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    @objc(setLightweightConnectionSaveOptionsEncrypted:encryptionPassword:autoConnect:savePassword:includeSession:includeQuery:)
+    func setLightweightConnectionSaveOptions(encrypted: Bool,
+                                             encryptionPassword: String,
+                                             autoConnect: Bool,
+                                             savePassword: Bool,
+                                             includeSession: Bool,
+                                             includeQuery: Bool) {
+        lightweightConnectionSaveOptions = SALightweightSaveConnectionOptions(encrypt: encrypted,
+                                                                              encryptionPassword: encryptionPassword,
+                                                                              autoConnect: autoConnect,
+                                                                              savePassword: savePassword,
+                                                                              includeSession: includeSession,
+                                                                              includeQuery: includeQuery)
+    }
+
+    @objc(saveLightweightConnectionFileAtPathUsingCurrentSaveOptions:)
+    func saveLightweightConnectionFileAtPathUsingCurrentSaveOptions(_ path: String) -> Bool {
+        do {
+            let url = URL(fileURLWithPath: path)
+            synchronizeLightweightDocumentScope(for: url)
+            try writeLightweightConnection(to: url, options: lightweightConnectionSaveOptions)
+            return true
+        } catch {
+            NSAlert(error: error).runModal()
+            return false
+        }
+    }
+
+    @objc(saveLightweightConnectionFileAtPath:encrypted:encryptionPassword:autoConnect:savePassword:includeSession:includeQuery:)
+    func saveLightweightConnectionFile(atPath path: String,
+                                       encrypted: Bool,
+                                       encryptionPassword: String,
+                                       autoConnect: Bool,
+                                       savePassword: Bool,
+                                       includeSession: Bool,
+                                       includeQuery: Bool) -> Bool {
+        do {
+            let url = URL(fileURLWithPath: path)
+            synchronizeLightweightDocumentScope(for: url)
+            try writeLightweightConnection(to: url,
+                                           options: SALightweightSaveConnectionOptions(encrypt: encrypted,
+                                                                                       encryptionPassword: encryptionPassword,
+                                                                                       autoConnect: autoConnect,
+                                                                                       savePassword: savePassword,
+                                                                                       includeSession: includeSession,
+                                                                                       includeQuery: includeQuery))
+            return true
+        } catch {
+            NSAlert(error: error).runModal()
+            return false
+        }
+    }
+
+    @objc func lightweightConnectionFileURLForSessionBundle() -> URL? {
+        return lightweightConnectionFileURL
+    }
+
+    func writeLightweightConnection(to url: URL, options: SALightweightSaveConnectionOptions) throws {
+        guard let spfStructure = lightweightConnectionSPFStructure(options: options) else { return }
+
+        let data = try PropertyListSerialization.data(fromPropertyList: spfStructure,
+                                                      format: .xml,
+                                                      options: 0)
+        try data.write(to: url, options: .atomic)
+    }
+
+    func lightweightConnectionSPFStructure(options: SALightweightSaveConnectionOptions) -> NSMutableDictionary? {
         guard let state = lightweightLegacyStateDictionary(includePasswords: options.savePassword,
                                                            includeSession: options.includeSession,
-                                                           includeQuery: options.includeQuery) else { return }
+                                                           includeQuery: options.includeQuery) else { return nil }
 
         let spfStructure = NSMutableDictionary()
         spfStructure[SPFVersionKey] = 1
@@ -110,6 +212,12 @@ extension SPWindowController {
         }
         spfStructure["auto_connect"] = options.autoConnect
         spfStructure["encrypted"] = options.encrypt
+        if let favorites = lightweightQueryController.documentScopedQueryFavoritesForSPF() {
+            spfStructure[SPQueryFavorites] = favorites
+        }
+        if let contentFilters = lightweightContentController.documentScopedContentFiltersForSPF() {
+            spfStructure[SPContentFilters] = contentFilters
+        }
 
         if options.encrypt {
             let dataToEncrypt = NSMutableData()
@@ -121,24 +229,12 @@ extension SPWindowController {
             spfStructure["data"] = state
         }
 
-        do {
-            let data = try PropertyListSerialization.data(fromPropertyList: spfStructure,
-                                                          format: .xml,
-                                                          options: 0)
-            try data.write(to: url, options: .atomic)
-            (NSApp.delegate as? SPAppController)?.setSpfSessionDocData([
-                "encrypted": options.encrypt,
-                "e_string": options.encryptionPassword,
-                "auto_connect": options.autoConnect,
-                "save_password": options.savePassword,
-                "include_session": options.includeSession,
-                "save_editor_content": options.includeQuery
-            ])
-            NSDocumentController.shared.noteNewRecentDocumentURL(url)
-            markLightweightResumeStateChanged()
-        } catch {
-            NSAlert(error: error).runModal()
-        }
+        return spfStructure
+    }
+
+    func synchronizeLightweightDocumentScope(for url: URL) {
+        lightweightQueryController.setDocumentURLForLegacyQueryConsumers(url)
+        lightweightContentController.setContentFilterDocumentURL(lightweightQueryController.effectiveDocumentURLForLegacyQueryConsumers)
     }
 
     func lightweightLegacyStateDictionary(includePasswords: Bool, includeSession: Bool, includeQuery: Bool) -> NSDictionary? {
@@ -236,7 +332,13 @@ extension SPWindowController {
     }
 
     @discardableResult
-    func installLegacyDatabaseDocumentIfNeeded(selectingDatabase database: String? = nil, item: String? = nil) -> SPDatabaseDocument {
+    func performExplicitLegacyFallback(reason: String, selectingDatabase database: String? = nil, item: String? = nil) -> SPDatabaseDocument {
+        NSLog("Lightweight window switching to legacy database view: %@", reason)
+        return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: database, item: item)
+    }
+
+    @discardableResult
+    private func installLegacyDatabaseDocumentIfNeeded(selectingDatabase database: String? = nil, item: String? = nil) -> SPDatabaseDocument {
         if let loadedDatabaseDocument = loadedDatabaseDocument {
             if let database = database ?? selectedDatabase {
                 loadedDatabaseDocument.selectDatabase(database, item: item)
@@ -463,6 +565,8 @@ extension SPWindowController {
         imageItem.isHidden = true
         actionButton.menu?.addItem(imageItem)
         addLightweightSidebarAction(NSLocalizedString("Copy Table Name", comment: "copy table name menu item"), #selector(copyLightweightTableName(_:)), to: actionButton.menu)
+        addLightweightSidebarAction(NSLocalizedString("Copy Create Table Syntax", comment: "copy create table syntax menu item"), #selector(copyLightweightCreateTableSyntax(_:)), to: actionButton.menu)
+        addLightweightSidebarAction(NSLocalizedString("Show Create Table Syntax...", comment: "show create table syntax menu item"), #selector(showLightweightCreateTableSyntax(_:)), to: actionButton.menu)
         addLightweightSidebarAction(NSLocalizedString("Rename Table...", comment: "rename table menu title"), #selector(renameLightweightTable(_:)), to: actionButton.menu)
         addLightweightSidebarAction(NSLocalizedString("Duplicate Table...", comment: "duplicate table menu title"), #selector(duplicateLightweightTable(_:)), to: actionButton.menu)
         actionButton.menu?.addItem(.separator())
@@ -487,6 +591,10 @@ extension SPWindowController {
                                     #selector(exportSelectedLightweightTableAs(_:)),
                                     to: exportMenu,
                                     tag: 2)
+        addLightweightSidebarAction(NSLocalizedString("As Dot file...", comment: "export selected table as dot menu item"),
+                                    #selector(exportSelectedLightweightTableAs(_:)),
+                                    to: exportMenu,
+                                    tag: 3)
         exportItem.submenu = exportMenu
         lightweightSelectedTableExportMenuItem = exportItem
         actionButton.menu?.addItem(exportItem)

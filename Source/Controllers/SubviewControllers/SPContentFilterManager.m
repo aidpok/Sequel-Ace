@@ -47,6 +47,43 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 #define SP_NAME_REQUIRED_PLACEHOLDER_STRING      NSLocalizedString(@"[name required]", @"displayed when new content filter has empty Name field (ContentFilterManager)")
 #define SP_FILE_PARSER_ERROR_TITLE_STRING        NSLocalizedString(@"Error while reading data file", @"error while reading data file")
 
+@interface SPDatabaseDocumentContentFilterContext : NSObject <SPContentFilterManagerContext>
+{
+	SPDatabaseDocument *databaseDocument;
+}
+
+- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document;
+
+@end
+
+@implementation SPDatabaseDocumentContentFilterContext
+
+- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document
+{
+	if ((self = [super init])) {
+		databaseDocument = document;
+	}
+
+	return self;
+}
+
+- (NSURL *)contentFilterFileURL
+{
+	return [databaseDocument fileURL];
+}
+
+- (BOOL)contentFilterIsUntitled
+{
+	return [databaseDocument isUntitled] || ![databaseDocument fileURL];
+}
+
+- (id)contentFilterCustomQueryInstance
+{
+	return [databaseDocument customQueryInstance];
+}
+
+@end
+
 @implementation SPContentFilterManager
 
 /**
@@ -61,12 +98,27 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 		return nil;
 	}
 
+	return [self initWithContentFilterContext:[[SPDatabaseDocumentContentFilterContext alloc] initWithDatabaseDocument:document] forFilterType:compareType];
+}
+
+/**
+ * Initialize the manager with a narrow content-filter document context
+ */
+- (instancetype)initWithContentFilterContext:(id <SPContentFilterManagerContext>)context forFilterType:(NSString *)compareType
+{
+	if (context == nil) {
+		NSBeep();
+		NSLog(@"ContentFilterManager was called without a content filter context.");
+
+		return nil;
+	}
+
 	if ((self = [super initWithWindowNibName:@"ContentFilterManager"])) {
 		prefs = [NSUserDefaults standardUserDefaults];
 
 		contentFilters = [[NSMutableArray alloc] init];
-		tableDocumentInstance = document;
-		documentFileURL = [[tableDocumentInstance fileURL] copy];
+		contentFilterContext = context;
+		documentFileURL = [[contentFilterContext contentFilterFileURL] copy];
 
 		filterType = [compareType copy];
 	}
@@ -80,7 +132,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 - (void)awakeFromNib
 {
     [super awakeFromNib];
-    
+
 	// Set up the split view
 	[contentFilterSplitView setMinSize:120.f ofSubviewAtIndex:0];
 	[contentFilterSplitView setMaxSize:245.f ofSubviewAtIndex:0];
@@ -108,29 +160,31 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 		}
 	}
 
-	NSString *delegatesFileURLStr = [documentFileURL absoluteString];
-	
-	if(delegatesFileURLStr.isPercentEncoded){
-		delegatesFileURLStr = delegatesFileURLStr.stringByRemovingPercentEncoding;
-	}
-	
-	// Build doc-based filters
-	[contentFilters addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-		[delegatesFileURLStr lastPathComponent], @"MenuLabel",
-		[documentFileURL absoluteString], @"headerOfFileURL",
-		@"", @"Clause",
-		nil]];
-	
-	if ([[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL]) {
-		id filters = [[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL];
-		if([filters objectForKey:filterType])
-			for(id fav in [filters objectForKey:filterType])
-				[contentFilters addObject:[fav mutableCopy]];
+	if (documentFileURL) {
+		NSString *delegatesFileURLStr = [documentFileURL absoluteString];
+
+		if(delegatesFileURLStr.isPercentEncoded){
+			delegatesFileURLStr = delegatesFileURLStr.stringByRemovingPercentEncoding;
+		}
+
+		// Build doc-based filters
+		[contentFilters addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+			[delegatesFileURLStr lastPathComponent], @"MenuLabel",
+			[documentFileURL absoluteString], @"headerOfFileURL",
+			@"", @"Clause",
+			nil]];
+
+		if ([[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL]) {
+			id filters = [[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL];
+			if([filters objectForKey:filterType])
+				for(id fav in [filters objectForKey:filterType])
+					[contentFilters addObject:[fav mutableCopy]];
+		}
 	}
 
 	// Select the first query if any
 	NSUInteger i = 0;
-	
+
 	for(i=0; i < [contentFilters count]; i++ )
 		if(![[contentFilters objectAtIndex:i] objectForKey:@"headerOfFileURL"])
 			break;
@@ -161,7 +215,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 
 /**
  * Returns the content filters array for fileURL.
- * 
+ *
  * @param fileURL == The SPDatabaseDocument file URL; if fileURL == nil return the global content filters
  */
 - (NSMutableArray *)contentFilterForFileURL:(NSURL *)fileURL
@@ -181,13 +235,13 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 			i++;
 			break;
 		}
-		
+
 		i++;
 	}
 
 	// Take all content filters until the next header or end of all content filters
 	NSUInteger numOfArgs;
-	
+
 	for (; i < [contentFilters count]; i++)
 	{
 		if(![[contentFilters objectAtIndex:i] objectForKey:@"headerOfFileURL"]) {
@@ -220,7 +274,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
  */
 - (id)customQueryInstance
 {
-	return [tableDocumentInstance customQueryInstance];
+	return [contentFilterContext contentFilterCustomQueryInstance];
 }
 
 #pragma mark -
@@ -251,7 +305,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 	}
 
 	// If the DatabaseDocument is an on-disk document, add the favourite to the bottom of that document's favourites
-	else if (![tableDocumentInstance isUntitled]) {
+	else if (![contentFilterContext contentFilterIsUntitled]) {
 		insertIndex = [contentFilters count] - 1;
 		[contentFilters addObject:filter];
 	}
@@ -259,7 +313,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 	// Otherwise, add to the bottom of the Global list by default
 	else {
 		insertIndex = 1;
-		while (![[contentFilters objectAtIndex:insertIndex] objectForKey:@"headerOfFileURL"]) {
+		while (insertIndex < [contentFilters count] && ![[contentFilters objectAtIndex:insertIndex] objectForKey:@"headerOfFileURL"]) {
 			insertIndex++;
 		}
 		[contentFilters insertObject:filter atIndex:insertIndex];
@@ -421,9 +475,11 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 		if ([contentFilterTableView numberOfSelectedRows] == 1)
 			[[self window] makeFirstResponder:contentFilterTableView];
 
-		// Update current document's content filters in the SPQueryController
-		[[SPQueryController sharedQueryController] replaceContentFilterByArray:
-			[self contentFilterForFileURL:documentFileURL] ofType:filterType forFileURL:documentFileURL];
+		if (documentFileURL) {
+			// Update current document's content filters in the SPQueryController
+			[[SPQueryController sharedQueryController] replaceContentFilterByArray:
+				[self contentFilterForFileURL:documentFileURL] ofType:filterType forFileURL:documentFileURL];
+		}
 
 		// Update global preferences' list
 		id cf = [[prefs objectForKey:SPContentFilters] mutableCopy];
@@ -436,7 +492,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 }
 
 /**
- * It triggers an update of contentFilterTextView and 
+ * It triggers an update of contentFilterTextView and
  * resultingClauseContentLabel by inserting @"" into contentFilterTextView
  */
 - (IBAction)suppressLeadingFieldPlaceholderWasChanged:(id)sender
@@ -453,11 +509,11 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 - (void)tableViewSelectionDidChange:(NSNotification *)aNotification
 {
 	NSInteger row = [contentFilterTableView selectedRow];
-	
-	if ((row > -1) && (row < (NSInteger)[contentFilters count])) {	
-		
+
+	if ((row > -1) && (row < (NSInteger)[contentFilters count])) {
+
 		NSString *newName = [[contentFilters objectAtIndex:[contentFilterTableView selectedRow]] objectForKey:@"MenuLabel"];
-		
+
 		[contentFilterNameTextField setStringValue:(newName) ? newName : @""];
 	}
 }
@@ -828,16 +884,16 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 		if([[[filename pathExtension] lowercaseString] isEqualToString:SPFileExtensionDefault]) {
 			{
 				NSError *error = nil;
-				
+
 				NSData *pData = [NSData dataWithContentsOfFile:filename options:NSUncachedRead error:&error];
-				
+
 				if(pData && !error) {
 					spf = [NSPropertyListSerialization propertyListWithData:pData
 																	 options:NSPropertyListImmutable
 																	  format:NULL
 																	   error:&error];
 				}
-				
+
 				if(!spf || error) {
 					[NSAlert createWarningAlertWithTitle:SP_FILE_PARSER_ERROR_TITLE_STRING message:[NSString stringWithFormat:NSLocalizedString(@"File couldn't be read. (%@)", @"error while reading data file"), [error localizedDescription]] callback:nil];
 					return;
@@ -847,7 +903,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 			if([[spf objectForKey:SPContentFilters] objectForKey:filterType] && [[[spf objectForKey:SPContentFilters] objectForKey:filterType] count]) {
 
 				// If the DatabaseDocument is an on-disk document, add the favourites to the bottom of it
-				if (![tableDocumentInstance isUntitled]) {
+				if (![contentFilterContext contentFilterIsUntitled]) {
 					insertionIndexStart = [contentFilters count];
 					[contentFilters addObjectsFromArray:[[spf objectForKey:SPContentFilters] objectForKey:filterType]];
 					insertionIndexEnd = [contentFilters count] - 1;
@@ -857,7 +913,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 				else {
 					NSUInteger i, l;
 					insertionIndexStart = 1;
-					while (![[contentFilters objectAtIndex:insertionIndexStart] objectForKey:@"headerOfFileURL"]) {
+					while (insertionIndexStart < [contentFilters count] && ![[contentFilters objectAtIndex:insertionIndexStart] objectForKey:@"headerOfFileURL"]) {
 						insertionIndexStart++;
 					}
 					for (i = 0, l = [[[spf objectForKey:SPContentFilters] objectForKey:filterType] count]; i < l; i++) {

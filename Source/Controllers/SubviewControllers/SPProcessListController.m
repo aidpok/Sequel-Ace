@@ -61,6 +61,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 - (void)_updateServerProcessesFilterForFilterString:(NSString *)filterString;
 - (void)_addPreferenceObservers;
 - (void)_removePreferenceObservers;
+- (NSString *)_serverDisplayName;
 + (NSString *)_serializedProcessRow:(NSDictionary *)process includeProgress:(BOOL)includeProgress;
 
 @end
@@ -105,7 +106,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 {	
     [super awakeFromNib];
     
-	[[self window] setTitle:[NSString stringWithFormat:NSLocalizedString(@"Server Processes on %@", @"server processes window title (var = hostname)"),[[SPAppDelegate frontDocument] name]]];
+	[[self window] setTitle:[NSString stringWithFormat:NSLocalizedString(@"Server Processes on %@", @"server processes window title (var = hostname)"), [self _serverDisplayName]]];
 	
 	[self setWindowFrameAutosaveName:@"ProcessList"];
 	
@@ -245,7 +246,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
     [panel beginSheetModalForWindow:[self window] completionHandler:^(NSInteger returnCode) {
         if (returnCode == NSModalResponseOK) {
             if ([self->processesFiltered count] > 0) {
-                NSMutableString *processesString = [NSMutableString stringWithFormat:@"# MySQL server processes for %@\n\n", [[SPAppDelegate frontDocument] host]];
+                NSMutableString *processesString = [NSMutableString stringWithFormat:@"# MySQL server processes for %@\n\n", [self _serverDisplayName]];
                 
                 for (NSDictionary *process in self->processesFiltered)
                 {
@@ -259,6 +260,18 @@ static NSString * const SPKillIdKey   = @"SPKillId";
             }
         }
     }];
+}
+
+- (NSString *)_serverDisplayName
+{
+	SPDatabaseDocument *frontDocument = [SPAppDelegate frontDocument];
+	NSString *displayName = [frontDocument host] ?: [frontDocument name];
+
+	if (![displayName length]) {
+		displayName = [connection host];
+	}
+
+	return [displayName length] ? displayName : NSLocalizedString(@"Unknown Host", @"fallback server display name");
 }
 
 /**

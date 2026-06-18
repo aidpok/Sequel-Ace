@@ -420,6 +420,7 @@ extern NSString *SPCSVImportFieldEnclosedBy;
 extern NSString *SPCSVImportFieldEscapeCharacter;
 extern NSString *SPCSVImportFirstLineIsHeader;
 extern NSString *SPCSVFieldImportMappingAlignment;
+extern NSString *SPSQLImportErrorHandlingSelection;
 extern NSString *SPImportClipboardTempFileNamePrefix;
 extern NSString *SPLastExportSettings;
 extern NSString *SPAutoCheckClipboardForConnectionStrings;

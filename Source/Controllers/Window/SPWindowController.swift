@@ -116,6 +116,15 @@ struct SALightweightSaveConnectionOptions {
     let savePassword: Bool
     let includeSession: Bool
     let includeQuery: Bool
+
+    static var defaults: SALightweightSaveConnectionOptions {
+        SALightweightSaveConnectionOptions(encrypt: false,
+                                           encryptionPassword: "",
+                                           autoConnect: false,
+                                           savePassword: false,
+                                           includeSession: true,
+                                           includeQuery: false)
+    }
 }
 
 final class SALightweightSaveConnectionAccessory: NSObject {
@@ -182,8 +191,6 @@ final class SALightweightSaveConnectionAccessory: NSObject {
         return defaultValue
     }
 }
-
-let SALightweightSQLImportMaximumInMemoryFileSize: Int64 = 16 * 1024 * 1024
 
 final class SALightweightSQLImportEncodingAccessory {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 34))
@@ -691,12 +698,19 @@ final class SALightweightSessionState {
     }
 }
 
+struct SALightweightPendingSQLFileOpen {
+    let query: String
+    let fileURL: URL
+    let encoding: String.Encoding
+}
+
 @objc final class SPWindowController: NSWindowController {
 
     var loadedDatabaseDocument: SPDatabaseDocument?
 
+    @available(*, deprecated, message: "Use loadedDatabaseDocumentIfAvailable() for non-loading reads or legacyDatabaseDocumentForExplicitFallback() for intentional DBView fallback.")
     @objc var databaseDocument: SPDatabaseDocument {
-        return installLegacyDatabaseDocumentIfNeeded()
+        return performExplicitLegacyFallback(reason: "Deprecated databaseDocument property access")
     }
 
     @objc let uniqueID: UUID = UUID()
@@ -706,11 +720,14 @@ final class SALightweightSessionState {
     var connectionController: SPConnectionController?
     var activeConnection: SPMySQLConnection?
     var activeConnectionInfo: SAConnectionInfoObjC?
+    var lightweightConnectionFileURL: URL?
+    var lightweightConnectionSaveOptions = SALightweightSaveConnectionOptions.defaults
     var lightweightBundleProcessID: String?
     let lightweightConsoleLoggingLock = NSLock()
     var lightweightConsoleQueryMode = 0
     let lightweightConsoleLogger = SALightweightConsoleLogger()
     var isLightweightImportRunning = false
+    var activeLightweightCSVImportController: SALightweightCSVImportController?
 
     var selectedDatabase: String?
     var databaseListNeedsLoad = true
@@ -762,6 +779,7 @@ final class SALightweightSessionState {
     var lightweightHistoryForwardStack: [String] = []
     var isRestoringLightweightHistory = false
     var pendingLightweightSessionSnapshot: NSDictionary?
+    var pendingLightweightSQLFileOpen: SALightweightPendingSQLFileOpen?
     var activeLightweightLegacySheetController: SALightweightLegacySheetController?
     let lightweightShellView = NSView(frame: .zero)
     let lightweightContentSplitView = SPSplitView(frame: .zero)
@@ -771,6 +789,7 @@ final class SALightweightSessionState {
     let lightweightTableInfoPane = NSVisualEffectView(frame: .zero)
     let lightweightSidebarButtonBar = NSView(frame: .zero)
     let lightweightDetailView = NSView(frame: .zero)
+    weak var lightweightTablesListViewReference: NSTableView?
     var lightweightSelectedTableExportMenuItem: NSMenuItem?
     var didRegisterLightweightPreferenceObservers = false
 
@@ -787,6 +806,7 @@ final class SALightweightSessionState {
 
     lazy var tablesListView: NSTableView = {
         let tableView = SPTableView(frame: .zero)
+        lightweightTablesListViewReference = tableView
         tableView.headerView = nil
         tableView.focusRingType = .none
         tableView.allowsExpansionToolTips = true

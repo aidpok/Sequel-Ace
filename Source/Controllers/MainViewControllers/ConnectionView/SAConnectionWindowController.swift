@@ -111,13 +111,9 @@ import AppKit
         guard let appDelegate = NSApp.delegate as? SPAppController else { return }
         let windowController = appDelegate.tabManager.newWindowForTab()
 
-        let document = windowController.databaseDocument
-        document.connectionController()?.applyConnectionInfo(info)
-
-        // Hand off the established connection to the new document.
-        // setConnection: transitions the document out of connection mode
-        // into the database UI (same as the embedded flow's addConnectionToDocument).
-        document.setConnection(connection)
+        // Hand off the established connection to the lightweight window path
+        // without forcing the legacy database document to load.
+        windowController.connectionDidEstablish(connection, info: info)
 
         // Mark handoff complete so windowWillClose doesn't cancel the connection
         connectionHandedOff = true
@@ -217,46 +213,5 @@ extension SAConnectionWindowController: SADatabaseDocumentProviding {
 
     @objc func updateWindowTitle(_ sender: Any) {
         // Could update the window title with connection status if desired.
-    }
-}
-
-private extension SPConnectionController {
-
-    func applyConnectionInfo(_ info: SAConnectionInfoObjC) {
-        type = info.type.rawValue
-        name = info.name
-        host = info.host
-        user = info.user
-        password = info.password
-        database = info.database
-        socket = info.socket
-        port = info.port
-        colorIndex = info.colorIndex
-        useCompression = info.useCompression
-        timeZoneMode = SPConnectionTimeZoneMode(rawValue: info.timeZoneMode.rawValue)!
-        timeZoneIdentifier = info.timeZoneIdentifier
-        allowDataLocalInfile = info.allowDataLocalInfile
-        enableClearTextPlugin = info.enableClearTextPlugin
-        useAWSIAMAuth = info.useAWSIAMAuth
-        awsRegion = info.awsRegion
-        awsProfile = info.awsProfile
-        useSSL = info.useSSL
-        sslKeyFileLocationEnabled = info.sslKeyFileLocationEnabled
-        sslKeyFileLocation = info.sslKeyFileLocation
-        sslCertificateFileLocationEnabled = info.sslCertificateFileLocationEnabled
-        sslCertificateFileLocation = info.sslCertificateFileLocation
-        sslCACertFileLocationEnabled = info.sslCACertFileLocationEnabled
-        sslCACertFileLocation = info.sslCACertFileLocation
-        sshHost = info.sshHost
-        sshUser = info.sshUser
-        sshPassword = info.sshPassword
-        sshKeyLocationEnabled = info.sshKeyLocationEnabled
-        sshKeyLocation = info.sshKeyLocation
-        sshPort = info.sshPort
-        sshRemoteSocketPath = info.sshRemoteSocketPath
-        vaultHost = info.vaultHost
-        vaultPort = info.vaultPort
-        vaultOIDCMount = info.vaultOIDCMount
-        vaultCredentialsPath = info.vaultCredentialsPath
     }
 }

@@ -29,15 +29,22 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 @class SPTextView;
-@class SPDatabaseDocument;
 @class SPSplitView;
+
+NS_ASSUME_NONNULL_BEGIN
+
+@protocol SPQueryFavoriteManagerContext <NSObject>
+- (nullable NSURL *)queryFavoriteFileURL;
+- (BOOL)queryFavoriteIsUntitled;
+- (nullable id)queryFavoriteCustomQueryInstance;
+@end
 
 @interface SPQueryFavoriteManager : NSWindowController <NSOpenSavePanelDelegate>
 {
 	NSUserDefaults *prefs;
 	NSURL *delegatesFileURL;
 
-	SPDatabaseDocument *tableDocumentInstance;
+	id <SPQueryFavoriteManagerContext> queryFavoriteContext;
 	IBOutlet NSPopUpButton *encodingPopUp;
 	IBOutlet NSTableView *favoritesTableView;
 	IBOutlet NSTextField *favoriteNameTextField;
@@ -54,10 +61,11 @@
 }
 
 - (instancetype)initWithDelegate:(id)managerDelegate;
+- (instancetype)initWithQueryFavoriteContext:(id <SPQueryFavoriteManagerContext>)context;
 
 // Accessors
-- (NSMutableArray *)queryFavoritesForFileURL:(NSURL *)fileURL;
-- (id)customQueryInstance;
+- (NSMutableArray *)queryFavoritesForFileURL:(nullable NSURL *)fileURL;
+- (nullable id)customQueryInstance;
 
 // IBAction methods
 - (IBAction)addQueryFavorite:(id)sender;
@@ -76,3 +84,5 @@
 - (void)savePanelDidEnd:(NSSavePanel *)panel returnCode:(NSInteger)returnCode contextInfo:(NSString *)contextInfo;
 
 @end
+
+NS_ASSUME_NONNULL_END

@@ -5,6 +5,19 @@
 
 import Cocoa
 
+enum SALightweightSidebarRow {
+    case group(String)
+    case object(String)
+
+    var tableName: String? {
+        if case .object(let table) = self {
+            return table
+        }
+
+        return nil
+    }
+}
+
 extension SPWindowController {
     func preferredLightweightViewModeFromPreferences() -> SAViewMode {
         let preferredValue = UserDefaults.standard.integer(forKey: SPDefaultViewMode)
@@ -110,6 +123,68 @@ extension SPWindowController {
         }
 
         return nil
+    }
+
+    func ensureLightweightTableListAllowsMultipleSelection() {
+        if !tablesListView.allowsMultipleSelection {
+            tablesListView.allowsMultipleSelection = true
+        }
+    }
+
+    @objc func selectedLightweightTableItems() -> [String] {
+        guard hasActiveLightweightConnection else { return [] }
+
+        let selectedRows = tablesListView.selectedRowIndexes
+        var selectedTables: [String] = []
+        for row in selectedRows {
+            guard let table = lightweightTableName(atSidebarRow: row), !selectedTables.contains(table) else { continue }
+            selectedTables.append(table)
+        }
+
+        return selectedTables
+    }
+
+    @objc var selectedLightweightTableCount: Int {
+        return selectedLightweightTableItems().count
+    }
+
+    @objc var selectedLightweightTableSelectionObjectType: Int {
+        let types = selectedLightweightTableTypes()
+        guard let firstType = types.first, types.allSatisfy({ $0 == firstType }) else {
+            return SALightweightTableObjectType.none.rawValue
+        }
+
+        return firstType.rawValue
+    }
+
+    @objc var selectedLightweightTableSelectionHasOnlyTables: Bool {
+        let types = selectedLightweightTableTypes()
+        return !types.isEmpty && types.allSatisfy { $0 == .table }
+    }
+
+    @objc var selectedLightweightTableSelectionHasOnlyTablesOrViews: Bool {
+        let types = selectedLightweightTableTypes()
+        return !types.isEmpty && types.allSatisfy { $0 == .table || $0 == .view }
+    }
+
+    func selectedLightweightTableTypes() -> [SALightweightTableObjectType] {
+        return selectedLightweightTableItems().map { lightweightTableTypes[$0] ?? .table }
+    }
+
+    func primarySelectedLightweightTable() -> String? {
+        let clickedRow = tablesListView.clickedRow
+        if clickedRow >= 0,
+           tablesListView.selectedRowIndexes.contains(clickedRow),
+           let table = lightweightTableName(atSidebarRow: clickedRow) {
+            return table
+        }
+
+        let selectedRow = tablesListView.selectedRow
+        if selectedRow >= 0, let table = lightweightTableName(atSidebarRow: selectedRow) {
+            return table
+        }
+
+        return selectedLightweightTableItems().first
     }
 
     func savedSplitViewFirstSubviewLength(forAutosaveName autosaveName: String, isVertical: Bool) -> CGFloat? {
@@ -266,8 +341,8 @@ extension SPWindowController {
             : NSLocalizedString("Connected", comment: "lightweight connected tab title")
         let result = SAWindowTitleBuilder.buildTitle(
             connectionState: .connected,
-            filePath: nil,
-            isUntitled: true,
+            filePath: lightweightConnectionFileURL?.path,
+            isUntitled: lightweightConnectionFileURL == nil,
             bundleName: Bundle.main.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String ?? NSLocalizedString("Sequel Ace", comment: "default connection tab title"),
             connectionName: connectionName,
             database: selectedDatabase,
@@ -284,12 +359,81 @@ extension SPWindowController {
 
         guard !filter.isEmpty else {
             filteredLightweightTables = lightweightTables
+            restoreLightweightSidebarSelectionIfPossible()
             return
         }
 
         filteredLightweightTables = lightweightTables.filter { table in
             table.range(of: filter, options: .caseInsensitive) != nil
         }
+        restoreLightweightSidebarSelectionIfPossible()
+    }
+
+    func restoreLightweightSidebarSelectionIfPossible() {
+        guard let selectedTable = selectedTable,
+              let row = lightweightSidebarRowIndex(for: selectedTable) else { return }
+
+        isRestoringLightweightHistory = true
+        tablesListView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isRestoringLightweightHistory = false
+    }
+
+    func lightweightSidebarRows() -> [SALightweightSidebarRow] {
+        let tableHeader = lightweightTableTypes.values.contains(.view)
+            ? NSLocalizedString("TABLES & VIEWS", comment: "header for table & views list")
+            : NSLocalizedString("TABLES", comment: "header for table list")
+        var rows: [SALightweightSidebarRow] = []
+
+        let pinnedTables = lightweightTables.filter { lightweightPinnedTables.contains($0) }
+        if !pinnedTables.isEmpty {
+            rows.append(.group(NSLocalizedString("PINNED", comment: "header for pinned tables")))
+            rows.append(contentsOf: pinnedTables.map { .object($0) })
+        }
+
+        let tableRows = filteredLightweightTables.filter { table in
+            let type = lightweightTableTypes[table] ?? .table
+            return type == .table || type == .view
+        }
+        if !tableRows.isEmpty || lightweightTables.isEmpty {
+            rows.append(.group(tableHeader))
+            rows.append(contentsOf: tableRows.map { .object($0) })
+        }
+
+        let routineRows = filteredLightweightTables.filter { table in
+            let type = lightweightTableTypes[table] ?? .table
+            return type == .procedure || type == .function
+        }
+        if !routineRows.isEmpty {
+            rows.append(.group(NSLocalizedString("PROCS & FUNCS", comment: "header for procs & funcs list")))
+            rows.append(contentsOf: routineRows.map { .object($0) })
+        }
+
+        if rows.isEmpty {
+            rows.append(.group(NSLocalizedString("NO MATCHES", comment: "header for no matches in filtered list")))
+        }
+
+        if let selectedTable = selectedTable,
+           lightweightTables.contains(selectedTable),
+           !rows.contains(where: { $0.tableName == selectedTable }) {
+            rows.append(.group(NSLocalizedString("CURRENT SELECTION", comment: "header for current selection in filtered list")))
+            rows.append(.object(selectedTable))
+        }
+
+        return rows
+    }
+
+    func lightweightSidebarRow(at row: Int) -> SALightweightSidebarRow? {
+        let rows = lightweightSidebarRows()
+        guard rows.indices.contains(row) else { return nil }
+        return rows[row]
+    }
+
+    func lightweightTableName(atSidebarRow row: Int) -> String? {
+        return lightweightSidebarRow(at: row)?.tableName
+    }
+
+    func lightweightSidebarRowIndex(for table: String) -> Int? {
+        return lightweightSidebarRows().firstIndex { $0.tableName == table }
     }
 
     func loadLightweightTableObjects(for database: String, connection: SPMySQLConnection) -> [(name: String, type: SALightweightTableObjectType, comment: String?)] {
@@ -470,6 +614,7 @@ extension SPWindowController {
     func loadTables(for database: String, preservingSelection: Bool = false, restoringTable: String? = nil, restoringViewMode: SAViewMode? = nil) {
         guard let activeConnection = activeConnection else { return }
 
+        ensureLightweightTableListAllowsMultipleSelection()
         saveCurrentLightweightViewState()
 
         let tableToRestore = restoringTable ?? (preservingSelection ? selectedTable : nil)
@@ -598,6 +743,36 @@ extension SPWindowController {
                                                               canGoForward: !lightweightHistoryForwardStack.isEmpty)
     }
 
+    @objc func canNavigateLightweightHistoryBack() -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+        return lightweightHistoryBackStack.count > 1
+    }
+
+    @objc func canNavigateLightweightHistoryForward() -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+        return !lightweightHistoryForwardStack.isEmpty
+    }
+
+    @objc func canNavigateLightweightHistory(_ sender: Any?) -> Bool {
+        let tag: Int
+        if let menuItem = sender as? NSMenuItem {
+            tag = menuItem.tag
+        } else if let control = sender as? NSSegmentedControl {
+            tag = control.selectedSegment
+        } else {
+            tag = 0
+        }
+
+        switch tag {
+        case 0:
+            return canNavigateLightweightHistoryBack()
+        case 1:
+            return canNavigateLightweightHistoryForward()
+        default:
+            return false
+        }
+    }
+
     func navigateLightweightHistory(backwards: Bool) {
         guard activeConnection != nil, loadedDatabaseDocument == nil else { return }
 
@@ -645,16 +820,17 @@ extension SPWindowController {
     }
 
     func selectLightweightTableInSidebar(_ table: String) {
+        ensureLightweightTableListAllowsMultipleSelection()
         if !filteredLightweightTables.contains(table) {
             tableFilterField.stringValue = ""
             applyLightweightTableFilter()
             tablesListView.reloadData()
         }
 
-        guard let index = filteredLightweightTables.firstIndex(of: table) else { return }
+        guard let index = lightweightSidebarRowIndex(for: table) else { return }
         isRestoringLightweightHistory = true
-        tablesListView.selectRowIndexes(IndexSet(integer: index + 1), byExtendingSelection: false)
-        tablesListView.scrollRowToVisible(index + 1)
+        tablesListView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        tablesListView.scrollRowToVisible(index)
         isRestoringLightweightHistory = false
     }
 
@@ -728,6 +904,7 @@ extension SPWindowController {
         if let columnMetadata = lightweightStructureController.cachedColumnMetadata(for: table, database: selectedDatabase) {
             lightweightContentController.cacheColumnInfo(fromStructureRows: columnMetadata, for: table, database: selectedDatabase, connection: activeConnection)
         }
+        lightweightContentController.setContentFilterDocumentURL(lightweightQueryController.ensureDocumentURLForLegacyQueryConsumers())
         guard detailChanged else { return }
         lightweightContentController.loadContent(for: table, database: selectedDatabase, connection: activeConnection)
     }
@@ -767,6 +944,11 @@ extension SPWindowController {
 
         let tableInfoView = lightweightTableInfoController.view
         let detailChanged = installLightweightDetailSubview(tableInfoView, key: LightweightDetailKey(viewMode: .status, database: selectedDatabase, table: table, placeholder: nil))
+        lightweightTableInfoController.tableInfoDidChange = { [weak self] in
+            self?.refreshLightweightTableInfoAfterMutation()
+            self?.updateLightweightTableCommentsForPreferenceChange()
+            self?.markLightweightResumeStateChanged()
+        }
 
         guard let table = table, let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else {
             lightweightTableInfoController.showPlaceholder(NSLocalizedString("Select a table to view table information.", comment: "lightweight table info empty state"))

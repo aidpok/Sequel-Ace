@@ -31,7 +31,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 @objcMembers
-private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
+private final class SALightweightQueryFavoriteDocumentProxy: NSObject, SPQueryFavoriteManagerContext {
     weak var queryController: SALightweightQueryViewController?
 
     init(queryController: SALightweightQueryViewController) {
@@ -47,6 +47,18 @@ private final class SALightweightQueryFavoriteDocumentProxy: NSObject {
     }
 
     var customQueryInstance: Any? {
+        return queryController
+    }
+
+    func queryFavoriteFileURL() -> URL? {
+        return queryController?.documentURLForLegacyQueryConsumers
+    }
+
+    func queryFavoriteIsUntitled() -> Bool {
+        return queryController?.isUntitledQueryDocument ?? true
+    }
+
+    func queryFavoriteCustomQueryInstance() -> Any? {
         return queryController
     }
 }
@@ -79,6 +91,24 @@ private final class SALightweightMenuSearchFieldView: NSView {
             window.makeFirstResponder(self.searchField)
         }
     }
+}
+
+enum SALightweightSQLImportErrorChoice {
+    case `continue`
+    case ignoreAll
+    case stop
+}
+
+enum SALightweightSQLImportReadError: Error {
+    case cannotOpenFile
+    case cannotDecode
+}
+
+struct SALightweightSQLImportResult {
+    let queriesPerformed: Int
+    let errors: [String]
+    let wasCancelled: Bool
+    let readError: SALightweightSQLImportReadError?
 }
 
 @objcMembers
@@ -179,6 +209,8 @@ final class SALightweightQueryViewController: NSViewController {
 
     private weak var connection: SPMySQLConnection?
     private var documentURL: URL?
+    private var sqlFileURL: URL?
+    private var sqlFileEncoding: String.Encoding?
     private var database = ""
     private var table: String?
     private var columnDefinitions: [NSDictionary] = []
@@ -191,6 +223,8 @@ final class SALightweightQueryViewController: NSViewController {
     private var isRunning = false
     private var isCancellationRequested = false
     private var runningQueryCount = 0
+    private var lastResultWasTruncated = false
+    private var lastQueryUsedDisplayLimit = true
     private var isApplyingProgrammaticQueryText = false
     private var editorWasConfigured = false
     private var didInstallObservers = false
@@ -246,6 +280,12 @@ final class SALightweightQueryViewController: NSViewController {
     private var currentQueryRanges: [NSRange] = []
     private var didCacheCurrentQueryRanges = false
     var documentURLForLegacyQueryConsumers: URL? { documentURL }
+    var openedSQLFileURL: URL? { sqlFileURL }
+    var openedSQLFileEncoding: String.Encoding? { sqlFileEncoding }
+    var effectiveDocumentURLForLegacyQueryConsumers: URL? {
+        guard let documentURL, !isUntitledQueryDocument else { return nil }
+        return documentURL
+    }
     var isUntitledQueryDocument: Bool {
         guard let documentURL else { return true }
         return documentURL.absoluteString.hasPrefix(NSLocalizedString("Untitled", comment: "Title of a new Sequel Ace Document"))
@@ -255,6 +295,63 @@ final class SALightweightQueryViewController: NSViewController {
     var tableDocumentInstance: Any { favoriteDocumentProxy }
     var tablesListInstance: Any { completionTablesListProxy }
     var textView: SPTextView { queryTextView }
+
+    @discardableResult
+    func ensureDocumentURLForLegacyQueryConsumers() -> URL? {
+        if let documentURL {
+            return documentURL
+        }
+
+        guard let registeredURL = SPQueryController.shared().registerDocument(withFileURL: nil, andContextInfo: nil) else {
+            return nil
+        }
+        documentURL = registeredURL
+        return registeredURL
+    }
+
+    func setDocumentURLForLegacyQueryConsumers(_ url: URL) {
+        guard documentURL != url else { return }
+
+        let previousURL = documentURL
+        guard let queryController = SPQueryController.shared() else { return }
+        let favorites = previousURL.flatMap {
+            queryController.favorites(forFileURL: $0) as? [Any]
+        } ?? []
+        let contentFilters = previousURL.flatMap {
+            queryController.contentFilter(forFileURL: $0) as? [String: Any]
+        } ?? [:]
+
+        let contextInfo = NSMutableDictionary()
+        if !favorites.isEmpty {
+            contextInfo[SPQueryFavorites] = favorites
+        }
+        if contentFilters.values.contains(where: { ($0 as? [Any])?.isEmpty == false }) {
+            contextInfo[SPContentFilters] = contentFilters
+        }
+
+        _ = queryController.registerDocument(withFileURL: url, andContextInfo: contextInfo)
+        if !favorites.isEmpty {
+            queryController.replaceFavorites(by: favorites, forFileURL: url)
+        }
+        for (filterType, filters) in contentFilters {
+            guard let typedFilters = filters as? [Any] else { continue }
+            queryController.replaceContentFilter(by: typedFilters, ofType: filterType, forFileURL: url)
+        }
+
+        documentURL = url
+        rebuildFavoritesMenu()
+        rebuildHistoryMenu()
+    }
+
+    func documentScopedQueryFavoritesForSPF() -> NSArray? {
+        guard let documentURL = effectiveDocumentURLForLegacyQueryConsumers,
+              let favorites = SPQueryController.shared().favorites(forFileURL: documentURL),
+              favorites.count > 0 else {
+            return nil
+        }
+
+        return favorites
+    }
 
     private func prewarmFieldEditor() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -685,9 +782,7 @@ final class SALightweightQueryViewController: NSViewController {
                                          tableTypes: tableTypes,
                                          fieldNames: fieldNames)
 
-        if documentURL == nil {
-            documentURL = SPQueryController.shared().registerDocument(withFileURL: nil, andContextInfo: nil)
-        }
+        ensureDocumentURLForLegacyQueryConsumers()
 
         configureEditorIfNeeded()
         queryTextView.setConnection(connection, withVersion: Int(connection.serverMajorVersion()))
@@ -701,6 +796,79 @@ final class SALightweightQueryViewController: NSViewController {
         updateCurrentQueryRange()
         rebuildMenus()
         updateControls()
+    }
+
+    func setSQLFile(url: URL?, encoding: String.Encoding?) {
+        sqlFileURL = url
+        sqlFileEncoding = encoding
+    }
+
+    @nonobjc func startStreamingSQLImport(from url: URL,
+                                          encoding: String.Encoding,
+                                          ignoresErrorsByDefault: Bool,
+                                          errorChoice: @escaping (String) -> SALightweightSQLImportErrorChoice,
+                                          charsetErrorChoice: @escaping () -> Bool,
+                                          completion: @escaping (SALightweightSQLImportResult) -> Void) {
+        guard let connection, !database.isEmpty, !isRunning else {
+            completion(SALightweightSQLImportResult(queriesPerformed: 0,
+                                                    errors: [NSLocalizedString("Import unavailable.", comment: "lightweight import unavailable error")],
+                                                    wasCancelled: false,
+                                                    readError: nil))
+            return
+        }
+
+        queryToken = UUID()
+        let token = queryToken
+        isCancellationRequested = false
+        isRunning = true
+        runningQueryCount = 1
+        rows = []
+        columnDefinitions = []
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
+        rebuildColumns()
+        updateDataTableBundleSupport()
+
+        let sourceName = url.lastPathComponent
+        let runningStatus = String(format: NSLocalizedString("Importing %@...", comment: "lightweight SQL import running status"), sourceName)
+        setStatusText(runningStatus)
+        showQueryProgressPanel(description: runningStatus,
+                               cancelButtonTitle: NSLocalizedString("Stop import", comment: "Stop import string"))
+        updateControls()
+        queryExecutionWillBegin?()
+        let queryExecutionDidEnd = queryExecutionDidEnd
+        let importDatabase = database
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            let result = self.performStreamingSQLImport(from: url,
+                                                        encoding: encoding,
+                                                        connection: connection,
+                                                        database: importDatabase,
+                                                        sourceName: sourceName,
+                                                        token: token,
+                                                        ignoresErrorsByDefault: ignoresErrorsByDefault,
+                                                        errorChoice: errorChoice,
+                                                        charsetErrorChoice: charsetErrorChoice)
+
+            DispatchQueue.main.async {
+                guard self.queryToken == token else { return }
+                self.hideQueryProgressPanel()
+                self.isRunning = false
+                self.isCancellationRequested = false
+                self.runningQueryCount = 0
+                self.lastExecutedQuery = ""
+                self.lastResultQuery = ""
+                self.setStatusText(self.streamingSQLImportStatus(for: result, sourceName: sourceName))
+                self.updateQueryInfo(title: NSLocalizedString("Import SQL", comment: "lightweight SQL import confirmation title"),
+                                     message: result.errors.isEmpty ? NSLocalizedString("There were no errors.", comment: "lightweight query info pane no errors text") : result.errors.joined(separator: "\n"),
+                                     isError: !result.errors.isEmpty)
+                self.rebuildMenus()
+                self.updateControls()
+                queryExecutionDidEnd?()
+                completion(result)
+            }
+        }
     }
 
     func doPerformQueryService(_ query: String) {
@@ -1229,6 +1397,18 @@ private extension SALightweightQueryViewController {
         secondaryItem.target = self
         menu.addItem(secondaryItem)
 
+        let runWithoutLimitItem = NSMenuItem(title: NSLocalizedString("Run Current Without Display Limit", comment: "run current query without display limit menu item"),
+                                             action: #selector(runCurrentQueryWithoutDisplayLimit(_:)),
+                                             keyEquivalent: "")
+        runWithoutLimitItem.target = self
+        menu.addItem(runWithoutLimitItem)
+
+        let loadAllRowsItem = NSMenuItem(title: NSLocalizedString("Load All Rows for Last Result", comment: "load all rows for last truncated query result menu item"),
+                                         action: #selector(loadAllRowsForLastQuery(_:)),
+                                         keyEquivalent: "")
+        loadAllRowsItem.target = self
+        menu.addItem(loadAllRowsItem)
+
         let switchDefaultItem = NSMenuItem(title: NSLocalizedString("Switch Default", comment: "switch query default menu item"),
                                            action: #selector(switchDefaultQueryAction(_:)),
                                            keyEquivalent: "")
@@ -1308,6 +1488,10 @@ private extension SALightweightQueryViewController {
             switch item.action {
             case #selector(runExplainQueryAction(_:)):
                 item.isEnabled = canRunExplainQueryAction()
+            case #selector(runCurrentQueryWithoutDisplayLimit(_:)):
+                item.isEnabled = canRunCurrentQueryWithoutDisplayLimit()
+            case #selector(loadAllRowsForLastQuery(_:)):
+                item.isEnabled = canLoadAllRowsForLastQuery()
             default:
                 break
             }
@@ -1344,6 +1528,26 @@ private extension SALightweightQueryViewController {
         } else {
             runQueries(splitQueries(in: queryTextView.string))
         }
+    }
+
+    @objc func runCurrentQueryWithoutDisplayLimit(_ sender: Any?) {
+        guard !isRunning else { return }
+
+        // Fixes bug in key equivalents (mirrors the legacy query action guard).
+        if NSApp.currentEvent?.type == .keyUp { return }
+
+        guard let queries = queriesForCurrentAction() else { return }
+        runQueries(queries, appliesDisplayLimit: false)
+    }
+
+    @objc func loadAllRowsForLastQuery(_ sender: Any?) {
+        guard canLoadAllRowsForLastQuery() else { return }
+
+        runQueries([lastExecutedQuery],
+                   preservingResultGridState: true,
+                   recordsHistory: false,
+                   appliesDisplayLimit: false,
+                   preserveCurrentSort: true)
     }
 
     @objc func runExplainQueryAction(_ sender: Any?) {
@@ -1526,7 +1730,361 @@ private extension SALightweightQueryViewController {
         completionFunction(queryTextView, selector, false, fuzzySearch, false)
     }
 
-    func runQueries(_ queries: [String], preservingResultGridState: Bool = false, recordsHistory: Bool = true) {
+    func performStreamingSQLImport(from url: URL,
+                                   encoding: String.Encoding,
+                                   connection: SPMySQLConnection,
+                                   database: String,
+                                   sourceName: String,
+                                   token: UUID,
+                                   ignoresErrorsByDefault: Bool,
+                                   errorChoice: @escaping (String) -> SALightweightSQLImportErrorChoice,
+                                   charsetErrorChoice: @escaping () -> Bool) -> SALightweightSQLImportResult {
+        guard let fileHandle = SPFileHandle.fileHandleForReading(atPath: url.path) as? SPFileHandle else {
+            return SALightweightSQLImportResult(queriesPerformed: 0, errors: [], wasCancelled: false, readError: .cannotOpenFile)
+        }
+        defer {
+            fileHandle.closeFile()
+        }
+
+        let oldRetryQueries = connection.retryQueriesOnConnectionFailure
+        connection.retryQueriesOnConnectionFailure = false
+
+        var errors: [String] = []
+        var queriesPerformed = 0
+        var wasCancelled = false
+        var ignoreSQLErrors = ignoresErrorsByDefault
+        var ignoreCharsetError = false
+        var connectionEncodingToRestore: String?
+        var sqlModeToRestore: String?
+        var readError: SALightweightSQLImportReadError?
+        var serverStatus = SPMySQLServerStatusBits()
+
+        defer {
+            if let connectionEncodingToRestore {
+                _ = connection.queryString("SET NAMES '\(connectionEncodingToRestore)'")
+            }
+            if let sqlModeToRestore {
+                _ = connection.queryString("SET SQL_MODE=\(SALightweightQueryViewController.sqlSingleQuoted(sqlModeToRestore))")
+            }
+            connection.retryQueriesOnConnectionFailure = oldRetryQueries
+        }
+
+        _ = connection.selectDatabase(database)
+
+        if let mysqlCharset = SALightweightQueryViewController.mysqlCharset(for: encoding), let currentEncoding = connection.encoding(), !currentEncoding.isEmpty {
+            connectionEncodingToRestore = currentEncoding
+            _ = connection.queryString("SET NAMES '\(mysqlCharset)'")
+        }
+
+        if let result = connection.queryString("SELECT @@sql_mode") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsArray
+            if let row = result.getRowAsArray() as? [Any], let sqlMode = row.first as? String {
+                sqlModeToRestore = sqlMode
+            }
+        }
+
+        let parser = SPSQLParser(string: "")
+        parser.setDelimiterSupport(true)
+        if connection.update(&serverStatus) {
+            parser.setNoBackslashEscapes(serverStatus.noBackslashEscapes != 0)
+        }
+
+        let whitespaceAndNewline = CharacterSet.whitespacesAndNewlines
+        let sqlDataBuffer = NSMutableData()
+        let chunkLength: UInt = 1024 * 1024
+        let fileTotalLength = max(1, (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 1)
+        let fileIsCompressed = fileHandle.compressionFormat() != SPNoCompression
+        var fileProcessedLength = 0
+        var dataBufferPosition = 0
+        var dataBufferLastQueryEndPosition = 0
+        var allDataRead = false
+        var lastProgressUpdate = CFAbsoluteTimeGetCurrent()
+
+        while true {
+            autoreleasepool {
+                if token != queryToken || isCancellationRequested {
+                    wasCancelled = true
+                    return
+                }
+
+                let fileChunk: NSMutableData?
+                do {
+                    fileChunk = fileHandle.readData(ofLength: chunkLength)
+                }
+
+                guard let fileChunk else {
+                    readError = .cannotOpenFile
+                    return
+                }
+
+                if fileChunk.length == 0 {
+                    allDataRead = true
+                } else {
+                    sqlDataBuffer.append(fileChunk as Data)
+                }
+
+                let sqlDataBufferBytes = sqlDataBuffer.bytes.assumingMemoryBound(to: UInt8.self)
+                let dataBufferLength = sqlDataBuffer.length
+
+                while dataBufferPosition < dataBufferLength || allDataRead {
+                    if allDataRead || sqlDataBufferBytes[dataBufferPosition] == 0x0A || sqlDataBufferBytes[dataBufferPosition] == 0x0D {
+                        while dataBufferPosition + 1 < dataBufferLength
+                                && (sqlDataBufferBytes[dataBufferPosition + 1] == 0x0A
+                                    || sqlDataBufferBytes[dataBufferPosition + 1] == 0x0D) {
+                            dataBufferPosition += 1
+                        }
+
+                        let range = NSRange(location: dataBufferLastQueryEndPosition, length: max(0, dataBufferPosition - dataBufferLastQueryEndPosition))
+                        let sqlData = sqlDataBuffer.subdata(with: range)
+                        guard let sqlString = String(data: sqlData, encoding: encoding) else {
+                            readError = .cannotDecode
+                            return
+                        }
+                        parser.append(sqlString)
+
+                        if allDataRead {
+                            break
+                        }
+
+                        dataBufferLastQueryEndPosition = dataBufferPosition
+                    }
+
+                    dataBufferPosition += 1
+                }
+
+                if dataBufferLastQueryEndPosition > 0 {
+                    let remainingRange = NSRange(location: dataBufferLastQueryEndPosition, length: dataBufferLength - dataBufferLastQueryEndPosition)
+                    sqlDataBuffer.setData(sqlDataBuffer.subdata(with: remainingRange))
+                    dataBufferPosition -= dataBufferLastQueryEndPosition
+                    dataBufferLastQueryEndPosition = 0
+                }
+
+                if !connection.isConnected() && (connection.userTriggeredDisconnect() || !connection.check()) {
+                    errors.append(NSLocalizedString("The connection to the server was lost during the import. The import is only partially complete.", comment: "Connection lost during import error message"))
+                    wasCancelled = true
+                    return
+                }
+
+                while let rawQuery = parser.trimAndReturnString(toCharacter: Character(";").utf16.first!,
+                                                                trimmingInclusively: true,
+                                                                returningInclusively: false) {
+                    if token != queryToken || isCancellationRequested {
+                        wasCancelled = true
+                        return
+                    }
+
+                    fileProcessedLength += rawQuery.lengthOfBytes(using: encoding) + 1
+                    let query = normalisedStreamingImportQuery(rawQuery, parser: parser, whitespaceAndNewline: whitespaceAndNewline)
+                    guard !query.isEmpty else { continue }
+
+                    executeStreamingImportQuery(query,
+                                                queryNumber: queriesPerformed + 1,
+                                                encoding: encoding,
+                                                connection: connection,
+                                                parser: parser,
+                                                serverStatus: &serverStatus,
+                                                errors: &errors,
+                                                ignoreSQLErrors: &ignoreSQLErrors,
+                                                ignoreCharsetError: &ignoreCharsetError,
+                                                wasCancelled: &wasCancelled,
+                                                errorChoice: errorChoice,
+                                                charsetErrorChoice: charsetErrorChoice)
+                    queriesPerformed += 1
+
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - lastProgressUpdate > 0.2 {
+                        lastProgressUpdate = now
+                        publishStreamingImportProgress(sourceName: sourceName,
+                                                       processedLength: fileProcessedLength,
+                                                       totalLength: fileTotalLength,
+                                                       realDataReadLength: fileHandle.realDataReadLength(),
+                                                       compressed: fileIsCompressed,
+                                                       token: token)
+                    }
+
+                    if wasCancelled {
+                        return
+                    }
+                }
+
+                if allDataRead {
+                    return
+                }
+            }
+
+            if readError != nil || wasCancelled {
+                break
+            }
+
+            if allDataRead {
+                break
+            }
+        }
+
+        if readError == nil && !wasCancelled {
+            let remainingQuery = parser.description.trimmingCharacters(in: whitespaceAndNewline)
+            if !remainingQuery.isEmpty {
+                executeStreamingImportQuery(remainingQuery,
+                                            queryNumber: queriesPerformed + 1,
+                                            encoding: encoding,
+                                            connection: connection,
+                                            parser: parser,
+                                            serverStatus: &serverStatus,
+                                            errors: &errors,
+                                            ignoreSQLErrors: &ignoreSQLErrors,
+                                            ignoreCharsetError: &ignoreCharsetError,
+                                            wasCancelled: &wasCancelled,
+                                            errorChoice: errorChoice,
+                                            charsetErrorChoice: charsetErrorChoice)
+                queriesPerformed += 1
+            }
+        }
+
+        return SALightweightSQLImportResult(queriesPerformed: queriesPerformed,
+                                           errors: errors,
+                                           wasCancelled: wasCancelled,
+                                           readError: readError)
+    }
+
+    func normalisedStreamingImportQuery(_ rawQuery: String, parser: SPSQLParser, whitespaceAndNewline: CharacterSet) -> String {
+        if parser.containsCarriageReturns() {
+            return (SPSQLParser.normaliseQuery(forExecution: rawQuery) ?? rawQuery).trimmingCharacters(in: whitespaceAndNewline)
+        }
+
+        return rawQuery.trimmingCharacters(in: whitespaceAndNewline)
+    }
+
+    func executeStreamingImportQuery(_ query: String,
+                                     queryNumber: Int,
+                                     encoding: String.Encoding,
+                                     connection: SPMySQLConnection,
+                                     parser: SPSQLParser,
+                                     serverStatus: inout SPMySQLServerStatusBits,
+                                     errors: inout [String],
+                                     ignoreSQLErrors: inout Bool,
+                                     ignoreCharsetError: inout Bool,
+                                     wasCancelled: inout Bool,
+                                     errorChoice: (String) -> SALightweightSQLImportErrorChoice,
+                                     charsetErrorChoice: () -> Bool) {
+        _ = connection.queryString(query, usingEncoding: encoding.rawValue, with: SPMySQLResultAsResult)
+
+        if connection.update(&serverStatus) {
+            parser.setNoBackslashEscapes(serverStatus.noBackslashEscapes != 0)
+        }
+
+        guard connection.queryErrored(), connection.lastErrorMessage() != "Query was empty" else { return }
+
+        let error = connection.lastErrorMessage() ?? NSLocalizedString("Unknown MySQL error.", comment: "unknown mysql error")
+        let detailedError = String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), queryNumber, error)
+        errors.append(detailedError)
+
+        if connection.lastErrorID() == 1115,
+           error.range(of: "utf8mb4", options: .caseInsensitive) != nil,
+           query.range(of: "SET NAMES", options: .caseInsensitive) != nil,
+           !ignoreCharsetError {
+            if DispatchQueue.main.sync(execute: charsetErrorChoice) {
+                ignoreCharsetError = true
+            } else {
+                errors.append(NSLocalizedString("Import cancelled!", comment: "import cancelled message"))
+                wasCancelled = true
+            }
+            return
+        }
+
+        guard !ignoreSQLErrors else { return }
+
+        switch DispatchQueue.main.sync(execute: { errorChoice(detailedError) }) {
+        case .continue:
+            break
+        case .ignoreAll:
+            ignoreSQLErrors = true
+        case .stop:
+            errors.append(NSLocalizedString("Import cancelled!", comment: "import cancelled message"))
+            wasCancelled = true
+        }
+    }
+
+    func publishStreamingImportProgress(sourceName: String,
+                                        processedLength: Int,
+                                        totalLength: Int,
+                                        realDataReadLength: UInt,
+                                        compressed: Bool,
+                                        token: UUID) {
+        let importedText: String
+        if compressed {
+            importedText = String(format: NSLocalizedString("Imported %@ of SQL", comment: "SQL import progress text where total size is unknown"),
+                                  ByteCountFormatter.string(fromByteCount: Int64(processedLength), countStyle: .file))
+        } else {
+            importedText = String(format: NSLocalizedString("Imported %@ of %@", comment: "SQL import progress text"),
+                                  ByteCountFormatter.string(fromByteCount: Int64(processedLength), countStyle: .file),
+                                  ByteCountFormatter.string(fromByteCount: Int64(totalLength), countStyle: .file))
+        }
+
+        let progressText = compressed
+            ? "\(sourceName) — \(importedText) (\(ByteCountFormatter.string(fromByteCount: Int64(realDataReadLength), countStyle: .file)) read)"
+            : "\(sourceName) — \(importedText)"
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.queryToken == token else { return }
+            self.setStatusText(progressText)
+            self.setQueryProgressDescription(progressText)
+        }
+    }
+
+    func streamingSQLImportStatus(for result: SALightweightSQLImportResult, sourceName: String) -> String {
+        if result.wasCancelled {
+            return String(format: NSLocalizedString("Import cancelled after %ld SQL statements.", comment: "lightweight SQL import cancelled status"), result.queriesPerformed)
+        }
+
+        if let readError = result.readError {
+            switch readError {
+            case .cannotOpenFile:
+                return NSLocalizedString("The SQL file you selected could not be found or read.", comment: "SQL file open error")
+            case .cannotDecode:
+                return NSLocalizedString("The SQL file could not be read using the selected encoding.", comment: "lightweight SQL import encoding status")
+            }
+        }
+
+        if result.errors.isEmpty {
+            return String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), result.queriesPerformed, sourceName)
+        }
+
+        return String(format: NSLocalizedString("Imported %ld SQL statements with errors.", comment: "lightweight SQL import finished with errors status"), result.queriesPerformed)
+    }
+
+    static func mysqlCharset(for encoding: String.Encoding) -> String? {
+        switch encoding {
+        case .utf8:
+            return "utf8mb4"
+        case .isoLatin1:
+            return "latin1"
+        case .ascii:
+            return "ascii"
+        case .windowsCP1250:
+            return "cp1250"
+        case .windowsCP1251:
+            return "cp1251"
+        case .shiftJIS:
+            return "sjis"
+        case .japaneseEUC:
+            return "ujis"
+        case .utf16, .utf16BigEndian, .utf16LittleEndian:
+            return "utf16"
+        default:
+            return nil
+        }
+    }
+
+    static func sqlSingleQuoted(_ value: String) -> String {
+        return "'\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))'"
+    }
+
+    func runQueries(_ queries: [String],
+                    preservingResultGridState: Bool = false,
+                    recordsHistory: Bool = true,
+                    appliesDisplayLimit: Bool = true,
+                    preserveCurrentSort: Bool = false) {
         guard let connection, !isRunning else { return }
 
         let runnableQueries = queries
@@ -1561,13 +2119,14 @@ private extension SALightweightQueryViewController {
         }
 
         let preservingColumnsForSort = preservingResultGridState && !columnDefinitions.isEmpty
-        if !isApplyingQuerySort {
+        if !isApplyingQuerySort && !preserveCurrentSort {
             querySortColumnIndex = nil
             querySortAscending = true
             applyQuerySortIndicator()
         }
 
         isRunning = true
+        lastResultWasTruncated = false
         runningQueryCount = runnableQueries.count
         updateDataTableBundleSupport()
         if preservingColumnsForSort {
@@ -1582,9 +2141,16 @@ private extension SALightweightQueryViewController {
             lastExecutedQuery = ""
             lastResultQuery = ""
         }
-        let runningStatus = runnableQueries.count > 1
-            ? String(format: NSLocalizedString("Running query 1 of %ld...", comment: "lightweight query running multiple status"), runnableQueries.count)
-            : NSLocalizedString("Running query...", comment: "lightweight query running status")
+        let runningStatus: String
+        if runnableQueries.count > 1 {
+            runningStatus = appliesDisplayLimit
+                ? String(format: NSLocalizedString("Running query 1 of %ld...", comment: "lightweight query running multiple status"), runnableQueries.count)
+                : String(format: NSLocalizedString("Running query 1 of %ld without display limit...", comment: "lightweight query running multiple without display limit status"), runnableQueries.count)
+        } else {
+            runningStatus = appliesDisplayLimit
+                ? NSLocalizedString("Running query...", comment: "lightweight query running status")
+                : NSLocalizedString("Running query without display limit...", comment: "lightweight query running without display limit status")
+        }
         setStatusText(runningStatus)
         showQueryProgressPanel(description: runningStatus,
                                cancelButtonTitle: runnableQueries.count > 1
@@ -1642,7 +2208,7 @@ private extension SALightweightQueryViewController {
                     }
                 }
 
-                let executionQuery = self.queryByApplyingDisplayLimit(to: query)
+                let executionQuery = appliesDisplayLimit ? self.queryByApplyingDisplayLimit(to: query) : query
                 executedQueries.append(query)
                 let queryStart = CFAbsoluteTimeGetCurrent()
                 guard let result = connection.streamingQueryString(executionQuery) else {
@@ -1762,7 +2328,7 @@ private extension SALightweightQueryViewController {
                         finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: nil, errorText: errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: 0, queriesRun: queriesRun, truncated: finalResult.truncated, wasCancelled: true)
                         break
                     }
-                    if loadedRows.count < self.maxDisplayedRows {
+                    if !appliesDisplayLimit || loadedRows.count < self.maxDisplayedRows {
                         loadedRows.append(row)
                         pendingPublishedRows.append(row)
 
@@ -1832,12 +2398,14 @@ private extension SALightweightQueryViewController {
                 self.runningQueryCount = 0
                 self.lastExecutedQuery = finalResult.executedQuery
                 self.lastResultQuery = finalResult.resultQuery
+                self.lastResultWasTruncated = finalResult.truncated
 
                 if recordsHistory, !self.lastExecutedQuery.isEmpty {
                     self.addHistoryEntry(self.lastExecutedQuery)
                 }
 
                 if let error = finalResult.fatalError, !error.isEmpty {
+                    self.lastResultWasTruncated = false
                     let sortRestore = self.isApplyingQuerySort ? self.pendingSortFailureRestore : nil
                     self.isApplyingQuerySort = false
                     if let state = self.pendingResultGridViewState {
@@ -1885,11 +2453,16 @@ private extension SALightweightQueryViewController {
                 if let errorText = finalResult.errorText, !errorText.isEmpty {
                     self.selectQueryForError(number: finalResult.firstErrorQueryNumber, errorText: errorText, errorID: finalResult.lastErrorID)
                     self.updateQueryInfo(title: NSLocalizedString("Last Error Message", comment: "lightweight query error info title"), message: errorText, isError: true)
+                } else if finalResult.truncated {
+                    self.updateQueryInfo(title: NSLocalizedString("Display Limit", comment: "lightweight query display limit info title"),
+                                         message: self.displayLimitInformationMessage(),
+                                         isError: false)
                 } else {
                     self.updateQueryInfo(title: NSLocalizedString("Query Status", comment: "lightweight query info pane status title"),
                                          message: NSLocalizedString("There were no errors.", comment: "lightweight query info pane no errors text"),
                                          isError: false)
                 }
+                self.lastQueryUsedDisplayLimit = appliesDisplayLimit
                 self.rebuildMenus()
                 self.updateControls()
                 self.restorePendingResultGridViewState()
@@ -2670,9 +3243,13 @@ private extension SALightweightQueryViewController {
     }
 
     @objc func editQueryFavorites(_ sender: Any?) {
-        guard let window = view.window,
-              let manager = SPQueryFavoriteManager(delegate: self),
-              let managerWindow = manager.window else {
+        guard let window = view.window else {
+            NSSound.beep()
+            return
+        }
+
+        let manager = SPQueryFavoriteManager(delegate: self)
+        guard let managerWindow = manager.window else {
             NSSound.beep()
             return
         }
@@ -2722,15 +3299,29 @@ private extension SALightweightQueryViewController {
         panel.canCreateDirectories = true
         panel.accessoryView = encodingAccessory.view
         panel.nameFieldStringValue = "history"
-        if panel.runModal() == .OK, let url = panel.url {
+
+        let saveHistory: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self, response == .OK, let url = panel.url else { return }
+
             let encoding = encodingAccessory.selectedEncoding
             prefs.set(encoding.rawValue, forKey: SPLastSQLFileEncoding)
 
             do {
-                try buildHistoryString().write(to: url, atomically: true, encoding: encoding)
+                try self.buildHistoryString().write(to: url, atomically: true, encoding: encoding)
             } catch {
-                NSAlert(error: error).runModalCenteredInKeyWindow()
+                let alert = NSAlert(error: error)
+                if let window = self.view.window {
+                    alert.beginSheetModal(for: window, completionHandler: nil)
+                } else {
+                    alert.runModalCenteredInKeyWindow()
+                }
             }
+        }
+
+        if let window = view.window {
+            panel.beginSheetModal(for: window, completionHandler: saveHistory)
+        } else {
+            saveHistory(panel.runModal())
         }
     }
 
@@ -2742,8 +3333,16 @@ private extension SALightweightQueryViewController {
         alert.addButton(withTitle: NSLocalizedString("Clear", comment: "clear button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
-        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn, let documentURL else { return }
-        SPQueryController.shared().replaceHistory(by: [], forFileURL: documentURL)
+        let clearHistory: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, let documentURL = self?.documentURL else { return }
+            SPQueryController.shared().replaceHistory(by: [], forFileURL: documentURL)
+        }
+
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: clearHistory)
+        } else {
+            clearHistory(alert.runModalCenteredInKeyWindow())
+        }
     }
 
     func configureClearHistoryMenuItem(_ menuItem: NSMenuItem) {
@@ -3185,10 +3784,31 @@ private extension SALightweightQueryViewController {
                 : String(format: NSLocalizedString("%@; %llu rows affected, taking %@", comment: "lightweight query affected rows status"), statusTitle, result.affectedRows, time))
         } else {
             let suffix = result.truncated
-                ? String(format: NSLocalizedString("; showing first %ld rows", comment: "lightweight query truncated rows suffix"), maxDisplayedRows)
+                ? String(format: NSLocalizedString("; showing first %ld rows — copy/export use loaded rows; Run ▾ Load All Rows for full result", comment: "lightweight query truncated rows suffix"), maxDisplayedRows)
                 : ""
             setStatusText(String(format: NSLocalizedString("%@; %ld rows loaded%@, first row available after %@", comment: "lightweight query rows loaded status"), statusTitle, result.rows.count, suffix, time))
         }
+    }
+
+    func displayLimitInformationMessage() -> String {
+        return String(format: NSLocalizedString("Only the first %ld rows are loaded in the result grid. Copy, drag, bundle, and export actions use the loaded rows only. Choose Run ▾ Load All Rows for Last Result to fetch every row for this query.", comment: "lightweight query display limit information message"), maxDisplayedRows)
+    }
+
+    func canRunCurrentQueryWithoutDisplayLimit() -> Bool {
+        guard !isRunning,
+              connection != nil,
+              !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        return queryTextView.selectedRange().length > 0 || currentQueryRange.length > 0
+    }
+
+    func canLoadAllRowsForLastQuery() -> Bool {
+        return !isRunning
+            && connection != nil
+            && lastResultWasTruncated
+            && !lastExecutedQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func queryByApplyingDisplayLimit(to query: String) -> String {
@@ -3288,7 +3908,7 @@ private extension SALightweightQueryViewController {
         let hasConnection = connection != nil
         runButton.isEnabled = hasConnection
         actionButton.isEnabled = !isRunning
-        exportButton.isEnabled = !isRunning && !rows.isEmpty
+        exportButton.isEnabled = !isRunning && !tableView.tableColumns.isEmpty
         favoritesButton.isEnabled = !isRunning
         historyButton.isEnabled = !isRunning
         queryTextView.isEditable = !isRunning
@@ -3362,7 +3982,7 @@ private extension SALightweightQueryViewController {
     }
 
     func exportQueryResult(fileExtension: String, content: String) {
-        guard !rows.isEmpty else {
+        guard !tableView.tableColumns.isEmpty else {
             NSSound.beep()
             return
         }
@@ -4238,6 +4858,10 @@ extension SALightweightQueryViewController {
         return currentResultRowCount()
     }
 
+    func exportResultColumnCount() -> Int {
+        return tableView.tableColumns.count
+    }
+
     func exportDataResult(withNULLs includeNULLs: Bool, truncateDataFields truncate: Bool) -> [[Any]] {
         return currentDataResult(withNULLs: includeNULLs, truncateDataFields: truncate)
     }
@@ -4470,10 +5094,16 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
             return canCopySelectedResultRows(menuItem)
 
         case #selector(exportQueryResultAsCSV(_:)), #selector(exportQueryResultAsXML(_:)):
-            return !isRunning && !rows.isEmpty
+            return !isRunning && exportResultColumnCount() > 0
 
         case #selector(runPrimaryQuery(_:)), #selector(runSecondaryQuery(_:)):
             return !isRunning && connection != nil
+
+        case #selector(runCurrentQueryWithoutDisplayLimit(_:)):
+            return canRunCurrentQueryWithoutDisplayLimit()
+
+        case #selector(loadAllRowsForLastQuery(_:)):
+            return canLoadAllRowsForLastQuery()
 
         case #selector(saveCurrentQueryToFavorites(_:)), #selector(saveAllQueriesToFavorites(_:)):
             if action == #selector(saveCurrentQueryToFavorites(_:)) {
@@ -4577,7 +5207,8 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         isApplyingQuerySort = true
         runQueries([queryByApplyingSort(to: lastExecutedQuery, columnIndex: columnIndex, descending: !querySortAscending)],
                    preservingResultGridState: true,
-                   recordsHistory: false)
+                   recordsHistory: false,
+                   appliesDisplayLimit: lastQueryUsedDisplayLimit)
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {

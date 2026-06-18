@@ -5,6 +5,220 @@
 
 import Cocoa
 
+final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDelegate {
+    private enum Layout {
+        static let width: CGFloat = 384
+        static let verticalPadding: CGFloat = 8
+        static let csvTitleHeight: CGFloat = 18
+    }
+
+    let encodingAccessory: SALightweightSQLImportEncodingAccessory
+    let csvAccessory: SALightweightCSVImportAccessory
+
+    private let rootView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.width, height: 240))
+    private let stackView = NSStackView()
+    private let csvTitleLabel = NSTextField(labelWithString: NSLocalizedString("CSV/TSV Options", comment: "lightweight CSV import accessory title"))
+
+    var view: NSView {
+        return rootView
+    }
+
+    var selectedEncoding: String.Encoding {
+        return encodingAccessory.selectedEncoding
+    }
+
+    init(selectedEncoding: String.Encoding, initialURL: URL? = nil) {
+        self.encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
+        self.csvAccessory = SALightweightCSVImportAccessory(inferringFrom: initialURL)
+
+        super.init()
+
+        configureView()
+        updateSelection(for: initialURL)
+    }
+
+    @discardableResult
+    func saveCSVSettings() -> SALightweightCSVImportSettings {
+        return csvAccessory.saveSettings()
+    }
+
+    func panelSelectionDidChange(_ sender: Any?) {
+        guard let panel = sender as? NSOpenPanel else { return }
+        updateSelection(for: panel.url)
+    }
+
+    func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
+        if url.hasDirectoryPath { return true }
+
+        return SPWindowController.isLightweightSQLImportFileURL(url)
+            || SALightweightCSVImportController.isSupportedFileURL(url)
+    }
+
+    private func configureView() {
+        rootView.translatesAutoresizingMaskIntoConstraints = false
+        rootView.widthAnchor.constraint(equalToConstant: Layout.width).isActive = true
+
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.spacing = Layout.verticalPadding
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+
+        csvTitleLabel.font = NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+        csvTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        stackView.addArrangedSubview(encodingAccessory.view)
+        stackView.addArrangedSubview(csvTitleLabel)
+        stackView.addArrangedSubview(csvAccessory.rootView)
+
+        rootView.addSubview(stackView)
+
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            stackView.trailingAnchor.constraint(lessThanOrEqualTo: rootView.trailingAnchor),
+            stackView.topAnchor.constraint(equalTo: rootView.topAnchor),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: rootView.bottomAnchor)
+        ])
+    }
+
+    private func updateSelection(for url: URL?) {
+        let isCSV = url.map { SALightweightCSVImportController.isSupportedFileURL($0) } ?? false
+        csvTitleLabel.isHidden = !isCSV
+        csvAccessory.rootView.isHidden = !isCSV
+
+        if isCSV {
+            _ = csvAccessory.loadCurrentSettings(inferringFrom: url)
+        }
+    }
+}
+
+private final class SALightweightCSVImportProgressSheet: NSObject {
+    private enum Layout {
+        static let width: CGFloat = 420
+        static let height: CGFloat = 58
+    }
+
+    private let alert = NSAlert()
+    private let progressIndicator = NSProgressIndicator()
+    private let progressTextField = NSTextField(labelWithString: "")
+    private var isShowing = false
+    private var isFinishing = false
+
+    var cancelHandler: (() -> Void)?
+
+    init(sourceName: String) {
+        super.init()
+
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("Importing CSV/TSV", comment: "lightweight CSV import progress title")
+        alert.informativeText = String(format: NSLocalizedString("Importing %@…", comment: "lightweight CSV import progress message"), sourceName)
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        alert.accessoryView = makeAccessoryView()
+    }
+
+    func begin(on parentWindow: NSWindow?) {
+        guard let parentWindow = parentWindow ?? NSApp.keyWindow ?? NSApp.mainWindow else { return }
+
+        isShowing = true
+        alert.beginSheetModal(for: parentWindow) { [weak self] response in
+            guard let self else { return }
+
+            let shouldCancel = response == .alertFirstButtonReturn && !self.isFinishing
+            self.isShowing = false
+            self.isFinishing = false
+
+            if shouldCancel {
+                self.cancelHandler?()
+            }
+        }
+    }
+
+    func update(rowsImported: Int, bytesRead: UInt64, totalBytes: UInt64) {
+        guard isShowing else { return }
+
+        let updateBlock = { [weak self] in
+            guard let self, self.isShowing else { return }
+
+            if totalBytes > 1 {
+                self.progressIndicator.isIndeterminate = false
+                self.progressIndicator.maxValue = Double(totalBytes)
+                self.progressIndicator.doubleValue = Double(min(bytesRead, totalBytes))
+                self.progressTextField.stringValue = String(
+                    format: NSLocalizedString("Imported %ld rows (%@ of %@).", comment: "lightweight CSV import determinate progress"),
+                    rowsImported,
+                    Self.byteCountString(bytesRead),
+                    Self.byteCountString(totalBytes)
+                )
+            } else {
+                self.progressIndicator.isIndeterminate = true
+                self.progressIndicator.startAnimation(nil)
+                self.progressTextField.stringValue = String(
+                    format: NSLocalizedString("Imported %ld rows (%@).", comment: "lightweight CSV import indeterminate progress"),
+                    rowsImported,
+                    Self.byteCountString(bytesRead)
+                )
+            }
+        }
+
+        if Thread.isMainThread {
+            updateBlock()
+        } else {
+            DispatchQueue.main.async(execute: updateBlock)
+        }
+    }
+
+    func close() {
+        guard isShowing else { return }
+        isFinishing = true
+
+        if let parentWindow = alert.window.sheetParent {
+            parentWindow.endSheet(alert.window, returnCode: .alertSecondButtonReturn)
+        } else {
+            isShowing = false
+            isFinishing = false
+        }
+    }
+
+    private func makeAccessoryView() -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: Layout.width, height: Layout.height))
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalToConstant: Layout.width).isActive = true
+        view.heightAnchor.constraint(equalToConstant: Layout.height).isActive = true
+
+        progressIndicator.controlSize = .small
+        progressIndicator.style = .bar
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 1
+        progressIndicator.isIndeterminate = true
+        progressIndicator.usesThreadedAnimation = true
+        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
+        progressIndicator.startAnimation(nil)
+
+        progressTextField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        progressTextField.lineBreakMode = .byTruncatingMiddle
+        progressTextField.stringValue = NSLocalizedString("Preparing import…", comment: "lightweight CSV import preparing progress")
+        progressTextField.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(progressIndicator)
+        view.addSubview(progressTextField)
+
+        NSLayoutConstraint.activate([
+            progressIndicator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            progressIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            progressIndicator.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+
+            progressTextField.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            progressTextField.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            progressTextField.topAnchor.constraint(equalTo: progressIndicator.bottomAnchor, constant: 8)
+        ])
+
+        return view
+    }
+
+    private static func byteCountString(_ byteCount: UInt64) -> String {
+        return ByteCountFormatter.string(fromByteCount: Int64(min(byteCount, UInt64(Int64.max))), countStyle: .file)
+    }
+}
+
 extension SPWindowController: NSWindowDelegate {
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
         if let loadedDatabaseDocument = loadedDatabaseDocument, !loadedDatabaseDocument.parentTabShouldClose() {
@@ -19,6 +233,7 @@ extension SPWindowController: NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         // Tell listeners that this database document is being closed - fixes retain cycles and allows cleanup
+        cancelActiveLightweightCSVImportForWindowClose()
         connectionController?.cancelConnection(nil)
         if let loadedDatabaseDocument = loadedDatabaseDocument {
             NotificationCenter.default.post(name: NSNotification.Name.SPDocumentWillClose, object: loadedDatabaseDocument)
@@ -92,9 +307,25 @@ extension SPWindowController: SAConnectionDelegate {
         setLightweightFallbackToolbarItemsEnabled(true)
         requestLightweightDatabasesIfNeeded()
         markLightweightResumeStateChanged()
+        scheduleLightweightSkipShowDatabaseWarning(for: connection)
 
         if pendingLightweightSessionSnapshot != nil {
             applyPendingLightweightSessionSnapshot()
+            return
+        }
+
+        if let pendingSQLFileOpen = pendingLightweightSQLFileOpen {
+            lightweightQueryController.setSQLFile(url: pendingSQLFileOpen.fileURL, encoding: pendingSQLFileOpen.encoding)
+            setActiveLightweightViewMode(.query, persist: false)
+            if let selectedDatabase = selectedDatabase {
+                selectLightweightDatabaseInToolbar(selectedDatabase)
+            }
+            showLightweightQuery()
+            lightweightQueryController.doPerformLoadQueryService(pendingSQLFileOpen.query)
+            if let selectedDatabase = selectedDatabase {
+                loadTables(for: selectedDatabase, restoringViewMode: .query)
+            }
+            pendingLightweightSQLFileOpen = nil
             return
         }
 
@@ -109,6 +340,56 @@ extension SPWindowController: SAConnectionDelegate {
 
     @objc func connectionDidFail(withError error: String, detail: String?) {
         showLightweightPlaceholder(error)
+    }
+
+    private func scheduleLightweightSkipShowDatabaseWarning(for connection: SPMySQLConnection) {
+        guard UserDefaults.standard.bool(forKey: SPShowWarningSkipShowDatabase) else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak connection] in
+            guard let self = self,
+                  let connection = connection,
+                  self.activeConnection === connection,
+                  UserDefaults.standard.bool(forKey: SPShowWarningSkipShowDatabase) else {
+                return
+            }
+
+            DispatchQueue.global(qos: .utility).async { [weak self, weak connection] in
+                guard let self = self,
+                      let connection = connection,
+                      let result = connection.queryString("SHOW VARIABLES LIKE 'skip_show_database'") else {
+                    return
+                }
+
+                result.returnDataAsStrings = true
+                result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+
+                guard !connection.queryErrored(),
+                      result.numberOfRows() == 1,
+                      let row = result.getRowAsDictionary() as? [String: Any],
+                      self.stringValue(row["Value"] ?? row["VALUE"] ?? row["value"]).caseInsensitiveCompare("on") == .orderedSame else {
+                    return
+                }
+
+                DispatchQueue.main.async { [weak self, weak connection] in
+                    guard let self = self,
+                          let connection = connection,
+                          self.activeConnection === connection,
+                          UserDefaults.standard.bool(forKey: SPShowWarningSkipShowDatabase) else {
+                        return
+                    }
+
+                    NSAlert.createAlert(
+                        title: NSLocalizedString("Warning", comment: "warning"),
+                        message: NSLocalizedString("The skip-show-database variable of the database server is set to ON. Thus, you won't be able to list databases unless you have the SHOW DATABASES privilege.\n\nHowever, the databases are still accessible directly through SQL queries depending on your privileges.", comment: "Warning message during connection in case the variable skip-show-database is set to ON"),
+                        primaryButtonTitle: NSLocalizedString("OK", comment: "OK button"),
+                        secondaryButtonTitle: NSLocalizedString("Never show this again", comment: "Never show this again"),
+                        secondaryButtonHandler: {
+                            UserDefaults.standard.set(false, forKey: SPShowWarningSkipShowDatabase)
+                        }
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -125,6 +406,18 @@ extension SPWindowController {
         case cancel
     }
 
+    enum LightweightImportFileKind {
+        case sql
+        case csv
+    }
+
+    enum LightweightClipboardImportKind {
+        case sql
+        case csv
+        case tsv
+        case cancel
+    }
+
     func isLightweightConnectionBusyForImport() -> Bool {
         return isLightweightImportRunning || processing || databaseListIsLoading
     }
@@ -138,15 +431,15 @@ extension SPWindowController {
         }
 
         showLightweightError(title: NSLocalizedString("Import Unavailable", comment: "lightweight import unavailable title"),
-                             message: NSLocalizedString("Select a database in the active lightweight connection before importing SQL.", comment: "lightweight import unavailable message"))
+                             message: NSLocalizedString("Select a database in the active lightweight connection before importing.", comment: "lightweight import unavailable message"))
     }
 
     func lightweightImportRouteChoice() -> LightweightImportRouteChoice {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = NSLocalizedString("Import", comment: "import title")
-        alert.informativeText = NSLocalizedString("Lightweight import supports small SQL files only. Choose the full database view for CSV, compressed files, large SQL dumps, or SQL that changes SQL_MODE while importing.", comment: "lightweight import route choice message")
-        alert.addButton(withTitle: NSLocalizedString("Choose SQL File", comment: "lightweight import choose sql file button"))
+        alert.informativeText = NSLocalizedString("Lightweight import supports SQL, CSV, and TSV files. Full database view fallback is available only if you choose it.", comment: "lightweight import route choice message")
+        alert.addButton(withTitle: NSLocalizedString("Choose Import File", comment: "lightweight import choose file button"))
         alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
@@ -160,8 +453,31 @@ extension SPWindowController {
         }
     }
 
+    func lightweightImportFileKind(for url: URL) -> LightweightImportFileKind? {
+        if isLightweightSQLImportFileURL(url) {
+            return .sql
+        }
+
+        if isLightweightCSVImportFileURL(url) {
+            return .csv
+        }
+
+        return nil
+    }
+
+    func validateLightweightImportFileURL(_ url: URL) -> Bool {
+        guard lightweightImportFileKind(for: url) != nil else {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import Unsupported", comment: "lightweight import unsupported file title"),
+                                 message: NSLocalizedString("Lightweight import supports .sql, .sql.gz, .sql.bz2, .csv, .csv.gz, .csv.bz2, .tsv, .tsv.gz, and .tsv.bz2 files.", comment: "lightweight import unsupported file message"))
+            return false
+        }
+
+        return true
+    }
+
     func startLegacyFileImportFlow() {
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).importFile()
+        performExplicitLegacyFallback(reason: "User chose full database import flow", selectingDatabase: selectedDatabase, item: selectedTable).importFile()
     }
 
     func confirmLightweightSQLImport(sourceName: String) -> Bool {
@@ -170,22 +486,46 @@ extension SPWindowController {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = NSLocalizedString("Import SQL", comment: "lightweight SQL import confirmation title")
-        let limitation = NSLocalizedString("Lightweight import pre-splits SQL before execution, so dumps that change SQL_MODE/NO_BACKSLASH_ESCAPES during import should use the full database view.", comment: "lightweight SQL import limitation warning")
         if lightweightTables.isEmpty {
-            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”?", comment: "lightweight SQL import confirmation message"), sourceName, selectedDatabase) + "\n\n" + limitation
+            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”?", comment: "lightweight SQL import confirmation message"), sourceName, selectedDatabase)
         } else {
-            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”? The current database already has tables, so the import may overwrite data.", comment: "lightweight SQL import overwrite warning"), sourceName, selectedDatabase) + "\n\n" + limitation
+            alert.informativeText = String(format: NSLocalizedString("Import %@ into database “%@”? The current database already has tables, so the import may overwrite data.", comment: "lightweight SQL import overwrite warning"), sourceName, selectedDatabase)
         }
         alert.addButton(withTitle: NSLocalizedString("Import", comment: "import button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         return runLightweightModalAlert(alert) == .alertFirstButtonReturn
     }
 
+    func validateLightweightSQLImportFileURL(_ url: URL) -> Bool {
+        guard isLightweightSQLImportFileURL(url) else {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import Unsupported", comment: "lightweight import unsupported file title"),
+                                 message: NSLocalizedString("Lightweight SQL import supports .sql, .sql.gz, and .sql.bz2 files.", comment: "lightweight SQL import unsupported file message"))
+            return false
+        }
+
+        return true
+    }
+
+    static func isLightweightSQLImportFileURL(_ url: URL) -> Bool {
+        let filename = url.lastPathComponent.lowercased()
+        return filename.hasSuffix(".sql")
+            || filename.hasSuffix(".sql.gz")
+            || filename.hasSuffix(".sql.bz2")
+    }
+
+    func isLightweightSQLImportFileURL(_ url: URL) -> Bool {
+        return Self.isLightweightSQLImportFileURL(url)
+    }
+
+    func isLightweightCSVImportFileURL(_ url: URL) -> Bool {
+        return SALightweightCSVImportController.isSupportedFileURL(url)
+    }
+
     func validateLightweightSQLImportFileSize(url: URL) -> Bool {
-        let fileSize: Int64
         do {
             let values = try url.resourceValues(forKeys: [.fileSizeKey])
-            fileSize = Int64(values.fileSize ?? 0)
+            _ = values.fileSize
         } catch {
             NSSound.beep()
             showLightweightError(title: NSLocalizedString("Import Error", comment: "Import Error title"),
@@ -193,40 +533,372 @@ extension SPWindowController {
             return false
         }
 
-        guard fileSize <= SALightweightSQLImportMaximumInMemoryFileSize else {
-            NSSound.beep()
-            let maximumSize = ByteCountFormatter.string(fromByteCount: SALightweightSQLImportMaximumInMemoryFileSize, countStyle: .file)
-            let selectedSize = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = NSLocalizedString("Import Requires Full Database View", comment: "lightweight SQL import size gate title")
-            alert.informativeText = String(format: NSLocalizedString("This lightweight import path currently supports SQL files up to %@. The selected file is %@. Large SQL files require the full database view, which uses the legacy streaming importer.", comment: "lightweight SQL import size gate message"), maximumSize, selectedSize)
-            alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
-            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-            if runLightweightModalAlert(alert) == .alertFirstButtonReturn {
-                startLegacyFileImportFlow()
-            }
-            return false
-        }
-
         return true
     }
 
-    func startLightweightSQLImport(url: URL, encoding: String.Encoding) {
-        showLightweightPlaceholder(String(format: NSLocalizedString("Reading %@...", comment: "lightweight SQL import reading status"), url.lastPathComponent))
+    func startLightweightImport(url: URL, encoding: String.Encoding, csvSettings: SALightweightCSVImportSettings? = nil) {
+        guard validateLightweightImportFileURL(url) else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let sql = try String(contentsOf: url, encoding: encoding)
-                DispatchQueue.main.async {
-                    self?.runLightweightSQLImport(sql: sql, sourceName: url.lastPathComponent, encoding: encoding)
+        switch lightweightImportFileKind(for: url) {
+        case .sql:
+            guard validateLightweightSQLImportFileSize(url: url) else { return }
+            guard confirmLightweightSQLImport(sourceName: url.lastPathComponent) else { return }
+            startLightweightSQLImport(url: url, encoding: encoding)
+        case .csv:
+            startLightweightCSVImport(url: url,
+                                      encoding: encoding,
+                                      settings: csvSettings ?? SALightweightCSVImportSettings.load(inferringFrom: url))
+        case .none:
+            return
+        }
+    }
+
+    @discardableResult
+    func startLightweightCSVImport(url: URL, encoding: String.Encoding = String.Encoding(rawValue: 0), settings: SALightweightCSVImportSettings, sourceName: String? = nil) -> Bool {
+        guard !isLightweightConnectionBusyForImport(), let activeConnection, let database = selectedDatabase else {
+            showLightweightImportUnavailableReason()
+            return false
+        }
+
+        let controller = SALightweightCSVImportController(connection: activeConnection,
+                                                         databaseName: database,
+                                                         selectedTableName: selectedTable,
+                                                         tableNames: lightweightTables,
+                                                         fileURL: url)
+        controller.sourceEncoding = encoding.rawValue
+        controller.captureSettings(withFieldTerminator: settings.fieldTerminator,
+                                   lineTerminator: settings.lineTerminator,
+                                   fieldEnclosedBy: settings.fieldEnclosedBy,
+                                   escapeCharacter: settings.escapeCharacter,
+                                   firstLineIsHeader: settings.firstLineIsHeader)
+
+        retainActiveLightweightCSVImportController(controller)
+
+        if controller.responds(to: #selector(SALightweightCSVImportController.beginFieldMapping(with:completion:))) {
+            controller.beginFieldMapping(with: window) { [weak self, weak controller] accepted, error in
+                guard let self,
+                      let controller,
+                      self.activeLightweightCSVImportController === controller else {
+                    return
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    NSSound.beep()
-                    self?.showLightweightError(title: NSLocalizedString("File read error", comment: "File read error title (Import Dialog)"),
-                                               message: String(format: NSLocalizedString("The SQL file could not be read using %@.", comment: "lightweight SQL import encoding read error"), String.localizedName(of: encoding)))
+
+                guard accepted else {
+                    DispatchQueue.main.async { [weak self, weak controller] in
+                        guard let self,
+                              let controller,
+                              self.activeLightweightCSVImportController === controller else {
+                            return
+                        }
+
+                        let sourceReturnRequest = controller.fieldMappingSourceReturnRequest
+                        let shouldReturnToSource = sourceReturnRequest != .none
+                        let preservedSettings = self.lightweightCSVImportSettings(from: controller, fallback: settings)
+                        let selectedSourceURL = sourceReturnRequest == .file ? controller.fileURL : nil
+                        let clipboardKind = self.lightweightClipboardImportKind(forCSVImportURL: controller.fileURL,
+                                                                                 settings: preservedSettings)
+
+                        self.clearActiveLightweightCSVImportController(controller)
+
+                        controller.clearTemporaryState()
+
+                        if shouldReturnToSource {
+                            if sourceReturnRequest == .clipboard {
+                                self.importLightweightSQLFromClipboard(nil,
+                                                                       csvSettings: preservedSettings,
+                                                                       preferredDelimitedKind: clipboardKind)
+                                return
+                            }
+
+                            self.presentLightweightImportOpenPanel(initialURL: selectedSourceURL,
+                                                                   csvSettings: preservedSettings)
+                            return
+                        }
+
+                        if !self.isLightweightCSVFieldMappingCancellation(error) {
+                            self.showLightweightCSVImportFailed(sourceName: sourceName ?? url.lastPathComponent,
+                                                                importError: nil,
+                                                                rowErrors: [],
+                                                                previewError: error)
+                        }
+                    }
+                    return
                 }
+
+                self.beginActiveLightweightCSVImport(controller: controller,
+                                                     sourceName: sourceName ?? url.lastPathComponent,
+                                                     database: database,
+                                                     previewError: nil)
+            }
+            return true
+        }
+
+        var previewError: Error?
+        do {
+            _ = try controller.prepareFieldMapperWithParsedPreviewRows()
+        } catch {
+            previewError = error
+        }
+
+        beginActiveLightweightCSVImport(controller: controller,
+                                        sourceName: sourceName ?? url.lastPathComponent,
+                                        database: database,
+                                        previewError: previewError)
+        return true
+    }
+
+    func lightweightCSVImportSettings(from controller: SALightweightCSVImportController,
+                                      fallback: SALightweightCSVImportSettings) -> SALightweightCSVImportSettings {
+        let capturedSettings = controller.capturedSettings()
+        let firstLineIsHeader: Bool
+        if let boolValue = capturedSettings["firstLineIsHeader"] as? Bool {
+            firstLineIsHeader = boolValue
+        } else if let numberValue = capturedSettings["firstLineIsHeader"] as? NSNumber {
+            firstLineIsHeader = numberValue.boolValue
+        } else {
+            firstLineIsHeader = fallback.firstLineIsHeader
+        }
+
+        return SALightweightCSVImportSettings(
+            fieldTerminator: capturedSettings["fieldTerminator"] as? String ?? fallback.fieldTerminator,
+            lineTerminator: capturedSettings["lineTerminator"] as? String ?? fallback.lineTerminator,
+            fieldEnclosedBy: capturedSettings["fieldEnclosedBy"] as? String ?? fallback.fieldEnclosedBy,
+            escapeCharacter: capturedSettings["escapeCharacter"] as? String ?? fallback.escapeCharacter,
+            firstLineIsHeader: firstLineIsHeader
+        )
+    }
+
+    func lightweightClipboardImportKind(forCSVImportURL url: URL?,
+                                        settings: SALightweightCSVImportSettings) -> LightweightClipboardImportKind {
+        if let url, SALightweightCSVImportSettings.isTabSeparatedFile(url) {
+            return .tsv
+        }
+
+        return settings.fieldTerminator == "\t" || settings.fieldTerminator == "\\t" ? .tsv : .csv
+    }
+
+    func retainActiveLightweightCSVImportController(_ controller: SALightweightCSVImportController) {
+        activeLightweightCSVImportController = controller
+        isLightweightImportRunning = true
+        processing = true
+    }
+
+    @discardableResult
+    func clearActiveLightweightCSVImportController(_ controller: SALightweightCSVImportController) -> Bool {
+        guard activeLightweightCSVImportController === controller else { return false }
+
+        activeLightweightCSVImportController = nil
+        isLightweightImportRunning = false
+        processing = false
+        return true
+    }
+
+    func cancelActiveLightweightCSVImportForWindowClose() {
+        guard let controller = activeLightweightCSVImportController else { return }
+
+        controller.cancelAndClearTemporaryState()
+        _ = clearActiveLightweightCSVImportController(controller)
+        setLightweightConsoleQueryMode(0)
+    }
+
+    func beginActiveLightweightCSVImport(controller: SALightweightCSVImportController, sourceName: String, database: String, previewError: Error?) {
+        let progressSheet = SALightweightCSVImportProgressSheet(sourceName: sourceName)
+        progressSheet.cancelHandler = { [weak controller] in
+            controller?.cancelImport()
+        }
+        progressSheet.begin(on: window)
+
+        setLightweightConsoleQueryMode(2)
+        controller.beginImport(with: window, progress: { rowsImported, bytesRead, totalBytes in
+            progressSheet.update(rowsImported: rowsImported,
+                                 bytesRead: bytesRead,
+                                 totalBytes: totalBytes)
+        }) { [weak self, weak controller] result in
+            guard let self,
+                  let controller else {
+                return
+            }
+
+            let importCreatedNewTable = controller.importIntoNewTable
+            let targetTable = controller.selectedTableTarget
+            guard self.clearActiveLightweightCSVImportController(controller) else { return }
+            self.setLightweightConsoleQueryMode(0)
+            progressSheet.close()
+
+            if result.isCancelled {
+                return
+            }
+
+            self.requestLightweightDatabases(forceReload: true)
+            self.loadTables(for: database,
+                            preservingSelection: !importCreatedNewTable,
+                            restoringTable: importCreatedNewTable ? targetTable : nil)
+
+            if let error = result.error {
+                self.logLightweightCSVImportErrorsToConsole(sourceName: sourceName,
+                                                            importError: error,
+                                                            rowErrors: result.errors,
+                                                            previewError: previewError)
+                self.showLightweightCSVImportFailed(sourceName: sourceName,
+                                                    importError: error,
+                                                    rowErrors: result.errors,
+                                                    previewError: previewError)
+                return
+            }
+
+            if !result.errors.isEmpty {
+                self.logLightweightCSVImportErrorsToConsole(sourceName: sourceName,
+                                                            importError: nil,
+                                                            rowErrors: result.errors,
+                                                            previewError: previewError)
+                self.showLightweightCSVImportCompletedWithErrors(sourceName: sourceName,
+                                                                 rowsImported: result.rowsImported,
+                                                                 errors: result.errors)
+                return
+            }
+
+            self.showLightweightCSVImportComplete(sourceName: sourceName,
+                                                  rowsImported: result.rowsImported)
+        }
+    }
+
+    func isLightweightCSVFieldMappingCancellation(_ error: Error?) -> Bool {
+        guard let error = error as NSError? else { return false }
+
+        return error.domain == SALightweightCSVImportControllerErrorDomain && error.code == 9
+    }
+
+    func logLightweightCSVImportErrorsToConsole(sourceName: String, importError: Error?, rowErrors: [String], previewError: Error?) {
+        let prefs = UserDefaults.standard
+        guard prefs.bool(forKey: SPConsoleEnableLogging),
+              prefs.bool(forKey: SPConsoleEnableImportExportLogging),
+              prefs.bool(forKey: SPConsoleEnableErrorLogging) else {
+            return
+        }
+
+        if let previewError = previewError {
+            logLightweightConsoleError(String(format: NSLocalizedString("/* CSV import preview error for %@: %@ */", comment: "lightweight CSV import preview console error"), sourceName, previewError.localizedDescription))
+        }
+
+        if let importError = importError {
+            logLightweightConsoleError(String(format: NSLocalizedString("/* CSV import error for %@: %@ */", comment: "lightweight CSV import console error"), sourceName, importError.localizedDescription))
+        }
+
+        for rowError in rowErrors {
+            logLightweightConsoleError(rowError)
+        }
+    }
+
+    func showLightweightCSVImportFailed(sourceName: String, importError: Error?, rowErrors: [String], previewError: Error?) {
+        NSSound.beep()
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("CSV Import Failed", comment: "lightweight CSV import failed title")
+
+        var details = [
+            String(format: NSLocalizedString("The lightweight CSV/TSV import for %@ could not finish.", comment: "lightweight CSV import failed message"), sourceName)
+        ]
+
+        if let previewError = previewError {
+            details.append(String(format: NSLocalizedString("Preview/field mapper preparation did not complete: %@", comment: "lightweight CSV preview preparation warning"), previewError.localizedDescription))
+        }
+
+        if let importError = importError {
+            details.append(importError.localizedDescription)
+        }
+
+        if !rowErrors.isEmpty {
+            details.append(rowErrors.prefix(20).joined(separator: "\n"))
+        }
+
+        details.append(NSLocalizedString("Choose the full database view only if you want to continue there.", comment: "lightweight CSV explicit fallback message"))
+
+        alert.informativeText = details.joined(separator: "\n\n")
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
+
+        if runLightweightModalAlert(alert) == .alertSecondButtonReturn {
+            startLegacyFileImportFlow()
+        }
+    }
+
+    func showLightweightCSVImportCompletedWithErrors(sourceName: String, rowsImported: Int, errors: [String]) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("CSV Import Completed With Errors", comment: "lightweight CSV import completed with errors title")
+        let shownErrors = errors.prefix(30).joined(separator: "\n")
+        alert.informativeText = String(format: NSLocalizedString("Imported %ld rows from %@, but MySQL reported row errors:\n\n%@", comment: "lightweight CSV import completed with errors message"), rowsImported, sourceName, shownErrors)
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        _ = runLightweightModalAlert(alert)
+    }
+
+    func showLightweightCSVImportComplete(sourceName: String, rowsImported: Int) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("CSV Import Complete", comment: "lightweight CSV import complete title")
+        alert.informativeText = String(format: NSLocalizedString("Imported %ld rows from %@.", comment: "lightweight CSV import complete message"), rowsImported, sourceName)
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        _ = runLightweightModalAlert(alert)
+    }
+
+    func startLightweightSQLImport(url: URL, encoding: String.Encoding) {
+        guard !isLightweightConnectionBusyForImport(), let activeConnection, let database = selectedDatabase else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        let fieldNames = selectedTable.flatMap { table in
+            lightweightStructureController.cachedColumnMetadata(for: table, database: database)
+        }?.compactMap { $0["name"] } ?? []
+        lightweightQueryController.loadQuery(database: database,
+                                             table: selectedTable,
+                                             connection: activeConnection,
+                                             databases: lightweightDatabases,
+                                             tables: lightweightTables,
+                                             tableTypes: lightweightTableTypes,
+                                             fieldNames: fieldNames)
+
+        isLightweightImportRunning = true
+        processing = true
+        setLightweightConsoleQueryMode(2)
+        showLightweightQuery()
+
+        lightweightQueryController.startStreamingSQLImport(from: url,
+                                                           encoding: encoding,
+                                                           ignoresErrorsByDefault: lightweightSQLImportIgnoresErrorsByDefault(),
+                                                           errorChoice: { [weak self] error in
+                                                               self?.lightweightSQLImportErrorChoice(error) ?? .stop
+                                                           },
+                                                           charsetErrorChoice: { [weak self] in
+                                                               self?.confirmLightweightCharsetImportError() ?? false
+                                                           }) { [weak self] result in
+            guard let self else { return }
+
+            self.isLightweightImportRunning = false
+            self.processing = false
+            self.setLightweightConsoleQueryMode(0)
+            self.requestLightweightDatabases(forceReload: true)
+            self.loadTables(for: database, preservingSelection: true)
+
+            if let readError = result.readError {
+                NSSound.beep()
+                switch readError {
+                case .cannotOpenFile:
+                    self.showLightweightError(title: NSLocalizedString("Import Error", comment: "Import Error title"),
+                                              message: NSLocalizedString("The SQL file you selected could not be found or read.", comment: "SQL file open error"))
+                case .cannotDecode:
+                    self.showLightweightError(title: NSLocalizedString("File read error", comment: "File read error title (Import Dialog)"),
+                                              message: String(format: NSLocalizedString("The SQL file could not be read using %@.", comment: "lightweight SQL import encoding read error"), String.localizedName(of: encoding)))
+                }
+            } else if result.errors.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("Import Complete", comment: "lightweight SQL import complete title")
+                alert.informativeText = String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), result.queriesPerformed, url.lastPathComponent)
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+                self.deliverLightweightSQLImportFinishedNotification(sourceName: url.lastPathComponent)
+                _ = self.runLightweightModalAlert(alert)
+            } else {
+                self.showLightweightSQLImportErrors(result.errors.joined(separator: "\n"))
             }
         }
     }
@@ -263,7 +935,7 @@ extension SPWindowController {
             var errors: [String] = []
             var queriesPerformed = 0
             var progressCancelled = false
-            var ignoreSQLErrors = false
+            var ignoreSQLErrors = self.lightweightSQLImportIgnoresErrorsByDefault()
             var ignoreCharsetError = false
             var connectionEncodingToRestore: String?
             var sqlModeToRestore: String?
@@ -289,6 +961,7 @@ extension SPWindowController {
                         alert.messageText = NSLocalizedString("Import Complete", comment: "lightweight SQL import complete title")
                         alert.informativeText = String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), queriesPerformed, sourceName)
                         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+                        self.deliverLightweightSQLImportFinishedNotification(sourceName: sourceName)
                         _ = self.runLightweightModalAlert(alert)
                     } else {
                         self.showLightweightSQLImportErrors(errors.joined(separator: "\n"))
@@ -323,7 +996,8 @@ extension SPWindowController {
 
                 if connection.queryErrored(), connection.lastErrorMessage() != "Query was empty" {
                     let error = connection.lastErrorMessage() ?? NSLocalizedString("Unknown MySQL error.", comment: "unknown mysql error")
-                    errors.append(String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error))
+                    let detailedError = String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), index + 1, error)
+                    errors.append(detailedError)
 
                     if connection.lastErrorID() == 1115,
                        error.range(of: "utf8mb4", options: .caseInsensitive) != nil,
@@ -340,7 +1014,7 @@ extension SPWindowController {
                         }
                     } else if !ignoreSQLErrors {
                         let choice = DispatchQueue.main.sync {
-                            self.lightweightSQLImportErrorChoice(error)
+                            self.lightweightSQLImportErrorChoice(detailedError)
                         }
                         switch choice {
                         case .continue:
@@ -375,7 +1049,7 @@ extension SPWindowController {
         }
     }
 
-    func lightweightSQLImportErrorChoice(_ error: String) -> LightweightSQLImportErrorChoice {
+    func lightweightSQLImportErrorChoice(_ error: String) -> SALightweightSQLImportErrorChoice {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = NSLocalizedString("An error occurred while importing SQL", comment: "sql import error message")
@@ -392,6 +1066,22 @@ extension SPWindowController {
         default:
             return .stop
         }
+    }
+
+    func lightweightSQLImportIgnoresErrorsByDefault() -> Bool {
+        let prefs = UserDefaults.standard
+        guard prefs.object(forKey: SPSQLImportErrorHandlingSelection) != nil else { return false }
+
+        return prefs.integer(forKey: SPSQLImportErrorHandlingSelection) == Int(SPSQLImportIgnoreErrors.rawValue)
+    }
+
+    func deliverLightweightSQLImportFinishedNotification(sourceName: String) {
+        let notification = NSUserNotification()
+        notification.title = "Import Finished"
+        notification.informativeText = String(format: NSLocalizedString("Finished importing %@", comment: "description for finished importing notification"), sourceName)
+        notification.soundName = NSUserNotificationDefaultSoundName
+
+        NSUserNotificationCenter.default.deliver(notification)
     }
 
     func confirmLightweightCharsetImportError() -> Bool {
@@ -649,30 +1339,57 @@ extension SPWindowController {
 
         return object.map { String(describing: $0) } ?? ""
     }
+
+    private func commitActiveLightweightEditBeforeSidebarSelection() -> Bool {
+        if !commitActiveLightweightSidebarEdit() {
+            return false
+        }
+
+        switch activeLightweightViewMode {
+        case .structure:
+            return lightweightStructureController.commitActiveStructureEditBeforeSidebarSelection()
+        case .content:
+            return lightweightContentController.commitActiveContentEditBeforeSidebarSelection()
+        default:
+            return true
+        }
+    }
+
+    private func commitActiveLightweightSidebarEdit() -> Bool {
+        guard tablesListView.editedRow >= 0 || tablesListView.editedColumn >= 0 else { return true }
+        guard let window = tablesListView.window else { return true }
+
+        return window.makeFirstResponder(tablesListView)
+    }
 }
 
 extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
+    private func isLightweightTablesListView(_ tableView: NSTableView) -> Bool {
+        return lightweightTablesListViewReference === tableView
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
-        return lightweightTables.isEmpty ? 1 : filteredLightweightTables.count + 1
+        guard isLightweightTablesListView(tableView) else { return 0 }
+        return lightweightSidebarRows().count
     }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
-        if row == 0 {
-            return lightweightTableTypes.values.contains(.view)
-                ? NSLocalizedString("TABLES & VIEWS", comment: "header for table & views list")
-                : NSLocalizedString("TABLES", comment: "header for table list")
+        guard isLightweightTablesListView(tableView) else { return nil }
+        switch lightweightSidebarRow(at: row) {
+        case .group(let title):
+            return title
+        case .object(let table):
+            return table
+        case .none:
+            return nil
         }
-
-        return filteredLightweightTables[row - 1]
     }
 
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
-        guard tableView == tablesListView,
-              row > 0,
-              row - 1 < filteredLightweightTables.count,
+        guard isLightweightTablesListView(tableView),
+              let oldName = lightweightTableName(atSidebarRow: row),
               let selectedDatabase = selectedDatabase else { return }
 
-        let oldName = filteredLightweightTables[row - 1]
         let newName = lightweightEditedString(from: object).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newName.isEmpty, oldName != newName else {
             tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
@@ -725,22 +1442,22 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
-        return tableView == tablesListView && row > 0
+        return isLightweightTablesListView(tableView) && lightweightTableName(atSidebarRow: row) != nil
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard isLightweightTablesListView(tableView) else { return }
         guard let cell = cell as? SPTableTextFieldCell else { return }
 
         cell.font = UserDefaults.getFont()
         cell.setIndentationLevel(0)
         cell.setNote("")
 
-        guard row > 0, row - 1 < filteredLightweightTables.count else {
+        guard let table = lightweightTableName(atSidebarRow: row) else {
             cell.image = nil
             return
         }
 
-        let table = filteredLightweightTables[row - 1]
         cell.image = (lightweightTableTypes[table] ?? .table).imageName.flatMap { NSImage(named: NSImage.Name($0)) }
         var notes: [String] = []
         if UserDefaults.standard.bool(forKey: SPDisplayCommentsInTablesList),
@@ -755,15 +1472,27 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        return row == 0
+        guard isLightweightTablesListView(tableView) else { return false }
+        if case .group = lightweightSidebarRow(at: row) {
+            return true
+        }
+        return false
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        return row > 0
+        guard isLightweightTablesListView(tableView) else { return true }
+        guard lightweightTableName(atSidebarRow: row) != nil else { return false }
+
+        guard commitActiveLightweightEditBeforeSidebarSelection() else {
+            NSSound.beep()
+            return false
+        }
+
+        return true
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if row == 0 {
+        if isLightweightTablesListView(tableView), case .group = lightweightSidebarRow(at: row) {
             return 25
         }
 
@@ -771,13 +1500,18 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard notification.object as? NSTableView == tablesListView else { return }
+        guard let tableView = notification.object as? NSTableView, isLightweightTablesListView(tableView) else { return }
         guard !isRestoringLightweightHistory else { return }
-        guard !filteredLightweightTables.isEmpty else { return }
-        let selectedRow = tablesListView.selectedRow
-        guard selectedRow > 0, selectedRow - 1 < filteredLightweightTables.count else { return }
+        guard !tablesListView.selectedRowIndexes.isEmpty else {
+            selectedTable = nil
+            updateLightweightSidebarActionMenuState()
+            setLightweightFallbackToolbarItemsEnabled(true)
+            updateLightweightWindowTitle()
+            markLightweightResumeStateChanged()
+            return
+        }
+        guard let table = primarySelectedLightweightTable() else { return }
 
-        let table = filteredLightweightTables[selectedRow - 1]
         selectLightweightTable(table)
     }
 }

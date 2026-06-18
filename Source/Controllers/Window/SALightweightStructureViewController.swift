@@ -2178,6 +2178,23 @@ private final class SALightweightStructureIndexSheetController: NSWindowControll
     }
 }
 
+extension SALightweightStructureViewController {
+    func refreshActiveStructureDetail() {
+        reloadTable(nil)
+    }
+
+    func commitActiveStructureEditBeforeSidebarSelection() -> Bool {
+        guard structureTableView.editedRow >= 0 || structureTableView.editedColumn >= 0 else { return true }
+        guard let window = structureTableView.window else { return true }
+
+        guard window.makeFirstResponder(structureTableView) else {
+            return false
+        }
+
+        return !isSaving
+    }
+}
+
 extension SALightweightStructureViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         if isIndexesTable(tableView) {

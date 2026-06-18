@@ -4,15 +4,179 @@
 //
 
 import Cocoa
+import ObjectiveC
 import UniformTypeIdentifiers
 
+@objc(SALightweightAppleScriptDocument)
+final class SALightweightAppleScriptDocument: NSObject {
+    private weak var windowController: SPWindowController?
+
+    @objc init(windowController: SPWindowController) {
+        self.windowController = windowController
+        super.init()
+    }
+
+    @objc var name: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.lightweightConnectionDisplayName()
+    }
+
+    @objc var displayName: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.window?.title ?? name
+    }
+
+    @objc var window: NSWindow? {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return nil }
+        return windowController.window
+    }
+
+    @objc var isUntitled: Bool {
+        return windowController?.lightweightConnectionFileURL == nil
+    }
+
+    @objc var isDocumentEdited: Bool {
+        return false
+    }
+
+    @objc var fileURL: URL? {
+        return windowController?.lightweightConnectionFileURL
+    }
+
+    @objc var host: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        if windowController.activeConnectionInfo?.type == .socket { return "localhost" }
+        return windowController.activeConnectionInfo?.host ?? windowController.activeConnection?.host ?? ""
+    }
+
+    @objc var database: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.selectedDatabase ?? windowController.activeConnectionInfo?.database ?? ""
+    }
+
+    @objc var port: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        if let port = windowController.activeConnectionInfo?.port, !port.isEmpty { return port }
+        if let port = windowController.activeConnection?.port, port > 0 { return String(port) }
+        return ""
+    }
+
+    @objc var mySQLVersion: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.activeServerVersion ?? windowController.activeConnection?.serverVersionString() ?? ""
+    }
+
+    @objc var user: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.activeConnectionInfo?.user ?? ""
+    }
+
+    @objc var databaseEncoding: String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "" }
+        return windowController.activeConnection?.encoding() ?? ""
+    }
+
+    @objc var table: String {
+        guard let windowController, windowController.hasSelectedLightweightTable else { return "" }
+        return windowController.selectedTable ?? ""
+    }
+
+    @objc func tableType() -> SPTableType {
+        guard let windowController, windowController.hasSelectedLightweightTable else { return SPTableTypeNone }
+        switch windowController.lightweightTableTypes[windowController.selectedTable ?? ""] ?? .table {
+        case .view:
+            return SPTableTypeView
+        case .procedure:
+            return SPTableTypeProc
+        case .function:
+            return SPTableTypeFunc
+        case .table:
+            return SPTableTypeTable
+        case .none:
+            return SPTableTypeNone
+        }
+    }
+
+    @objc var allTableNames: [String] {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return [] }
+        return windowController.lightweightTables.filter { (windowController.lightweightTableTypes[$0] ?? .table) == .table }
+    }
+
+    @objc var tabTitleForTooltip: String {
+        return displayName
+    }
+
+    @objc func connectionID() -> String {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return "_" }
+        return windowController.lightweightNavigatorConnectionID()
+    }
+
+    @objc func parentWindowControllerWindow() -> NSWindow? {
+        return window
+    }
+
+    @objc func shellVariables() -> NSDictionary {
+        guard let windowController, windowController.hasActiveLightweightConnection else { return [:] }
+        return windowController.lightweightShellVariables()
+    }
+
+    @objc func runningActivities() -> [Any] {
+        guard windowController?.hasActiveLightweightConnection == true else { return [] }
+        return (NSApp.delegate as? SPAppController)?.runningActivities() ?? []
+    }
+
+    @objc func registerActivity(_ commandDict: NSDictionary) {
+        windowController?.registerActivity(commandDict)
+    }
+
+    @objc func removeRegisteredActivity(_ pid: Int) {
+        windowController?.removeRegisteredActivity(pid)
+    }
+
+    @objc func setActivityPaneHidden(_ hidden: NSNumber) {
+        // Lightweight windows do not use the legacy DBView activity pane; activity state
+        // is still registered globally for bundle/script parity.
+    }
+
+    @objc override var objectSpecifier: NSScriptObjectSpecifier? {
+        guard let appController = NSApp.delegate as? SPAppController,
+              let documents = appController.orderedDocuments() as? [AnyObject],
+              let index = documents.firstIndex(where: { ($0 as? SALightweightAppleScriptDocument) === self }),
+              let containerDescription = NSScriptClassDescription(for: SPAppController.self) else {
+            return nil
+        }
+
+        return NSIndexSpecifier(containerClassDescription: containerDescription,
+                                containerSpecifier: nil,
+                                key: "orderedDocuments",
+                                index: index)
+    }
+}
+
+private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
+
 @objc extension SPWindowController {
+    func lightweightAppleScriptDocumentProxy() -> SALightweightAppleScriptDocument? {
+        guard hasActiveLightweightConnection else { return nil }
+
+        if let proxy = objc_getAssociatedObject(self, &lightweightAppleScriptDocumentAssociationKey) as? SALightweightAppleScriptDocument {
+            return proxy
+        }
+
+        let proxy = SALightweightAppleScriptDocument(windowController: self)
+        objc_setAssociatedObject(self,
+                                 &lightweightAppleScriptDocumentAssociationKey,
+                                 proxy,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return proxy
+    }
+
     func updateWindow(title: String, tabTitle: String) {
         window?.title = title
         if #available(macOS 10.13, *) {
             window?.tab.title = tabTitle
         }
-        
+
         tabAccessoryView.setTitle(title: tabTitle)
     }
 
@@ -20,8 +184,39 @@ import UniformTypeIdentifiers
         tabAccessoryView.update(color: color, isSSL: isSSL)
     }
 
+    @objc(setLightweightConnectionFileURL:)
+    func setLightweightConnectionFileURL(_ url: URL?) {
+        lightweightConnectionFileURL = url
+        if let url {
+            synchronizeLightweightDocumentScope(for: url)
+        }
+        if hasActiveLightweightConnection {
+            updateLightweightWindowTitle()
+        }
+    }
+
+    @objc(setLightweightConnectionFileURL:savedInBundle:)
+    func setLightweightConnectionFileURL(_ url: URL?, savedInBundle: Bool) {
+        if let url {
+            synchronizeLightweightDocumentScope(for: url)
+        }
+        lightweightConnectionFileURL = savedInBundle ? nil : url
+        if hasActiveLightweightConnection {
+            updateLightweightWindowTitle()
+        }
+    }
+
     @objc func loadedDatabaseDocumentIfAvailable() -> SPDatabaseDocument? {
         return loadedDatabaseDocument
+    }
+
+    @objc func legacyDatabaseDocumentForExplicitFallback() -> SPDatabaseDocument {
+        return legacyDatabaseDocumentForExplicitFallback(reason: "Objective-C compatibility fallback")
+    }
+
+    @objc(legacyDatabaseDocumentForExplicitFallbackWithReason:)
+    func legacyDatabaseDocumentForExplicitFallback(reason: String) -> SPDatabaseDocument {
+        return performExplicitLegacyFallback(reason: reason, selectingDatabase: selectedDatabase, item: selectedTable)
     }
 
     @objc func assignLightweightBundleProcessID(_ processID: String) {
@@ -57,9 +252,10 @@ import UniformTypeIdentifiers
             env[SPBundleShellVariableSelectedDatabase] = selectedDatabase
         }
 
-        if let selectedTable = selectedTable, !selectedTable.isEmpty {
+        let selectedTables = selectedLightweightTableItems()
+        if let selectedTable = selectedTables.first, !selectedTable.isEmpty {
             env[SPBundleShellVariableSelectedTable] = selectedTable
-            env[SPBundleShellVariableSelectedTables] = selectedTable
+            env[SPBundleShellVariableSelectedTables] = selectedTables.joined(separator: "\t")
         }
 
         if !lightweightDatabases.isEmpty {
@@ -224,10 +420,208 @@ import UniformTypeIdentifiers
             return true
         }
 
+        if command == "ReloadContentTable" {
+            _ = refreshActiveLightweightDetail()
+            return true
+        }
+
+        if command == "ReloadTablesList" {
+            refreshLightweightTables()
+            return true
+        }
+
+        if command == "ReloadContentTableWithWHEREClause" {
+            if let whereClause = readAndRemoveLightweightSchemeInput(processID: callbackID), !whereClause.isEmpty {
+                viewContent()
+                lightweightContentController.applyAdvancedFilter(whereClause: whereClause, distinct: false)
+            }
+            return true
+        }
+
+        if command == "RunQueryInQueryEditor" {
+            if let query = readAndRemoveLightweightSchemeInput(processID: callbackID), !query.isEmpty {
+                doPerformLightweightQueryService(query)
+            }
+            return true
+        }
+
+        if command == "CreateSyntaxForTables" {
+            writeLightweightCreateSyntaxResult(params: params, processID: callbackID)
+            return true
+        }
+
+        if command == "ExecuteQuery" {
+            executeLightweightSchemeQuery(params: params, processID: callbackID)
+            return true
+        }
+
         NSAlert.createWarningAlert(title: NSLocalizedString("Remote Error", comment: "remote error"),
                                    message: String(format: NSLocalizedString("URL scheme command “%@” unsupported", comment: "URL scheme command “%@” unsupported"), command),
                                    callback: nil)
         return true
+    }
+
+    private func readAndRemoveLightweightSchemeInput(processID: String) -> String? {
+        let path = lightweightSchemeFilePath(prefix: SPURLSchemeQueryInputPathHeader, processID: processID)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        return try? String(contentsOfFile: path, encoding: .utf8)
+    }
+
+    private func lightweightSchemeFilePath(prefix: String, processID: String) -> String {
+        return (prefix as NSString).expandingTildeInPath + processID
+    }
+
+    private func writeLightweightCreateSyntaxResult(params: [String], processID: String) {
+        let fileManager = FileManager.default
+        let resultPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultPathHeader, processID: processID)
+        let metaPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultMetaPathHeader, processID: processID)
+        let statusPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultStatusPathHeader, processID: processID)
+        let inputPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryInputPathHeader, processID: processID)
+
+        try? fileManager.removeItem(atPath: resultPath)
+        try? fileManager.removeItem(atPath: metaPath)
+        try? fileManager.removeItem(atPath: statusPath)
+        try? fileManager.removeItem(atPath: inputPath)
+
+        let tables = params.dropFirst().filter { !$0.hasPrefix("html") }
+        guard !tables.isEmpty,
+              let syntax = lightweightCreateTableSyntaxes(for: Array(tables), showErrors: false) else {
+            try? "1".write(toFile: statusPath, atomically: true, encoding: .utf8)
+            return
+        }
+
+        try? syntax.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        try? "".write(toFile: metaPath, atomically: true, encoding: .utf8)
+        try? "0".write(toFile: statusPath, atomically: true, encoding: .utf8)
+    }
+
+    private func executeLightweightSchemeQuery(params: [String], processID: String) {
+        let fileManager = FileManager.default
+        let inputPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryInputPathHeader, processID: processID)
+        let resultPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultPathHeader, processID: processID)
+        let metaPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultMetaPathHeader, processID: processID)
+        let statusPath = lightweightSchemeFilePath(prefix: SPURLSchemeQueryResultStatusPathHeader, processID: processID)
+        var status = "0"
+
+        defer {
+            do {
+                try status.write(toFile: statusPath, atomically: true, encoding: .utf8)
+            } catch {
+                NSSound.beep()
+                NSAlert.createWarningAlert(title: NSLocalizedString("BASH Error", comment: "bash error"),
+                                           message: NSLocalizedString("Status file for sequelace url scheme command couldn't be written!", comment: "status file for sequelace url scheme command couldn't be written error message"),
+                                           callback: nil)
+            }
+        }
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: inputPath, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            status = "1"
+            return
+        }
+
+        let query = (try? String(contentsOfFile: inputPath, encoding: .utf8)) ?? ""
+        try? fileManager.removeItem(atPath: inputPath)
+        try? fileManager.removeItem(atPath: resultPath)
+        try? fileManager.removeItem(atPath: metaPath)
+        try? fileManager.removeItem(atPath: statusPath)
+
+        guard !query.isEmpty, let connection = activeConnection else {
+            status = "1"
+            return
+        }
+
+        fileManager.createFile(atPath: resultPath, contents: nil)
+        guard let resultHandle = FileHandle(forWritingAtPath: resultPath) else {
+            NSLog("Couldn't create file handle to %@", resultPath)
+            status = "1"
+            return
+        }
+        defer { try? resultHandle.close() }
+
+        let writeAsCSV = params.count == 2 && params[1] == "csv"
+        guard let result = connection.streamingQueryString(query) else {
+            status = "1"
+            return
+        }
+        result.defaultRowReturnType = SPMySQLResultRowAsArray
+        result.returnDataAsStrings = true
+
+        if connection.queryErrored() {
+            writeLightweightSchemeString("MySQL said: \(connection.lastErrorMessage() ?? "")", to: resultHandle)
+            status = "1"
+            return
+        }
+
+        let fieldNames = result.fieldNames() as? [String] ?? []
+        let header = writeAsCSV ? fieldNames.map { csvEscapedLightweightSchemeValue($0) }.joined(separator: ",") : fieldNames.joined(separator: "\t")
+        writeLightweightSchemeString(header + "\n", to: resultHandle)
+        writeLightweightSchemeMetaData(from: result, to: metaPath)
+
+        while let row = result.getRowAsArray() {
+            let values = row.map { value in
+                writeAsCSV ? csvLightweightSchemeValue(value, connection: connection) : tabLightweightSchemeValue(value, connection: connection)
+            }
+            writeLightweightSchemeString(values.joined(separator: writeAsCSV ? "," : "\t") + "\n", to: resultHandle)
+        }
+    }
+
+    private func writeLightweightSchemeMetaData(from result: SPMySQLResult, to path: String) {
+        let definitions = result.fieldDefinitions() as? [NSDictionary] ?? []
+        let lines = definitions.map { definition -> String in
+            let type = stringForLightweightSchemeMetaValue(definition["type"])
+            let typeGrouping = stringForLightweightSchemeMetaValue(definition["typegrouping"])
+            let charLength = stringForLightweightSchemeMetaValue(definition["char_length"])
+            let unsigned = stringForLightweightSchemeMetaValue(definition["UNSIGNED_FLAG"])
+            let autoIncrement = stringForLightweightSchemeMetaValue(definition["AUTO_INCREMENT_FLAG"])
+            let primary = stringForLightweightSchemeMetaValue(definition["PRI_KEY_FLAG"])
+            return [type, typeGrouping, charLength, unsigned, autoIncrement, primary].joined(separator: "\t")
+        }
+        try? (lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")).write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    private func stringForLightweightSchemeMetaValue(_ value: Any?) -> String {
+        guard let value, !(value is NSNull) else { return "" }
+        return String(describing: value)
+    }
+
+    private func writeLightweightSchemeString(_ string: String, to handle: FileHandle) {
+        if let data = string.data(using: .utf8) {
+            try? handle.write(contentsOf: data)
+        }
+    }
+
+    private func csvLightweightSchemeValue(_ value: Any, connection: SPMySQLConnection) -> String {
+        if value is NSNull {
+            return "\"NULL\""
+        }
+        return csvEscapedLightweightSchemeValue(lightweightSchemeDisplayString(for: value, connection: connection))
+    }
+
+    private func csvEscapedLightweightSchemeValue(_ value: String) -> String {
+        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    private func tabLightweightSchemeValue(_ value: Any, connection: SPMySQLConnection) -> String {
+        if value is NSNull {
+            return "NULL"
+        }
+        return lightweightSchemeDisplayString(for: value, connection: connection)
+            .replacingOccurrences(of: "\n", with: "↵")
+            .replacingOccurrences(of: "\t", with: "⇥")
+    }
+
+    private func lightweightSchemeDisplayString(for value: Any, connection: SPMySQLConnection) -> String {
+        if let geometry = value as? SPMySQLGeometryData {
+            return geometry.wktString() ?? ""
+        }
+        if let data = value as? Data {
+            let encoding = String.Encoding(rawValue: UInt(connection.stringEncoding()))
+            return String(data: data, encoding: encoding) ?? String(data: data, encoding: .ascii) ?? ""
+        }
+        return String(describing: value)
     }
 
     @objc func doPerformLightweightQueryService(_ query: String) {
@@ -240,12 +634,28 @@ import UniformTypeIdentifiers
     @objc func doPerformLightweightLoadQueryService(_ query: String) {
         guard hasActiveLightweightConnection else { return }
 
+        lightweightQueryController.setSQLFile(url: nil, encoding: nil)
         viewQuery()
         lightweightQueryController.doPerformLoadQueryService(query)
     }
 
-    @objc func legacyDatabaseDocumentForMenuAction() -> SPDatabaseDocument {
-        return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable)
+    @objc(doPerformLightweightLoadQueryService:fileURL:encoding:)
+    func doPerformLightweightLoadQueryService(_ query: String, fileURL: URL?, encoding: UInt) {
+        guard hasActiveLightweightConnection else { return }
+
+        lightweightQueryController.setSQLFile(url: fileURL, encoding: String.Encoding(rawValue: encoding))
+        viewQuery()
+        lightweightQueryController.doPerformLoadQueryService(query)
+    }
+
+    @objc(queueLightweightSQLFileOpenWithString:fileURL:encoding:)
+    func queueLightweightSQLFileOpen(query: String, fileURL: URL, encoding: UInt) {
+        guard loadedDatabaseDocument == nil else { return }
+
+        pendingLightweightSQLFileOpen = SALightweightPendingSQLFileOpen(query: query,
+                                                                        fileURL: fileURL,
+                                                                        encoding: String.Encoding(rawValue: encoding))
+        lightweightQueryController.setSQLFile(url: fileURL, encoding: String.Encoding(rawValue: encoding))
     }
 
     private func activeLightweightTextCopyResponder(for menuItem: NSMenuItem?) -> NSTextView? {
@@ -294,9 +704,9 @@ import UniformTypeIdentifiers
 
         switch activeLightweightViewMode {
         case .content:
-            return lightweightContentController.exportResultRowCount() > 0
+            return lightweightContentController.exportResultColumnCount() > 0
         case .query:
-            return lightweightQueryController.exportResultRowCount() > 0
+            return lightweightQueryController.exportResultColumnCount() > 0
         default:
             return false
         }
@@ -397,6 +807,25 @@ import UniformTypeIdentifiers
         return NSPasteboard.general.availableType(from: [.string]) != nil
     }
 
+    @objc(importLightweightSQLFileAtURL:encoding:)
+    func importLightweightSQLFile(at url: URL, encoding encodingNumber: NSNumber?) {
+        guard canImportLightweightSQL() else {
+            showLightweightImportUnavailableReason()
+            return
+        }
+
+        let encoding: String.Encoding
+        if let encodingNumber = encodingNumber {
+            encoding = String.Encoding(rawValue: encodingNumber.uintValue)
+            UserDefaults.standard.set(encodingNumber.uintValue, forKey: SPLastSQLFileEncoding)
+        } else {
+            let savedEncoding = UserDefaults.standard.integer(forKey: SPLastSQLFileEncoding)
+            encoding = savedEncoding == 0 ? .utf8 : String.Encoding(rawValue: UInt(savedEncoding))
+        }
+
+        startLightweightImport(url: url, encoding: encoding)
+    }
+
     @objc func importLightweightSQLFile(_ sender: Any?) {
         guard canImportLightweightSQL() else {
             showLightweightImportUnavailableReason()
@@ -418,19 +847,45 @@ import UniformTypeIdentifiers
             prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
         }
 
-        let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
-        let encodingAccessory = SALightweightSQLImportEncodingAccessory(selectedEncoding: selectedEncoding)
-        let panel = NSOpenPanel()
-        if let contentType = UTType(filenameExtension: SPFileExtensionSQL as String) {
-            panel.allowedContentTypes = [contentType]
+        presentLightweightImportOpenPanel(initialURL: nil)
+    }
+
+    @nonobjc func presentLightweightImportOpenPanel(initialURL: URL?, csvSettings: SALightweightCSVImportSettings? = nil) {
+        let prefs = UserDefaults.standard
+        if prefs.integer(forKey: SPLastSQLFileEncoding) == 0 {
+            prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
         }
+
+        let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
+        let importAccessory = SALightweightImportOpenPanelAccessory(selectedEncoding: selectedEncoding, initialURL: initialURL)
+        if let csvSettings {
+            csvSettings.save(to: prefs)
+            importAccessory.csvAccessory.updateUI(with: csvSettings)
+        }
+
+        let panel = NSOpenPanel()
+        panel.allowedFileTypes = [
+            SPFileExtensionSQL as String,
+            "sql.gz",
+            "sql.bz2",
+            "csv",
+            "csv.gz",
+            "csv.bz2",
+            "tsv",
+            "tsv.gz",
+            "tsv.bz2"
+        ]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.accessoryView = encodingAccessory.view
-        panel.message = NSLocalizedString("Lightweight windows can import SQL files. CSV import requires the full database view.", comment: "lightweight SQL import panel message")
+        panel.delegate = importAccessory
+        panel.accessoryView = importAccessory.view
+        panel.message = NSLocalizedString("Choose a SQL, CSV, or TSV file for lightweight import.", comment: "lightweight import panel message")
 
-        if let openPath = prefs.string(forKey: "exportPath"), !openPath.isEmpty {
+        if let initialURL {
+            panel.directoryURL = initialURL.deletingLastPathComponent()
+            panel.nameFieldStringValue = initialURL.lastPathComponent
+        } else if let openPath = prefs.string(forKey: "exportPath"), !openPath.isEmpty {
             panel.directoryURL = URL(string: openPath) ?? URL(fileURLWithPath: openPath)
         }
 
@@ -438,31 +893,244 @@ import UniformTypeIdentifiers
             guard let self = self, response == .OK, let url = panel.url else { return }
 
             prefs.set(panel.directoryURL?.path, forKey: "exportPath")
-            prefs.set(encodingAccessory.selectedEncoding.rawValue, forKey: SPLastSQLFileEncoding)
+            prefs.set(importAccessory.selectedEncoding.rawValue, forKey: SPLastSQLFileEncoding)
 
-            guard self.validateLightweightSQLImportFileSize(url: url) else { return }
-            guard self.confirmLightweightSQLImport(sourceName: url.lastPathComponent) else { return }
-            self.startLightweightSQLImport(url: url, encoding: encodingAccessory.selectedEncoding)
+            switch self.lightweightImportFileKind(for: url) {
+            case .sql:
+                self.startLightweightImport(url: url, encoding: importAccessory.selectedEncoding)
+            case .csv:
+                let csvSettings = importAccessory.saveCSVSettings()
+                self.startLightweightImport(url: url,
+                                            encoding: importAccessory.selectedEncoding,
+                                            csvSettings: csvSettings)
+            case .none:
+                _ = self.validateLightweightImportFileURL(url)
+            }
         }
     }
 
     @objc func importLightweightSQLFromClipboard(_ sender: Any?) {
+        importLightweightSQLFromClipboard(sender, csvSettings: nil, preferredDelimitedKind: nil)
+    }
+
+    @nonobjc func importLightweightSQLFromClipboard(_ sender: Any?,
+                                                    csvSettings: SALightweightCSVImportSettings?,
+                                                    preferredDelimitedKind: LightweightClipboardImportKind?) {
         guard canImportLightweightSQL() else {
             showLightweightImportUnavailableReason()
             return
         }
 
-        guard let clipboardSQL = NSPasteboard.general.string(forType: .string),
-              !clipboardSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let clipboardText = NSPasteboard.general.string(forType: .string),
+              !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             NSSound.beep()
             showLightweightError(title: NSLocalizedString("Import From Clipboard", comment: "import from clipboard title"),
-                                 message: NSLocalizedString("The clipboard does not contain SQL text to import.", comment: "lightweight import clipboard empty message"))
+                                 message: NSLocalizedString("The clipboard does not contain text to import.", comment: "lightweight import clipboard empty message"))
             return
+        }
+
+        let importKind = preferredDelimitedKind ?? lightweightClipboardImportKind(for: clipboardText)
+        switch importKind {
+        case .csv, .tsv:
+            startLightweightCSVImportFromClipboard(clipboardText, kind: importKind, initialSettings: csvSettings)
+            return
+        case .cancel:
+            return
+        case .sql:
+            break
         }
 
         let clipboardSourceName = NSLocalizedString("clipboard", comment: "clipboard import source name")
         guard confirmLightweightSQLImport(sourceName: clipboardSourceName) else { return }
-        runLightweightSQLImport(sql: clipboardSQL, sourceName: clipboardSourceName, encoding: .utf8)
+        runLightweightSQLImport(sql: clipboardText, sourceName: clipboardSourceName, encoding: .utf8)
+    }
+
+    @nonobjc func lightweightClipboardImportKind(for text: String) -> LightweightClipboardImportKind {
+        if lightweightClipboardLooksLikeSQL(text) {
+            return .sql
+        }
+
+        guard let delimitedKind = lightweightDelimitedClipboardImportKind(for: text) else {
+            return .sql
+        }
+
+        return promptLightweightClipboardImportKind(suggestedKind: delimitedKind)
+    }
+
+    @nonobjc func lightweightDelimitedClipboardImportKind(for text: String) -> LightweightClipboardImportKind? {
+        let rows = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(20)
+
+        guard !rows.isEmpty else { return nil }
+
+        let tabCounts = rows.map { row in row.filter { $0 == "\t" }.count }
+        let commaCounts = rows.map { row in lightweightClipboardCommaCount(in: row) }
+        let tabScore = lightweightDelimiterScore(tabCounts)
+        let commaScore = lightweightDelimiterScore(commaCounts)
+
+        guard tabScore > 0 || commaScore > 0 else { return nil }
+        return tabScore >= commaScore ? .tsv : .csv
+    }
+
+    @nonobjc func lightweightDelimiterScore(_ counts: [Int]) -> Int {
+        let positiveCounts = counts.filter { $0 > 0 }
+        guard !positiveCounts.isEmpty else { return 0 }
+
+        if positiveCounts.count >= 2 {
+            let consistencyBonus = Set(positiveCounts).count == 1 ? positiveCounts.count : 0
+            return positiveCounts.reduce(0, +) + consistencyBonus
+        }
+
+        return positiveCounts[0] >= 2 ? positiveCounts[0] : 0
+    }
+
+    @nonobjc func lightweightClipboardCommaCount(in row: String) -> Int {
+        var count = 0
+        var inQuotes = false
+
+        for character in row {
+            if character == "\"" {
+                inQuotes.toggle()
+            } else if character == "," && !inQuotes {
+                count += 1
+            }
+        }
+
+        return count
+    }
+
+    @nonobjc func lightweightClipboardLooksLikeSQL(_ text: String) -> Bool {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return false }
+
+        let lowercasedText = trimmedText.lowercased()
+        if lowercasedText.hasPrefix("-- mysql dump")
+            || lowercasedText.hasPrefix("/*")
+            || lowercasedText.hasPrefix("/*!") {
+            return true
+        }
+
+        let sqlKeywords: Set<String> = [
+            "alter", "begin", "call", "commit", "create", "delete", "delimiter",
+            "describe", "drop", "explain", "grant", "insert", "lock", "replace",
+            "revoke", "select", "set", "show", "truncate", "unlock", "update", "use"
+        ]
+
+        let lines = trimmedText.components(separatedBy: .newlines)
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("--") || line.hasPrefix("#") {
+                continue
+            }
+
+            let token = line
+                .split { character in
+                    character.isWhitespace || character == "(" || character == ";" || character == ","
+                }
+                .first?
+                .lowercased() ?? ""
+
+            return sqlKeywords.contains(token)
+        }
+
+        return false
+    }
+
+    @nonobjc func promptLightweightClipboardImportKind(suggestedKind: LightweightClipboardImportKind) -> LightweightClipboardImportKind {
+        let suggestedTitle = suggestedKind == .tsv
+            ? NSLocalizedString("Import as TSV", comment: "lightweight clipboard import as TSV button")
+            : NSLocalizedString("Import as CSV", comment: "lightweight clipboard import as CSV button")
+        let suggestedDescription = suggestedKind == .tsv
+            ? NSLocalizedString("The clipboard text looks tab-separated. Import it with the lightweight CSV/TSV importer, or treat it as SQL?", comment: "lightweight clipboard TSV prompt")
+            : NSLocalizedString("The clipboard text looks comma-separated. Import it with the lightweight CSV/TSV importer, or treat it as SQL?", comment: "lightweight clipboard CSV prompt")
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("Import From Clipboard", comment: "import from clipboard title")
+        alert.informativeText = suggestedDescription
+        alert.addButton(withTitle: suggestedTitle)
+        alert.addButton(withTitle: NSLocalizedString("Import as SQL", comment: "lightweight clipboard import as SQL button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+        switch runLightweightModalAlert(alert) {
+        case .alertFirstButtonReturn:
+            return suggestedKind
+        case .alertSecondButtonReturn:
+            return .sql
+        default:
+            return .cancel
+        }
+    }
+
+    @nonobjc func startLightweightCSVImportFromClipboard(_ text: String,
+                                                         kind: LightweightClipboardImportKind,
+                                                         initialSettings: SALightweightCSVImportSettings? = nil) {
+        let fileExtension = kind == .tsv ? "tsv" : "csv"
+        let clipboardSourceName = NSLocalizedString("clipboard", comment: "clipboard import source name")
+
+        do {
+            let temporaryURL = try writeLightweightClipboardImportTemporaryFile(text,
+                                                                               fileExtension: fileExtension)
+            let settings = initialSettings ?? SALightweightCSVImportSettings.load(inferringFrom: temporaryURL)
+            guard let confirmedSettings = confirmLightweightClipboardCSVImportSettings(kind: kind,
+                                                                                       settings: settings) else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                return
+            }
+
+            let didStart = startLightweightCSVImport(url: temporaryURL,
+                                                     settings: confirmedSettings,
+                                                     sourceName: clipboardSourceName)
+            if !didStart {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        } catch {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import From Clipboard", comment: "import from clipboard title"),
+                                 message: String(format: NSLocalizedString("The clipboard text could not be written to a temporary CSV/TSV import file. %@", comment: "lightweight clipboard temp write failure"), error.localizedDescription))
+        }
+    }
+
+    @nonobjc func writeLightweightClipboardImportTemporaryFile(_ text: String, fileExtension: String) throws -> URL {
+        let prefixPath = (SPImportClipboardTempFileNamePrefix as NSString).expandingTildeInPath
+        let directoryPath = (prefixPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: directoryPath,
+                                                withIntermediateDirectories: true,
+                                                attributes: nil)
+
+        let filePath = "\(prefixPath)\(UUID().uuidString).\(fileExtension)"
+        let fileURL = URL(fileURLWithPath: filePath)
+        let preferredEncoding = activeConnection.map { String.Encoding(rawValue: UInt($0.stringEncoding())) } ?? .utf8
+
+        do {
+            try text.write(to: fileURL, atomically: false, encoding: preferredEncoding)
+        } catch {
+            try text.write(to: fileURL, atomically: false, encoding: .utf8)
+        }
+
+        return fileURL
+    }
+
+    @nonobjc func confirmLightweightClipboardCSVImportSettings(kind: LightweightClipboardImportKind,
+                                                               settings: SALightweightCSVImportSettings) -> SALightweightCSVImportSettings? {
+        let csvAccessory = SALightweightCSVImportAccessory()
+        csvAccessory.updateUI(with: settings)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("CSV/TSV Import Options", comment: "lightweight clipboard CSV settings title")
+        alert.informativeText = kind == .tsv
+            ? NSLocalizedString("Review the tab-separated clipboard import settings before field mapping.", comment: "lightweight clipboard TSV settings message")
+            : NSLocalizedString("Review the comma-separated clipboard import settings before field mapping.", comment: "lightweight clipboard CSV settings message")
+        alert.accessoryView = csvAccessory.rootView
+        alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+
+        guard runLightweightModalAlert(alert) == .alertFirstButtonReturn else { return nil }
+        return csvAccessory.saveSettings()
     }
 
     @objc func canPrintLightweightDocument() -> Bool {
@@ -580,6 +1248,9 @@ import UniformTypeIdentifiers
             let profile = info.awsProfile.isEmpty ? "default" : info.awsProfile
             let region = info.awsRegion.isEmpty ? "auto" : info.awsRegion
             return "\(user)@\(info.host)\(port)&AWSIAM&\(profile)&\(region)"
+        case .vault:
+            let vaultPort = info.vaultPort.isEmpty ? "443" : info.vaultPort
+            return "\(user)@\(info.host)\(port)&Vault:\(info.vaultHost):\(vaultPort):\(info.vaultOIDCMount)/\(info.vaultCredentialsPath)"
         case .tcpIP:
             return "\(user)@\(info.host)\(port)"
         @unknown default:
@@ -969,6 +1640,41 @@ import UniformTypeIdentifiers
         requestLightweightDatabases(forceReload: true)
     }
 
+    @objc func canRefreshActiveLightweightDetail() -> Bool {
+        guard activeConnection != nil,
+              loadedDatabaseDocument == nil,
+              selectedDatabase != nil,
+              selectedTable != nil else { return false }
+
+        switch activeLightweightViewMode {
+        case .structure, .content, .status, .relations, .triggers:
+            return true
+        case .query:
+            return false
+        }
+    }
+
+    @objc @discardableResult func refreshActiveLightweightDetail() -> Bool {
+        guard canRefreshActiveLightweightDetail() else { return false }
+
+        switch activeLightweightViewMode {
+        case .structure:
+            lightweightStructureController.refreshActiveStructureDetail()
+        case .content:
+            lightweightContentController.refreshActiveContentDetail()
+        case .status:
+            lightweightTableInfoController.refreshActiveTableInfoDetail()
+        case .relations:
+            lightweightRelationsController.refreshActiveRelationsDetail()
+        case .triggers:
+            lightweightTriggersController.refreshActiveTriggersDetail()
+        case .query:
+            return false
+        }
+
+        return true
+    }
+
     @objc func showLegacyGotoDatabase() {
         if let document = loadedDatabaseDocument {
             document.showGotoDatabase()
@@ -1007,67 +1713,85 @@ import UniformTypeIdentifiers
     }
 
     @objc func viewStructure() {
+        if let document = loadedDatabaseDocument {
+            document.viewStructure()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
             showLightweightStructure(for: selectedTable)
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewStructure()
     }
 
     @objc func viewContent() {
+        if let document = loadedDatabaseDocument {
+            document.viewContent()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
             showLightweightContent(for: selectedTable)
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewContent()
     }
 
     @objc func viewQuery() {
+        if let document = loadedDatabaseDocument {
+            document.viewQuery()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             showLightweightQuery()
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewQuery()
     }
 
     @objc func viewStatus() {
+        if let document = loadedDatabaseDocument {
+            document.viewStatus()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
             showLightweightStatus(for: selectedTable)
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewStatus()
     }
 
     @objc func viewRelations() {
+        if let document = loadedDatabaseDocument {
+            document.viewRelations()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
             showLightweightRelations(for: selectedTable)
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewRelations()
     }
 
     @objc func viewTriggers() {
+        if let document = loadedDatabaseDocument {
+            document.viewTriggers()
+            return
+        }
+
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
             showLightweightTriggers(for: selectedTable)
             return
         }
-
-        installLegacyDatabaseDocumentIfNeeded(selectingDatabase: selectedDatabase, item: selectedTable).viewTriggers()
     }
 
     @objc func backForwardInHistory(_ sender: Any) {
@@ -1208,8 +1932,9 @@ import UniformTypeIdentifiers
             return
         }
 
-        guard let table = selectedTable,
-              let syntax = lightweightCreateTableSyntax(showErrors: true) else { return }
+        let tables = selectedLightweightTableItems()
+        guard !tables.isEmpty,
+              let syntax = lightweightCreateTableSyntaxes(for: tables, showErrors: true) else { return }
 
         let pasteboard = NSPasteboard.general
         pasteboard.declareTypes([.string], owner: self)
@@ -1217,7 +1942,9 @@ import UniformTypeIdentifiers
 
         let notification = NSUserNotification()
         notification.title = NSLocalizedString("Syntax Copied", comment: "create table syntax copied notification title")
-        notification.informativeText = String(format: NSLocalizedString("Syntax for %@ copied", comment: "description for create syntax copied notification"), table)
+        notification.informativeText = tables.count == 1
+            ? String(format: NSLocalizedString("Syntax for %@ copied", comment: "description for create syntax copied notification"), tables[0])
+            : NSLocalizedString("Syntaxes for selected items copied", comment: "description for selected create syntaxes copied notification")
         notification.soundName = NSUserNotificationDefaultSoundName
         NSUserNotificationCenter.default.deliver(notification)
     }
@@ -1228,10 +1955,13 @@ import UniformTypeIdentifiers
             return
         }
 
-        guard let table = selectedTable,
-              let syntax = lightweightCreateTableSyntax(showErrors: true) else { return }
+        let tables = selectedLightweightTableItems()
+        guard !tables.isEmpty,
+              let syntax = lightweightCreateTableSyntaxes(for: tables, showErrors: true) else { return }
 
-        let title = String(format: NSLocalizedString("Create syntax for %@ '%@'", comment: "Create syntax label"), lightweightCreateSyntaxTypeTitle(), table)
+        let title = tables.count == 1
+            ? String(format: NSLocalizedString("Create syntax for %@ '%@'", comment: "Create syntax label"), lightweightCreateSyntaxTypeTitle(for: tables[0]), tables[0])
+            : NSLocalizedString("Create syntaxes for selected items", comment: "Create syntaxes for selected items label")
         showLightweightCreateSyntaxSheet(title: title, syntax: syntax)
     }
 
@@ -1413,18 +2143,50 @@ import UniformTypeIdentifiers
     }
 
     func lightweightCreateTableSyntax(showErrors: Bool) -> String? {
-        guard let activeConnection = activeConnection,
-              let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else {
+        guard let selectedTable = selectedLightweightTableItems().first else {
             if showErrors {
                 showLightweightCreateSyntaxError(NSLocalizedString("Select a table to view create syntax.", comment: "create syntax no selected table error"))
             }
             return nil
         }
 
-        let objectType = lightweightTableTypes[selectedTable] ?? .table
+        return lightweightCreateSyntax(for: selectedTable, showErrors: showErrors)
+    }
+
+    @nonobjc func lightweightCreateTableSyntaxes(for tables: [String], showErrors: Bool) -> String? {
+        guard !tables.isEmpty else {
+            if showErrors {
+                showLightweightCreateSyntaxError(NSLocalizedString("Select a table to view create syntax.", comment: "create syntax no selected table error"))
+            }
+            return nil
+        }
+
+        var syntaxes: [String] = []
+        for table in tables {
+            guard let syntax = lightweightCreateSyntax(for: table, showErrors: showErrors) else { return nil }
+            if tables.count > 1 {
+                let typeTitle = lightweightCreateSyntaxTypeTitle(for: table)
+                syntaxes.append("-- Create syntax for \(typeTitle) '\(table)'\n\(syntax)")
+            } else {
+                syntaxes.append(syntax)
+            }
+        }
+
+        return syntaxes.joined(separator: "\n\n")
+    }
+
+    @nonobjc func lightweightCreateSyntax(for table: String, showErrors: Bool) -> String? {
+        guard let activeConnection = activeConnection,
+              let selectedDatabase = selectedDatabase else {
+            if showErrors {
+                showLightweightCreateSyntaxError(NSLocalizedString("Select a table to view create syntax.", comment: "create syntax no selected table error"))
+            }
+            return nil
+        }
+
+        let objectType = lightweightTableTypes[table] ?? .table
         let keyword = lightweightCreateSyntaxKeyword(for: objectType)
-        let query = "SHOW CREATE \(keyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable))"
+        let query = "SHOW CREATE \(keyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(table))"
         guard let result = activeConnection.queryString(query) else {
             if showErrors {
                 showLightweightCreateSyntaxError(NSLocalizedString("Couldn't get create syntax.", comment: "message of panel when table information cannot be retrieved"))
@@ -1466,11 +2228,15 @@ import UniformTypeIdentifiers
     }
 
     @nonobjc func lightweightCreateSyntaxTypeTitle() -> String {
-        guard let selectedTable = selectedTable else {
+        guard let selectedTable = selectedLightweightTableItems().first else {
             return NSLocalizedString("TABLE", comment: "Create syntax table type")
         }
 
-        switch lightweightTableTypes[selectedTable] ?? .table {
+        return lightweightCreateSyntaxTypeTitle(for: selectedTable)
+    }
+
+    @nonobjc func lightweightCreateSyntaxTypeTitle(for table: String) -> String {
+        switch lightweightTableTypes[table] ?? .table {
         case .view:
             return NSLocalizedString("VIEW", comment: "Create syntax view type")
         case .procedure:
@@ -1517,6 +2283,17 @@ import UniformTypeIdentifiers
             }
         }
 
+        var menuSelector: Selector {
+            switch self {
+            case .check: return #selector(SPWindowController.checkTableMenuBridge(_:))
+            case .repair: return #selector(SPWindowController.repairTableMenuBridge(_:))
+            case .analyze: return #selector(SPWindowController.analyzeTableMenuBridge(_:))
+            case .optimize: return #selector(SPWindowController.optimizeTableMenuBridge(_:))
+            case .flush: return #selector(SPWindowController.flushTableMenuBridge(_:))
+            case .checksum: return #selector(SPWindowController.checksumTableMenuBridge(_:))
+            }
+        }
+
         var errorTitle: String {
             switch self {
             case .check: return NSLocalizedString("Unable to check table", comment: "unable to check table message")
@@ -1524,6 +2301,17 @@ import UniformTypeIdentifiers
             case .analyze: return NSLocalizedString("Unable to analyze table", comment: "unable to analyze table message")
             case .optimize: return NSLocalizedString("Unable to optimze table", comment: "unable to optimze table message")
             case .flush: return NSLocalizedString("Unable to flush table", comment: "unable to flush table message")
+            case .checksum: return NSLocalizedString("Unable to perform the checksum", comment: "unable to perform the checksum")
+            }
+        }
+
+        var selectedItemsErrorTitle: String {
+            switch self {
+            case .check: return NSLocalizedString("Unable to check selected items", comment: "unable to check selected items message")
+            case .repair: return NSLocalizedString("Unable to repair selected items", comment: "unable to repair selected items message")
+            case .analyze: return NSLocalizedString("Unable to analyze selected items", comment: "unable to analyze selected items message")
+            case .optimize: return NSLocalizedString("Unable to optimze selected items", comment: "unable to optimze selected items message")
+            case .flush: return NSLocalizedString("Unable to flush selected items", comment: "unable to flush selected items message")
             case .checksum: return NSLocalizedString("Unable to perform the checksum", comment: "unable to perform the checksum")
             }
         }
@@ -1546,6 +2334,17 @@ import UniformTypeIdentifiers
             case .analyze: return NSLocalizedString("Successfully analyzed table.", comment: "analyze table successfully passed message")
             case .optimize: return NSLocalizedString("Successfully optimized table.", comment: "optimize table successfully passed message")
             case .flush: return NSLocalizedString("Successfully flushed table.", comment: "flush table successfully passed message")
+            case .checksum: return ""
+            }
+        }
+
+        var selectedItemsSuccessMessage: String {
+            switch self {
+            case .check: return NSLocalizedString("Check of all selected items successfully passed.", comment: "check of all selected items successfully passed message")
+            case .repair: return NSLocalizedString("Successfully repaired all selected items.", comment: "successfully repaired all selected items message")
+            case .analyze: return NSLocalizedString("Successfully analyzed all selected items.", comment: "successfully analyzed all selected items message")
+            case .optimize: return NSLocalizedString("Successfully optimized all selected items.", comment: "successfully optimized all selected items message")
+            case .flush: return NSLocalizedString("Successfully flushed all selected items.", comment: "successfully flushed all selected items message")
             case .checksum: return ""
             }
         }
@@ -1579,10 +2378,22 @@ import UniformTypeIdentifiers
         }
     }
 
+    @objc func canPerformLightweightTableMaintenanceAction(_ selector: Selector) -> Bool {
+        guard loadedDatabaseDocument == nil else { return hasSelectedLightweightTable }
+
+        switch NSStringFromSelector(selector) {
+        case "checkTable:", "flushTable:":
+            return selectedLightweightTableSelectionHasOnlyTablesOrViews
+        case "repairTable:", "analyzeTable:", "optimizeTable:", "checksumTable:":
+            return selectedLightweightTableSelectionHasOnlyTables
+        default:
+            return false
+        }
+    }
+
     @nonobjc func performLightweightTableMaintenance(_ action: LightweightTableMaintenanceAction) {
         guard let activeConnection = activeConnection,
-              let selectedDatabase = selectedDatabase,
-              let selectedTable = selectedTable else { return }
+              let selectedDatabase = selectedDatabase else { return }
 
         if let document = loadedDatabaseDocument {
             switch action {
@@ -1596,13 +2407,19 @@ import UniformTypeIdentifiers
             return
         }
 
+        let selectedTables = selectedLightweightTableItems()
+        guard !selectedTables.isEmpty,
+              canPerformLightweightTableMaintenanceAction(action.menuSelector) else { return }
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
             guard let self = self, let activeConnection = activeConnection else { return }
 
-            let tableReference = "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable))"
+            let tableReference = selectedTables
+                .map { "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted($0))" }
+                .joined(separator: ", ")
             guard let result = activeConnection.queryString("\(action.queryKeyword) \(tableReference)") else {
                 DispatchQueue.main.async {
-                    self.showLightweightTableMaintenanceQueryError(action, table: selectedTable, mysqlError: activeConnection.lastErrorMessage() ?? "")
+                    self.showLightweightTableMaintenanceQueryError(action, tables: selectedTables, mysqlError: activeConnection.lastErrorMessage() ?? "")
                 }
                 return
             }
@@ -1612,31 +2429,37 @@ import UniformTypeIdentifiers
 
             if activeConnection.queryErrored() {
                 DispatchQueue.main.async {
-                    self.showLightweightTableMaintenanceQueryError(action, table: selectedTable, mysqlError: activeConnection.lastErrorMessage() ?? "")
+                    self.showLightweightTableMaintenanceQueryError(action, tables: selectedTables, mysqlError: activeConnection.lastErrorMessage() ?? "")
                 }
                 return
             }
 
             let rows = result.getAllRows() as? [[String: Any]] ?? []
             DispatchQueue.main.async {
-                self.showLightweightTableMaintenanceResult(action, table: selectedTable, rows: rows)
+                self.showLightweightTableMaintenanceResult(action, tables: selectedTables, rows: rows)
             }
         }
     }
 
-    @nonobjc func showLightweightTableMaintenanceQueryError(_ action: LightweightTableMaintenanceAction, table: String, mysqlError: String) {
+    @nonobjc func showLightweightTableMaintenanceQueryError(_ action: LightweightTableMaintenanceAction, tables: [String], mysqlError: String) {
         guard activeConnection?.isConnected() == true else { return }
 
-        let what = String(format: "%@ '%@'", NSLocalizedString("table", comment: "table"), table)
-        showLightweightTableMaintenanceAlert(title: action.errorTitle, message: action.errorMessage(what: what, mysqlError: mysqlError))
+        let title = tables.count > 1 ? action.selectedItemsErrorTitle : action.errorTitle
+        showLightweightTableMaintenanceAlert(title: title, message: action.errorMessage(what: lightweightTableMaintenanceObjectDescription(tables), mysqlError: mysqlError))
     }
 
-    @nonobjc func showLightweightTableMaintenanceResult(_ action: LightweightTableMaintenanceAction, table: String, rows: [[String: Any]]) {
-        let what = String(format: "%@ '%@'", NSLocalizedString("table", comment: "table"), table)
+    @nonobjc func showLightweightTableMaintenanceResult(_ action: LightweightTableMaintenanceAction, tables: [String], rows: [[String: Any]]) {
+        let what = lightweightTableMaintenanceObjectDescription(tables)
         let title = "\(action.resultTitlePrefix) \(what)"
         let lastRow = rows.last ?? [:]
 
         if action == .checksum {
+            if tables.count > 1 {
+                showLightweightTableMaintenanceAlert(title: String(format: NSLocalizedString("Checksums of %@", comment: "Checksums of %@ message"), what),
+                                                     message: lightweightTableMaintenanceRowsSummary(rows))
+                return
+            }
+
             let checksum = stringValue(lastRow["Checksum"])
             let message = String(format: NSLocalizedString("Table checksum: %@", comment: "table checksum: %@"), checksum)
             showLightweightTableMaintenanceAlert(title: title, message: message)
@@ -1645,8 +2468,37 @@ import UniformTypeIdentifiers
 
         let messageType = stringValue(lastRow["Msg_type"])
         let messageText = stringValue(lastRow["Msg_text"])
+        if tables.count > 1 {
+            let allStatus = rows.allSatisfy { stringValue($0["Msg_type"]) == "status" }
+            let message = allStatus ? action.selectedItemsSuccessMessage : action.failureMessage
+            showLightweightTableMaintenanceAlert(title: title, message: String(format: NSLocalizedString("%@\n\nMySQL said: %@", comment: "Error display text, showing original MySQL error"), message, lightweightTableMaintenanceRowsSummary(rows)))
+            return
+        }
+
         let message = messageType == "status" ? action.successMessage : action.failureMessage
         showLightweightTableMaintenanceAlert(title: title, message: String(format: NSLocalizedString("%@\n\nMySQL said: %@", comment: "Error display text, showing original MySQL error"), message, messageText))
+    }
+
+    @nonobjc func lightweightTableMaintenanceObjectDescription(_ tables: [String]) -> String {
+        return tables.count > 1
+            ? NSLocalizedString("selected items", comment: "selected items")
+            : String(format: "%@ '%@'", NSLocalizedString("table", comment: "table"), tables.first ?? "")
+    }
+
+    @nonobjc func lightweightTableMaintenanceRowsSummary(_ rows: [[String: Any]]) -> String {
+        let lines = rows.compactMap { row -> String? in
+            let table = stringValue(row["Table"])
+            let messageType = stringValue(row["Msg_type"])
+            let messageText = stringValue(row["Msg_text"])
+            let checksum = stringValue(row["Checksum"])
+            guard !table.isEmpty || !messageType.isEmpty || !messageText.isEmpty || !checksum.isEmpty else { return nil }
+            if !checksum.isEmpty {
+                return "\(table): \(checksum)"
+            }
+            return "\(table): \(messageType) \(messageText)".trimmingCharacters(in: .whitespaces)
+        }
+
+        return lines.isEmpty ? NSLocalizedString("MySQL returned no rows.", comment: "no mysql result rows message") : lines.joined(separator: "\n")
     }
 
     static func backtickQuoted(_ value: String) -> String {

@@ -275,6 +275,10 @@
 		51BC153725BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153625BE13C400F1CDC9 /* SALightweightTableInfoViewController.swift */; };
 		51BC153925BE13C400F1CDC9 /* SALightweightMetadataViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC153825BE13C400F1CDC9 /* SALightweightMetadataViewController.swift */; };
 		C3D200022F90000100C4C14A /* SALightweightPlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D200012F90000100C4C14A /* SALightweightPlaceholderView.swift */; };
+		C3D300032F91000100C4C14A /* SALightweightImportProxies.m in Sources */ = {isa = PBXBuildFile; fileRef = C3D300022F91000100C4C14A /* SALightweightImportProxies.m */; };
+		C3D500032F93000100C4C14A /* SALightweightCSVImportController.m in Sources */ = {isa = PBXBuildFile; fileRef = C3D500022F93000100C4C14A /* SALightweightCSVImportController.m */; };
+		C3D400022F92000100C4C14A /* SALightweightCSVImportAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D400012F92000100C4C14A /* SALightweightCSVImportAccessory.swift */; };
+		C3D300052F91000100C4C14A /* SALightweightCSVImportSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D300042F91000100C4C14A /* SALightweightCSVImportSettings.swift */; };
 		C3D000022F8D000100C4C14A /* SALightweightPreferenceObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D000012F8D000100C4C14A /* SALightweightPreferenceObserver.swift */; };
 		51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */; };
 		51BB391C25F82B060048CA69 /* SPAppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BB391B25F82B060048CA69 /* SPAppController.swift */; };
@@ -1077,6 +1081,8 @@
 		C3D1000D2F8E000100C4C14A /* SPWindowController+LightweightPrinting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPWindowController+LightweightPrinting.swift"; sourceTree = "<group>"; };
 		C3D1000F2F8E000100C4C14A /* SPConnectionController+Lightweight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SPConnectionController+Lightweight.swift"; sourceTree = "<group>"; };
 		51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightContentViewController.swift; sourceTree = "<group>"; };
+		C3D400012F92000100C4C14A /* SALightweightCSVImportAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightCSVImportAccessory.swift; sourceTree = "<group>"; };
+		C3D300042F91000100C4C14A /* SALightweightCSVImportSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightCSVImportSettings.swift; sourceTree = "<group>"; };
 		51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightQueryViewController.swift; sourceTree = "<group>"; };
 		51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightResultGrid.swift; sourceTree = "<group>"; };
 		51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SALightweightStructureViewController.swift; sourceTree = "<group>"; };
@@ -1366,6 +1372,10 @@
 		BCD0AD4A0FBBFC480066EA5C /* SPSQLTokenizer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPSQLTokenizer.h; sourceTree = "<group>"; };
 		BCE0025B11173D2A009DA533 /* SPFieldMapperController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPFieldMapperController.h; sourceTree = "<group>"; };
 		BCE0025C11173D2A009DA533 /* SPFieldMapperController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPFieldMapperController.m; sourceTree = "<group>"; };
+		C3D300012F91000100C4C14A /* SALightweightImportProxies.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SALightweightImportProxies.h; sourceTree = "<group>"; };
+		C3D300022F91000100C4C14A /* SALightweightImportProxies.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SALightweightImportProxies.m; sourceTree = "<group>"; };
+		C3D500012F93000100C4C14A /* SALightweightCSVImportController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SALightweightCSVImportController.h; sourceTree = "<group>"; };
+		C3D500022F93000100C4C14A /* SALightweightCSVImportController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SALightweightCSVImportController.m; sourceTree = "<group>"; };
 		C0F17A1A2B3C4D5E6F708092 /* SPTableContentColumnFilterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPTableContentColumnFilterTests.swift; sourceTree = "<group>"; };
 		C57CA10F3F4B37E186CF7EF9 /* ConnectionStringParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStringParser.swift; sourceTree = "<group>"; };
 		C7CAA1A274071383C33F2E4C /* SPBundleManagerAdditionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPBundleManagerAdditionsTests.swift; sourceTree = "<group>"; };
@@ -1857,6 +1867,8 @@
 				5132930925F586A900D803AD /* NotificationToken.swift */,
 				51BC152A25BE13C400F1CDC9 /* SADatabaseToolbarController.swift */,
 				51BC153225BE13C400F1CDC9 /* SALightweightContentViewController.swift */,
+				C3D400012F92000100C4C14A /* SALightweightCSVImportAccessory.swift */,
+				C3D300042F91000100C4C14A /* SALightweightCSVImportSettings.swift */,
 				51BC153425BE13C400F1CDC9 /* SALightweightQueryViewController.swift */,
 				51BC154025BE13C400F1CDC9 /* SALightweightResultGrid.swift */,
 				51BC153025BE13C400F1CDC9 /* SALightweightStructureViewController.swift */,
@@ -1884,6 +1896,10 @@
 			children = (
 				17E641520EF01EF6001BC333 /* SPDataImport.h */,
 				17E641530EF01EF6001BC333 /* SPDataImport.m */,
+				C3D300012F91000100C4C14A /* SALightweightImportProxies.h */,
+				C3D300022F91000100C4C14A /* SALightweightImportProxies.m */,
+				C3D500012F93000100C4C14A /* SALightweightCSVImportController.h */,
+				C3D500022F93000100C4C14A /* SALightweightCSVImportController.m */,
 				BCE0025B11173D2A009DA533 /* SPFieldMapperController.h */,
 				BCE0025C11173D2A009DA533 /* SPFieldMapperController.m */,
 			);
@@ -3357,6 +3373,8 @@
 				17E641590EF01EF6001BC333 /* SPTableContent.m in Sources */,
 				17E6415A0EF01EF6001BC333 /* SPDatabaseDocument.m in Sources */,
 				17E6415B0EF01EF6001BC333 /* SPDataImport.m in Sources */,
+				C3D300032F91000100C4C14A /* SALightweightImportProxies.m in Sources */,
+				C3D500032F93000100C4C14A /* SALightweightCSVImportController.m in Sources */,
 				17E6415C0EF01EF6001BC333 /* SPTableStructure.m in Sources */,
 				1A8B582A25EEE15900DFC54A /* ByteCountFormatterExtension.swift in Sources */,
 				1A071B8D254D983700246912 /* SPNSMutableDictionaryAdditions.m in Sources */,
@@ -3461,6 +3479,8 @@
 				3876E15D1CC0BA0300D85154 /* SPTableFooterPopUpButtonCell.m in Sources */,
 				51BC152B25BE13C400F1CDC9 /* SADatabaseToolbarController.swift in Sources */,
 				51BC153325BE13C400F1CDC9 /* SALightweightContentViewController.swift in Sources */,
+				C3D400022F92000100C4C14A /* SALightweightCSVImportAccessory.swift in Sources */,
+				C3D300052F91000100C4C14A /* SALightweightCSVImportSettings.swift in Sources */,
 				51BC153525BE13C400F1CDC9 /* SALightweightQueryViewController.swift in Sources */,
 				51BC154125BE13C400F1CDC9 /* SALightweightResultGrid.swift in Sources */,
 				51BC153125BE13C400F1CDC9 /* SALightweightStructureViewController.swift in Sources */,
