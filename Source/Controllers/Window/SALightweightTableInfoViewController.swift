@@ -29,7 +29,6 @@
 //
 
 import AppKit
-import SwiftUI
 
 struct SALightweightTableInfoRow {
     let label: String
@@ -80,7 +79,20 @@ final class SALightweightTableInfoSidebarView: NSView {
         }
     }
 
-    private lazy var hostingView = NSHostingView(rootView: contentView())
+    private enum Layout {
+        static let headerHeight: CGFloat = 25
+        static let leadingPadding: CGFloat = 2
+        static let trailingPadding: CGFloat = 4
+        static let iconSize: CGFloat = 16
+        static let iconTextSpacing: CGFloat = 5
+    }
+
+    private let propertyImage = NSImage(named: "table-property")
+    private var toolTipTags: [NSView.ToolTipTag: String] = [:]
+
+    override var isFlipped: Bool {
+        return true
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -97,68 +109,121 @@ final class SALightweightTableInfoSidebarView: NSView {
     }
 
     private func configureView() {
-        hostingView.frame = bounds
-        hostingView.autoresizingMask = [.width, .height]
-        addSubview(hostingView)
+        wantsLayer = true
+        canDrawSubviewsIntoLayer = true
+        setAccessibilityRole(.group)
+        updateContent()
     }
 
     private func updateContent() {
-        hostingView.rootView = contentView()
+        updateToolTips()
+        needsDisplay = true
     }
 
-    private func contentView() -> SALightweightTableInfoSidebarContentView {
-        return SALightweightTableInfoSidebarContentView(rows: rows,
-                                                        fontName: font.fontName,
-                                                        fontSize: font.pointSize,
-                                                        rowHeight: rowHeight,
-                                                        propertyImage: NSImage(named: "table-property"))
-    }
-}
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
 
-private struct SALightweightTableInfoSidebarContentView: View {
-    let rows: [String]
-    let fontName: String
-    let fontSize: CGFloat
-    let rowHeight: CGFloat
-    let propertyImage: NSImage?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                rowView(row, isHeader: index == 0)
-            }
-            Spacer(minLength: 0)
+        for (index, row) in rows.enumerated() {
+            let rect = rowRect(for: index)
+            guard rect.intersects(dirtyRect) else { continue }
+            drawRow(row, at: index, in: rect)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.clear)
     }
 
-    @ViewBuilder
-    private func rowView(_ row: String, isHeader: Bool) -> some View {
-        HStack(spacing: 5) {
-            if isHeader {
-                Spacer()
-                    .frame(width: 16, height: 16)
-            } else if let propertyImage {
-                Image(nsImage: propertyImage)
-                    .resizable()
-                    .frame(width: 16, height: 16)
-            } else {
-                Spacer()
-                    .frame(width: 16, height: 16)
-            }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateToolTips()
+    }
 
-            Text(row)
-                .font(isHeader ? .system(size: NSFont.smallSystemFontSize, weight: .bold) : Font.custom(fontName, size: fontSize))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .help(row)
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateToolTips()
+    }
+
+    private func drawRow(_ row: String, at index: Int, in rect: NSRect) {
+        let isHeader = index == 0
+        let rowFont = isHeader ? NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize) : font
+        let textX = Layout.leadingPadding + Layout.iconSize + Layout.iconTextSpacing
+        let textRect = NSRect(x: textX,
+                              y: rect.minY + textVerticalInset(for: rowFont, rowHeight: rect.height),
+                              width: max(0, rect.width - textX - Layout.trailingPadding),
+                              height: rect.height)
+
+        if !isHeader, let propertyImage = propertyImage {
+            let iconRect = NSRect(x: Layout.leadingPadding,
+                                  y: rect.minY + floor((rect.height - Layout.iconSize) / 2),
+                                  width: Layout.iconSize,
+                                  height: Layout.iconSize)
+            propertyImage.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
-        .padding(.leading, 2)
-        .padding(.trailing, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: isHeader ? 25 : rowHeight)
+
+        row.draw(in: textRect, withAttributes: textAttributes(for: rowFont))
+    }
+
+    private func textAttributes(for font: NSFont) -> [NSAttributedString.Key: Any] {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+        paragraphStyle.alignment = .left
+
+        return [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraphStyle
+        ]
+    }
+
+    private func textVerticalInset(for font: NSFont, rowHeight: CGFloat) -> CGFloat {
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        return max(0, floor((rowHeight - lineHeight) / 2))
+    }
+
+    private func rowRect(for index: Int) -> NSRect {
+        let y: CGFloat
+        if index == 0 {
+            y = 0
+        } else {
+            y = Layout.headerHeight + (CGFloat(index - 1) * rowHeight)
+        }
+
+        let height = index == 0 ? Layout.headerHeight : rowHeight
+        return NSRect(x: 0, y: y, width: bounds.width, height: height)
+    }
+
+    private func updateToolTips() {
+        toolTipTags.removeAll()
+        removeAllToolTips()
+
+        for (index, row) in rows.enumerated() {
+            let rect = rowRect(for: index)
+            guard rect.intersects(bounds) else { continue }
+            let tag = addToolTip(rect, owner: self, userData: nil)
+            toolTipTags[tag] = row
+        }
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        return toolTipTags[tag] ?? ""
+    }
+
+    override func isAccessibilityElement() -> Bool {
+        return false
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        return rows.enumerated().map { index, row -> NSAccessibilityElement in
+            let element = NSAccessibilityElement()
+            element.setAccessibilityParent(self)
+            element.setAccessibilityRole(.staticText)
+            element.setAccessibilityLabel(row)
+            element.setAccessibilityFrame(accessibilityFrame(forRow: index))
+            return element
+        }
+    }
+
+    private func accessibilityFrame(forRow index: Int) -> NSRect {
+        guard let window else { return .zero }
+        let rowRectInWindow = convert(rowRect(for: index), to: nil)
+        return window.convertToScreen(rowRectInWindow)
     }
 }
 

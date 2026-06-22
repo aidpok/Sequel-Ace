@@ -733,18 +733,48 @@ struct SALightweightPendingSQLFileOpen {
     var databaseListNeedsLoad = true
     var databaseListIsLoading = false
     var lightweightDatabases: [String] = []
-    var lightweightTables: [String] = []
-    var filteredLightweightTables: [String] = []
-    var lightweightTableTypes: [String: SALightweightTableObjectType] = [:]
+    var lightweightTables: [String] = [] {
+        didSet {
+            if oldValue != lightweightTables {
+                invalidateLightweightSidebarRowCache()
+            }
+        }
+    }
+    var filteredLightweightTables: [String] = [] {
+        didSet {
+            if oldValue != filteredLightweightTables {
+                invalidateLightweightSidebarRowCache()
+            }
+        }
+    }
+    var lightweightTableTypes: [String: SALightweightTableObjectType] = [:] {
+        didSet {
+            if oldValue != lightweightTableTypes {
+                invalidateLightweightSidebarRowCache()
+            }
+        }
+    }
     var lightweightTableComments: [String: String] = [:]
-    var lightweightPinnedTables: Set<String> = []
+    var lightweightPinnedTables: Set<String> = [] {
+        didSet {
+            if oldValue != lightweightPinnedTables {
+                invalidateLightweightSidebarRowCache()
+            }
+        }
+    }
     var lightweightTableInfoRows: [String] = [NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane")] {
         didSet {
             lightweightTableInfoView.rows = lightweightTableInfoRows
         }
     }
     var lightweightTableInfoLoadToken = UUID()
-    var selectedTable: String?
+    var selectedTable: String? {
+        didSet {
+            if oldValue != selectedTable {
+                invalidateLightweightSidebarRowCache()
+            }
+        }
+    }
     var activeConnectionName: String?
     var activeServerVersion: String?
     let databaseToolbarController = SADatabaseToolbarController()
@@ -778,6 +808,7 @@ struct SALightweightPendingSQLFileOpen {
     var lightweightHistoryBackStack: [String] = []
     var lightweightHistoryForwardStack: [String] = []
     var isRestoringLightweightHistory = false
+    var lightweightSidebarRowsCache: [SALightweightSidebarRow]?
     var pendingLightweightSessionSnapshot: NSDictionary?
     var pendingLightweightSQLFileOpen: SALightweightPendingSQLFileOpen?
     var activeLightweightLegacySheetController: SALightweightLegacySheetController?
