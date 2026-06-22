@@ -83,6 +83,16 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
     @objc var supportsDataTableBundleCommands = false
     @objc var dataTableBundleSource = "query"
 
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(invalidRect)
+        logInvalidationDiagnostics(reason: "setNeedsDisplay(rect)", rect: invalidRect)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        logInvalidationDiagnostics(reason: "draw", rect: dirtyRect)
+        super.draw(dirtyRect)
+    }
+
     @objc(dataTableBundleInputForInputSource:blobHandling:onlySelectedRows:blobFileDirectory:)
     func dataTableBundleInput(for inputSource: String, blobHandling: Int, onlySelectedRows: Bool, blobFileDirectory: String?) -> String? {
         return resultGridDelegate?.resultGridTableView(self,
@@ -134,6 +144,46 @@ final class SALightweightResultGridTableView: SPCopyTable, SALightweightDenseAcc
 
     override func accessibilityColumns() -> [Any]? {
         []
+    }
+
+    private func logInvalidationDiagnostics(reason: String, rect: NSRect) {
+        // Opt-in hook for activation/focus redraw audits. Keep disabled by default;
+        // AppKit legitimately repaints table selections when app/window key state changes.
+        guard Self.invalidationDiagnosticsEnabled else { return }
+
+        let visibleRows = rows(in: visibleRect)
+        let visibleColumns = columnIndexes(in: visibleRect)
+        let firstResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        let currentEventType = NSApp.currentEvent.map { String(describing: $0.type) } ?? "nil"
+        NSLog("SA LightweightGridInvalidation %@ id=%@ source=%@ rect=%@ visibleRect=%@ visibleRows=%@ visibleColumns=%@ rows=%ld columns=%ld appActive=%d keyWindow=%d firstResponder=%@ event=%@ caller=%@",
+              reason,
+              identifier?.rawValue ?? "nil",
+              dataTableBundleSource,
+              NSStringFromRect(rect),
+              NSStringFromRect(visibleRect),
+              NSStringFromRange(visibleRows),
+              visibleColumns.description,
+              numberOfRows,
+              numberOfColumns,
+              NSApp.isActive ? 1 : 0,
+              window?.isKeyWindow == true ? 1 : 0,
+              firstResponder,
+              currentEventType,
+              Self.firstApplicationCaller())
+    }
+
+    private static var invalidationDiagnosticsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "SALightweightResultGridInvalidationDiagnostics")
+            || ProcessInfo.processInfo.environment["SA_LIGHTWEIGHT_GRID_INVALIDATION_DIAGNOSTICS"] == "1"
+    }
+
+    private static func firstApplicationCaller() -> String {
+        Thread.callStackSymbols.first { symbol in
+            symbol.contains("Sequel Ace")
+                && !symbol.contains("SALightweightResultGridTableView")
+                && !symbol.contains("logInvalidationDiagnostics")
+                && !symbol.contains("firstApplicationCaller")
+        } ?? "none"
     }
 }
 

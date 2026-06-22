@@ -61,6 +61,8 @@
 
 #import "sequel-ace-Swift.h"
 
+#import <os/log.h>
+
 @import FirebaseCore;
 @import FirebaseAnalytics;
 @import FirebaseCrashlytics;
@@ -72,10 +74,54 @@ static NSString *SALightweightResumeConsoleKey = @"console";
 static NSString *SALightweightResumeConsoleVisibleKey = @"visible";
 static NSString *SALightweightResumeConsoleFrameKey = @"frame";
 static const NSTimeInterval SALightweightResumeSaveDebounce = 5.0;
+static const NSTimeInterval SAUIDiagnosticsWatchdogInterval = 1.0;
+static const NSTimeInterval SAUIDiagnosticsStallThreshold = 2.0;
+static const NSTimeInterval SAUIDiagnosticsMainThreadDelayThreshold = 0.5;
+static const NSTimeInterval SAUIDiagnosticsSlowMenuValidationThreshold = 0.1;
+static const NSTimeInterval SAUIDiagnosticsSlowWindowTimingThreshold = 0.1;
 static const NSInteger SALightweightTableObjectTypeTableValue = 0;
 static const NSInteger SALightweightTableObjectTypeViewValue = 1;
 static const NSInteger SALightweightTableObjectTypeProcedureValue = 2;
 static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
+
+#define SAUIDiagnosticLog(fmt, ...) \
+    do { \
+        if (SAUIDiagnosticsEnabled()) { \
+            SAUIDiagnosticLogMessage((@"[SA UI Diagnostics] " fmt), ##__VA_ARGS__); \
+        } \
+    } while (0)
+
+static BOOL SAUIDiagnosticsEnabled(void)
+{
+    static BOOL enabled;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *environmentValue = [[[NSProcessInfo processInfo] environment] objectForKey:@"SA_ENABLE_UI_DIAGNOSTICS"];
+        enabled = [environmentValue boolValue] || [[NSUserDefaults standardUserDefaults] boolForKey:@"SAEnableUIDiagnostics"];
+    });
+
+    return enabled;
+}
+
+static void SAUIDiagnosticLogMessage(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
+static void SAUIDiagnosticLogMessage(NSString *format, ...)
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    os_log(OS_LOG_DEFAULT, "%{public}@", message);
+}
+
+static NSTimeInterval SAUIMonotonicTime(void)
+{
+    return [[NSProcessInfo processInfo] systemUptime];
+}
 
 typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
     SALightweightConnectionFileOpenUnsupported = 0,
@@ -140,6 +186,13 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 - (SPWindowController *)windowControllerForBundleProcessID:(NSString *)processID;
 - (NSDictionary *)shellEnvironmentForWindowController:(SPWindowController *)windowController;
 - (void)addBundleCallbackEnvironmentToDictionary:(NSMutableDictionary *)environment processID:(NSString *)processID;
+- (void)_startUIDiagnosticsIfNeeded;
+- (void)_uiDiagnosticsWatchdogTick;
+- (NSString *)_uiDiagnosticsContext;
+- (NSString *)_uiDiagnosticsContextForWindow:(NSWindow *)window;
+- (void)_logUIDiagnosticsWindowTiming:(NSString *)operation window:(NSWindow *)window startTime:(NSTimeInterval)startTime;
+- (void)_uiDiagnosticsWindowDidResize:(NSNotification *)notification;
+- (void)_uiDiagnosticsWindowDidUpdate:(NSNotification *)notification;
 
 @property (readwrite, strong) NSFileManager *fileManager;
 
@@ -147,6 +200,14 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 @property (nonatomic, assign) BOOL lightweightResumeStateDirty;
 @property (nonatomic, assign) BOOL lightweightResumeSaveScheduled;
 @property (nonatomic, strong) NSData *lastLightweightResumeStateData;
+@property (nonatomic, strong) dispatch_source_t uiDiagnosticsWatchdogTimer;
+@property (nonatomic, strong) NSMutableDictionary<NSValue *, NSNumber *> *uiDiagnosticsWindowUpdateStartTimes;
+@property (atomic, assign) BOOL uiDiagnosticsBeatPending;
+@property (atomic, assign) NSUInteger uiDiagnosticsLastReportedStallSecond;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsLastBeatTime;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsPendingBeatTime;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsActivationStartTime;
+@property (atomic, assign) NSTimeInterval uiDiagnosticsResignStartTime;
 
 @end
 
@@ -265,9 +326,223 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
     [[NSScriptExecutionContext sharedScriptExecutionContext] setTopLevelObject:self];
 }
 
+#pragma mark -
+#pragma mark UI Diagnostics
+
+- (void)_startUIDiagnosticsIfNeeded
+{
+    if (!SAUIDiagnosticsEnabled() || self.uiDiagnosticsWatchdogTimer) {
+        return;
+    }
+
+    self.uiDiagnosticsLastBeatTime = SAUIMonotonicTime();
+    self.uiDiagnosticsWindowUpdateStartTimes = [NSMutableDictionary dictionary];
+
+    dispatch_queue_t watchdogQueue = dispatch_queue_create("com.sequel-ace.ui-diagnostics.watchdog", DISPATCH_QUEUE_SERIAL);
+    self.uiDiagnosticsWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, watchdogQueue);
+    uint64_t watchdogInterval = (uint64_t)(SAUIDiagnosticsWatchdogInterval * NSEC_PER_SEC);
+    dispatch_source_set_timer(self.uiDiagnosticsWatchdogTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)watchdogInterval), watchdogInterval, NSEC_PER_MSEC * 100);
+
+    __weak SPAppController *weakSelf = self;
+    dispatch_source_set_event_handler(self.uiDiagnosticsWatchdogTimer, ^{
+        [weakSelf _uiDiagnosticsWatchdogTick];
+    });
+
+    dispatch_resume(self.uiDiagnosticsWatchdogTimer);
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_uiDiagnosticsWindowDidResize:) name:NSWindowDidResizeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_uiDiagnosticsWindowDidUpdate:) name:NSWindowDidUpdateNotification object:nil];
+
+    SAUIDiagnosticLog(@"enabled via SA_ENABLE_UI_DIAGNOSTICS/SAEnableUIDiagnostics watchdogInterval=%.1fs stallThreshold=%.1fs",
+            SAUIDiagnosticsWatchdogInterval,
+            SAUIDiagnosticsStallThreshold);
+}
+
+- (void)_uiDiagnosticsWatchdogTick
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    NSTimeInterval now = SAUIMonotonicTime();
+
+    if (self.uiDiagnosticsBeatPending) {
+        NSTimeInterval stallDuration = now - self.uiDiagnosticsPendingBeatTime;
+        if (stallDuration >= SAUIDiagnosticsStallThreshold) {
+            NSUInteger stallSecond = (NSUInteger)stallDuration;
+            if (stallSecond != self.uiDiagnosticsLastReportedStallSecond) {
+                self.uiDiagnosticsLastReportedStallSecond = stallSecond;
+                SAUIDiagnosticLog(@"main thread has not serviced watchdog for %.3fs lastBeatAge=%.3fs",
+                        stallDuration,
+                        now - self.uiDiagnosticsLastBeatTime);
+            }
+        }
+        return;
+    }
+
+    self.uiDiagnosticsBeatPending = YES;
+    self.uiDiagnosticsPendingBeatTime = now;
+
+    __weak SPAppController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SPAppController *strongSelf = weakSelf;
+        if (!strongSelf || !SAUIDiagnosticsEnabled()) {
+            return;
+        }
+
+        NSTimeInterval resumedAt = SAUIMonotonicTime();
+        NSTimeInterval delay = resumedAt - strongSelf.uiDiagnosticsPendingBeatTime;
+        if (delay >= SAUIDiagnosticsMainThreadDelayThreshold) {
+            SAUIDiagnosticLog(@"main thread serviced watchdog after %.3fs context=%@", delay, [strongSelf _uiDiagnosticsContext]);
+        }
+
+        strongSelf.uiDiagnosticsBeatPending = NO;
+        strongSelf.uiDiagnosticsLastReportedStallSecond = 0;
+        strongSelf.uiDiagnosticsLastBeatTime = resumedAt;
+    });
+}
+
+- (NSString *)_uiDiagnosticsContext
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return @"disabled";
+    }
+
+    if (![NSThread isMainThread]) {
+        return @"non-main-thread";
+    }
+
+    NSWindow *keyWindow = [NSApp keyWindow];
+    NSWindow *mainWindow = [NSApp mainWindow];
+    id firstResponder = keyWindow.firstResponder;
+    NSUInteger managedWindows = self.tabManager.windowControllers.count;
+    NSUInteger appWindows = NSApp.windows.count;
+
+    return [NSString stringWithFormat:@"active=%d keyWindow=%@ mainWindow=%@ firstResponder=%@ managedWindows=%lu appWindows=%lu",
+            NSApp.isActive,
+            keyWindow ? NSStringFromClass([keyWindow class]) : @"nil",
+            mainWindow ? NSStringFromClass([mainWindow class]) : @"nil",
+            firstResponder ? NSStringFromClass([firstResponder class]) : @"nil",
+            (unsigned long)managedWindows,
+            (unsigned long)appWindows];
+}
+
+- (NSString *)_uiDiagnosticsContextForWindow:(NSWindow *)window
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return @"disabled";
+    }
+
+    if (![NSThread isMainThread]) {
+        return @"non-main-thread";
+    }
+
+    if (!window) {
+        return @"window=nil";
+    }
+
+    return [NSString stringWithFormat:@"window=%@ controller=%@ contentView=%@ visible=%d key=%d main=%d frame=%@",
+            NSStringFromClass([window class]),
+            window.windowController ? NSStringFromClass([window.windowController class]) : @"nil",
+            window.contentView ? NSStringFromClass([window.contentView class]) : @"nil",
+            window.isVisible,
+            window.isKeyWindow,
+            window.isMainWindow,
+            NSStringFromRect(window.frame)];
+}
+
+- (void)_logUIDiagnosticsWindowTiming:(NSString *)operation window:(NSWindow *)window startTime:(NSTimeInterval)startTime
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    NSTimeInterval elapsed = SAUIMonotonicTime() - startTime;
+    if (elapsed >= SAUIDiagnosticsSlowWindowTimingThreshold) {
+        SAUIDiagnosticLog(@"slow window %@ elapsed=%.3fs context=%@", operation, elapsed, [self _uiDiagnosticsContextForWindow:window]);
+    }
+}
+
+- (void)_uiDiagnosticsWindowDidResize:(NSNotification *)notification
+{
+    if (!SAUIDiagnosticsEnabled() || ![NSThread isMainThread] || ![notification.object isKindOfClass:[NSWindow class]]) {
+        return;
+    }
+
+    NSValue *windowKey = [NSValue valueWithNonretainedObject:notification.object];
+    if (![self.uiDiagnosticsWindowUpdateStartTimes objectForKey:windowKey]) {
+        [self.uiDiagnosticsWindowUpdateStartTimes setObject:@(SAUIMonotonicTime()) forKey:windowKey];
+    }
+}
+
+- (void)_uiDiagnosticsWindowDidUpdate:(NSNotification *)notification
+{
+    if (!SAUIDiagnosticsEnabled() || ![NSThread isMainThread] || ![notification.object isKindOfClass:[NSWindow class]]) {
+        return;
+    }
+
+    NSWindow *window = notification.object;
+    NSValue *windowKey = [NSValue valueWithNonretainedObject:window];
+    NSNumber *startTime = [self.uiDiagnosticsWindowUpdateStartTimes objectForKey:windowKey];
+    if (!startTime) {
+        return;
+    }
+
+    [self.uiDiagnosticsWindowUpdateStartTimes removeObjectForKey:windowKey];
+
+    NSTimeInterval elapsed = SAUIMonotonicTime() - startTime.doubleValue;
+    if (elapsed >= SAUIDiagnosticsSlowWindowTimingThreshold) {
+        SAUIDiagnosticLog(@"slow window resize/update elapsed=%.3fs context=%@", elapsed, [self _uiDiagnosticsContextForWindow:window]);
+    }
+}
+
+- (void)applicationWillBecomeActive:(NSNotification *)notification
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    self.uiDiagnosticsActivationStartTime = SAUIMonotonicTime();
+    SAUIDiagnosticLog(@"applicationWillBecomeActive context=%@", [self _uiDiagnosticsContext]);
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    NSTimeInterval didBecomeActiveTime = SAUIMonotonicTime();
+    NSTimeInterval activationElapsed = self.uiDiagnosticsActivationStartTime > 0 ? didBecomeActiveTime - self.uiDiagnosticsActivationStartTime : 0;
+    SAUIDiagnosticLog(@"applicationDidBecomeActive elapsedSinceWill=%.3fs context=%@", activationElapsed, [self _uiDiagnosticsContext]);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (SAUIDiagnosticsEnabled()) {
+            SAUIDiagnosticLog(@"applicationDidBecomeActive next-runloop elapsedSinceDid=%.3fs context=%@", SAUIMonotonicTime() - didBecomeActiveTime, [self _uiDiagnosticsContext]);
+        }
+    });
+}
+
+- (void)applicationWillResignActive:(NSNotification *)notification
+{
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    self.uiDiagnosticsResignStartTime = SAUIMonotonicTime();
+    SAUIDiagnosticLog(@"applicationWillResignActive context=%@", [self _uiDiagnosticsContext]);
+}
+
 - (void)applicationDidResignActive:(NSNotification *)notification
 {
     [self savePendingLightweightResumeStateIfNeeded];
+
+    if (!SAUIDiagnosticsEnabled()) {
+        return;
+    }
+
+    NSTimeInterval elapsed = self.uiDiagnosticsResignStartTime > 0 ? SAUIMonotonicTime() - self.uiDiagnosticsResignStartTime : 0;
+    SAUIDiagnosticLog(@"applicationDidResignActive elapsedSinceWill=%.3fs context=%@", elapsed, [self _uiDiagnosticsContext]);
 }
 
 /**
@@ -276,6 +551,8 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 
     [FIRApp configure];
+    [self _startUIDiagnosticsIfNeeded];
+    SAUIDiagnosticLog(@"applicationDidFinishLaunching context=%@", [self _uiDiagnosticsContext]);
 
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
     BOOL analyticsEnabled = [prefs boolForKey:SPSaveApplicationUsageAnalytics];
@@ -738,7 +1015,9 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
         frame.origin.y = NSMidY(visibleFrame) - (frame.size.height / 2);
     }
 
+    NSTimeInterval frameStartTime = SAUIDiagnosticsEnabled() ? SAUIMonotonicTime() : 0;
     [window setFrame:frame display:NO];
+    [self _logUIDiagnosticsWindowTiming:@"applyLightweightResumeFrameString setFrame" window:window startTime:frameStartTime];
     return YES;
 }
 
@@ -1235,6 +1514,8 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
  * Menu item validation.
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    BOOL uiDiagnosticsEnabled = SAUIDiagnosticsEnabled();
+    NSTimeInterval validationStartTime = uiDiagnosticsEnabled ? SAUIMonotonicTime() : 0;
     BOOL isValid = YES;
     SEL action = [menuItem action];
     SPDatabaseDocument *activeDocument = nil;
@@ -1476,6 +1757,16 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
     }
 
 validateMenuItemDone:
+    if (uiDiagnosticsEnabled) {
+        NSTimeInterval validationElapsed = SAUIMonotonicTime() - validationStartTime;
+        if (validationElapsed >= SAUIDiagnosticsSlowMenuValidationThreshold) {
+            SAUIDiagnosticLog(@"slow validateMenuItem action=%@ elapsed=%.3fs result=%d context=%@",
+                    action ? NSStringFromSelector(action) : @"nil",
+                    validationElapsed,
+                    isValid,
+                    [self _uiDiagnosticsContext]);
+        }
+    }
     return isValid;
 }
 
@@ -2179,7 +2470,9 @@ validateMenuItemDone:
 
                 usleep(1000);
 
+                NSTimeInterval frameStartTime = SAUIDiagnosticsEnabled() ? SAUIMonotonicTime() : 0;
                 [window setFrameFromString:[windowDictionary objectForKey:@"frame"]];
+                [self _logUIDiagnosticsWindowTiming:@"openSessionBundle setFrameFromString" window:window startTime:frameStartTime];
 
                 if ([[tab objectForKey:@"isLightweight"] boolValue]) {
                     if (![newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
