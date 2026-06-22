@@ -795,6 +795,12 @@ final class SALightweightStructureViewController: NSViewController {
             reloadVisibleRow(withID: oldRow.id)
             return
         }
+        guard !isMySQL84AutoIncrementRuleExtraValue(row.values["Extra"]) || fieldTypeAllowsAutoIncrement(row.values["type"]) else {
+            showInvalidAutoIncrementAlert(for: row.values["type"])
+            rows[index] = oldRow
+            reloadVisibleRow(withID: oldRow.id)
+            return
+        }
 
         isSaving = true
         let query: String
@@ -892,11 +898,13 @@ final class SALightweightStructureViewController: NSViewController {
             }
         }
 
-        definition += boolValue(values["null"]) ? " NULL" : " NOT NULL"
+        let extra = (values["Extra"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let extraUsesAutoIncrementRules = isMySQL84AutoIncrementRuleExtraValue(extra)
+        definition += (boolValue(values["null"]) && !extraUsesAutoIncrementRules) ? " NULL" : " NOT NULL"
 
         let defaultValue = (values["default"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
-        if !defaultValue.isEmpty, !extraIsAutoIncrement(values["Extra"]) {
+        if !defaultValue.isEmpty, !extraUsesAutoIncrementRules {
             if defaultValue == nullValue || defaultValue.uppercased() == "NULL" {
                 if boolValue(values["null"]) {
                     definition += " DEFAULT NULL"
@@ -908,7 +916,6 @@ final class SALightweightStructureViewController: NSViewController {
             }
         }
 
-        let extra = (values["Extra"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !extra.isEmpty, extra.uppercased() != "NONE" {
             definition += " \(extra.uppercased())"
         }
@@ -935,7 +942,41 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func extraIsAutoIncrement(_ value: String?) -> Bool {
-        return value?.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("auto_increment") == .orderedSame
+        return SAAutoIncrementRuleSupport.isAutoIncrementExtraValue(value)
+    }
+
+    private func serverUsesMySQL84AutoIncrementRules() -> Bool {
+        guard let connection = connection else { return false }
+        if connection.isMariaDB() {
+            return false
+        }
+
+        let major = Int(connection.serverMajorVersion())
+        let minor = Int(connection.serverMinorVersion())
+        let release = Int(connection.serverReleaseVersion())
+        return major > 8 || (major == 8 && (minor > 4 || (minor == 4 && release >= 0)))
+    }
+
+    private func isMySQL84AutoIncrementRuleExtraValue(_ value: String?) -> Bool {
+        return SAAutoIncrementRuleSupport.isMySQL84AutoIncrementRuleExtraValue(value)
+    }
+
+    private func fieldTypeAllowsAutoIncrement(_ fieldType: String?) -> Bool {
+        guard serverUsesMySQL84AutoIncrementRules() else { return true }
+
+        return SAAutoIncrementRuleSupport.fieldTypeAllowsAutoIncrement(fieldType)
+    }
+
+    private func showInvalidAutoIncrementAlert(for fieldType: String?) {
+        var displayType = fieldType?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+        if displayType.isEmpty {
+            displayType = NSLocalizedString("selected", comment: "invalid auto increment fallback field type")
+        }
+
+        showError(
+            title: NSLocalizedString("AUTO_INCREMENT is unavailable", comment: "mysql 8.4 invalid auto increment title"),
+            message: String(format: NSLocalizedString("MySQL 8.4 and newer only support AUTO_INCREMENT on integer columns. The %@ column type cannot use AUTO_INCREMENT on this server.", comment: "mysql 8.4 invalid auto increment message"), displayType)
+        )
     }
 
     private func defaultLooksLikeExpression(_ value: String) -> Bool {
@@ -1108,13 +1149,13 @@ final class SALightweightStructureViewController: NSViewController {
         return tableView.identifier?.rawValue == "TableStructureIndexesTableView"
     }
 
-    private func comboBoxCell(for key: String) -> NSComboBoxCell? {
+    private func comboBoxCell(for key: String, row: StructureRow? = nil) -> NSComboBoxCell? {
         let values: [String]
         switch key {
         case "type":
             values = typeSuggestions
         case "Extra":
-            values = extraSuggestions
+            values = extraSuggestions(for: row)
         case "encodingName":
             values = [""] + encodingOptions.map { $0.name }
         case "collationName":
@@ -1134,6 +1175,20 @@ final class SALightweightStructureViewController: NSViewController {
         cell.lineBreakMode = .byTruncatingTail
         cell.font = UserDefaults.getFont()
         return cell
+    }
+
+    private func extraSuggestions(for row: StructureRow?) -> [String] {
+        guard let row = row else { return extraSuggestions }
+
+        return extraSuggestions.filter {
+            !isMySQL84AutoIncrementRuleExtraValue($0) || fieldTypeAllowsAutoIncrement(row.values["type"])
+        }
+    }
+
+    private func updateExtraCell(for row: StructureRow?) {
+        guard let tableColumn = structureTableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("Extra")),
+              let cell = comboBoxCell(for: "Extra", row: row) else { return }
+        tableColumn.dataCell = cell
     }
 
     private func updateCollationCell(for encoding: String) {
@@ -2256,6 +2311,12 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
                 return
             }
             rows[sourceIndex].values[key] = uppercasedType
+            if isMySQL84AutoIncrementRuleExtraValue(rows[sourceIndex].values["Extra"]),
+               !fieldTypeAllowsAutoIncrement(uppercasedType) {
+                rows[sourceIndex].values["Extra"] = "None"
+                pendingAutoIncrementIndex = nil
+                showInvalidAutoIncrementAlert(for: uppercasedType)
+            }
             if typeDisallowsDefaultOrLength(uppercasedType) {
                 rows[sourceIndex].values["default"] = ""
                 rows[sourceIndex].values["length"] = ""
@@ -2263,8 +2324,17 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
         } else {
             rows[sourceIndex].values[key] = newValue
         }
-        if key == "Extra", extraIsAutoIncrement(newValue) {
+        if key == "Extra", isMySQL84AutoIncrementRuleExtraValue(newValue), !fieldTypeAllowsAutoIncrement(rows[sourceIndex].values["type"]) {
+            rows[sourceIndex] = oldRow
+            pendingAutoIncrementIndex = nil
+            showInvalidAutoIncrementAlert(for: oldRow.values["type"])
+            reloadVisibleRow(withID: oldRow.id)
+            return
+        }
+        if key == "Extra", isMySQL84AutoIncrementRuleExtraValue(newValue) {
             rows[sourceIndex].values["null"] = "0"
+        }
+        if key == "Extra", extraIsAutoIncrement(newValue) {
             if (rows[sourceIndex].values["Key"] ?? "").isEmpty {
                 promptForAutoIncrementIndex { [weak self] indexType in
                     guard let self = self else { return }
@@ -2296,6 +2366,8 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
         guard isStructureTable(tableView), !isSaving, let key = tableColumn?.identifier.rawValue else { return false }
         if key == "collationName", let sourceIndex = sourceIndex(forDisplayedRow: row) {
             updateCollationCell(for: rows[sourceIndex].values["encodingName"] ?? "")
+        } else if key == "Extra", let sourceIndex = sourceIndex(forDisplayedRow: row) {
+            updateExtraCell(for: rows[sourceIndex])
         }
         return structureColumns.first(where: { $0.key == key })?.editable == true
     }

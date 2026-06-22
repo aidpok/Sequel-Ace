@@ -478,6 +478,11 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
     }
 
     private func saveRelation(_ relation: SALightweightRelationValue, connection: SPMySQLConnection) -> SALightweightRelationSaveResult {
+        guard referenceColumnAllowsForeignKeyReference(relation, connection: connection) else {
+            showInvalidForeignKeyReferenceAlert(column: relation.referenceColumn, table: relation.referenceTable)
+            return .failure
+        }
+
         var query = "ALTER TABLE \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(table)) ADD "
         if !relation.constraintName.isEmpty {
             query += "CONSTRAINT \(SALightweightSchemaMetadataLoader.sqlIdentifier(relation.constraintName)) "
@@ -511,6 +516,16 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
         return .success
     }
 
+    private func referenceColumnAllowsForeignKeyReference(_ relation: SALightweightRelationValue, connection: SPMySQLConnection) -> Bool {
+        guard SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(connection: connection) else { return true }
+        guard !relation.referenceColumn.isEmpty, !relation.referenceTable.isEmpty else { return false }
+
+        return SALightweightSchemaMetadataLoader.singleColumnUniqueReferenceColumns(for: relation.referenceTable,
+                                                                                   database: relation.referenceDatabase,
+                                                                                   connection: connection)
+            .contains(relation.referenceColumn)
+    }
+
     private func toolbarButton(imageName: String, toolTip: String, keyEquivalent: String = "", modifierMask: NSEvent.ModifierFlags = [], action: Selector) -> NSButton {
         let button = NSButton(image: NSImage(named: NSImage.Name(imageName)) ?? NSImage(), target: self, action: action)
         button.bezelStyle = .smallSquare
@@ -529,6 +544,11 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModalCenteredInKeyWindow()
+    }
+
+    private func showInvalidForeignKeyReferenceAlert(column: String, table: String) {
+        showError(title: NSLocalizedString("Referenced column needs a unique key", comment: "foreign key reference restriction title"),
+                  message: String(format: NSLocalizedString("MySQL 8.4 and newer require a foreign key to reference a full unique or primary key. Add a single-column unique key to %@.%@ or choose another referenced column.", comment: "foreign key reference restriction message"), table, column))
     }
 }
 
@@ -561,6 +581,8 @@ private final class SALightweightRelationSheetController: NSWindowController, NS
     private let database: String
     private var localColumns: [SALightweightRelationColumn] = []
     private var takenConstraintNames = Set<String>()
+    private var requiresStandardReferenceColumns = false
+    private var standardReferenceColumnCache: [String: Set<String>] = [:]
 
     private let constraintNameField = NSTextField(frame: NSRect(x: 118, y: 10, width: 165, height: 19))
     private let columnPopUpButton = NSPopUpButton(frame: NSRect(x: 115, y: 6, width: 171, height: 22), pullsDown: false)
@@ -727,6 +749,8 @@ private final class SALightweightRelationSheetController: NSWindowController, NS
 
         localColumns = SALightweightSchemaMetadataLoader.columns(for: table, database: database, connection: connection)
         takenConstraintNames = SALightweightSchemaMetadataLoader.relationConstraintNames(for: table, database: database, connection: connection)
+        requiresStandardReferenceColumns = SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(connection: connection)
+        standardReferenceColumnCache.removeAll()
         setPopUpItems(columnPopUpButton, items: localColumns.map { $0.name }, selecting: nil)
         setPopUpItems(refDatabasePopUpButton, items: SALightweightSchemaMetadataLoader.userDatabases(connection: connection), selecting: database)
 
@@ -756,11 +780,32 @@ private final class SALightweightRelationSheetController: NSWindowController, NS
             return
         }
 
-        let columns = SALightweightSchemaMetadataLoader.columns(for: selectedTable, database: selectedDatabase, connection: connection)
+        var columns = SALightweightSchemaMetadataLoader.columns(for: selectedTable, database: selectedDatabase, connection: connection)
             .filter { $0.type == localColumn.type }
-            .map { $0.name }
-        setPopUpItems(refColumnPopUpButton, items: columns, selecting: nil)
+
+        if requiresStandardReferenceColumns {
+            let standardReferenceColumns = singleColumnUniqueReferenceColumns(for: selectedTable,
+                                                                             database: selectedDatabase,
+                                                                             connection: connection)
+            columns = columns.filter { standardReferenceColumns.contains($0.name) }
+        }
+
+        let columnNames = columns.map { $0.name }
+        setPopUpItems(refColumnPopUpButton, items: columnNames, selecting: nil)
         validate()
+    }
+
+    private func singleColumnUniqueReferenceColumns(for table: String, database: String, connection: SPMySQLConnection) -> Set<String> {
+        let cacheKey = "\(database)\u{0}\(table)"
+        if let cachedColumns = standardReferenceColumnCache[cacheKey] {
+            return cachedColumns
+        }
+
+        let columns = SALightweightSchemaMetadataLoader.singleColumnUniqueReferenceColumns(for: table,
+                                                                                          database: database,
+                                                                                          connection: connection)
+        standardReferenceColumnCache[cacheKey] = columns
+        return columns
     }
 
     private func validate() {
@@ -1446,6 +1491,57 @@ private enum SALightweightMetadataReadService {
 }
 
 enum SALightweightSchemaMetadataLoader {
+    fileprivate static func serverRequiresStandardForeignKeyReferences(connection: SPMySQLConnection) -> Bool {
+        let serverMajorVersion = connection.serverMajorVersion()
+        let serverMinorVersion = connection.serverMinorVersion()
+        let serverVersionIsAtLeast84 = serverMajorVersion > 8
+            || (serverMajorVersion == 8 && serverMinorVersion >= 4)
+        guard !connection.isMariaDB(), serverVersionIsAtLeast84 else { return false }
+
+        let result = connection.queryString("SELECT @@session.restrict_fk_on_non_standard_key")
+        result?.returnDataAsStrings = true
+
+        let restrictionQueryErrored = connection.queryErrored()
+        let restrictionValue = restrictionQueryErrored ? nil : result?.getRowAsArray()?.first
+        return SAForeignKeyReferenceRuleSupport.requiresStandardForeignKeyReferences(isMariaDB: connection.isMariaDB(),
+                                                                                     serverVersionIsAtLeast84: true,
+                                                                                     restrictionQueryErrored: restrictionQueryErrored,
+                                                                                     restrictionValue: restrictionValue)
+    }
+
+    fileprivate static func singleColumnUniqueReferenceColumns(for table: String, database: String, connection: SPMySQLConnection) -> Set<String> {
+        guard !table.isEmpty else { return [] }
+
+        var tableReference = sqlIdentifier(table)
+        if !database.isEmpty {
+            tableReference = "\(sqlIdentifier(database)).\(sqlIdentifier(table))"
+        }
+
+        let changeEncoding = !(connection.encoding()?.hasPrefix("utf8") ?? false)
+        if changeEncoding {
+            connection.storeEncodingForRestoration()
+            _ = connection.setEncoding("utf8mb4")
+        }
+        defer {
+            if changeEncoding {
+                connection.restoreStoredEncoding()
+            }
+        }
+
+        guard let result = connection.queryString("SHOW INDEX FROM \(tableReference)") else { return [] }
+        result.returnDataAsStrings = true
+
+        var indexRows: [NSDictionary] = []
+        while let row = result.getRowAsDictionary() {
+            indexRows.append(row as NSDictionary)
+        }
+
+        guard !connection.queryErrored() else { return [] }
+
+        let columns = SAForeignKeyReferenceRuleSupport.singleColumnUniqueReferenceColumns(indexRows as NSArray)
+        return Set(columns.compactMap { $0 as? String })
+    }
+
     fileprivate static func relationConstraintNames(for table: String, database: String, connection: SPMySQLConnection) -> Set<String> {
         let query = """
             SELECT CONSTRAINT_NAME \
