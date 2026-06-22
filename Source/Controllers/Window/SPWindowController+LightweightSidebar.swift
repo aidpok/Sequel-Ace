@@ -378,7 +378,21 @@ extension SPWindowController {
         isRestoringLightweightHistory = false
     }
 
+    func invalidateLightweightSidebarRowCache() {
+        lightweightSidebarRowsCache = nil
+    }
+
     func lightweightSidebarRows() -> [SALightweightSidebarRow] {
+        if let cachedRows = lightweightSidebarRowsCache {
+            return cachedRows
+        }
+
+        let rows = rebuildLightweightSidebarRows()
+        lightweightSidebarRowsCache = rows
+        return rows
+    }
+
+    private func rebuildLightweightSidebarRows() -> [SALightweightSidebarRow] {
         let tableHeader = lightweightTableTypes.values.contains(.view)
             ? NSLocalizedString("TABLES & VIEWS", comment: "header for table & views list")
             : NSLocalizedString("TABLES", comment: "header for table list")
