@@ -113,6 +113,8 @@ struct SALightweightSQLImportResult {
 
 @objcMembers
 private final class SALightweightQueryTablesListProxy: NSObject {
+    weak var queryController: SALightweightQueryViewController?
+
     private(set) var selectedDatabase: String?
     private(set) var tableName: String?
     private(set) var allTableAndViewNames: [String] = []
@@ -123,6 +125,19 @@ private final class SALightweightQueryTablesListProxy: NSObject {
     private(set) var allDatabaseNames: [String] = []
     private(set) var allSystemDatabaseNames: [String] = []
     private(set) var allFieldNames: [String] = []
+
+    init(queryController: SALightweightQueryViewController) {
+        self.queryController = queryController
+        super.init()
+    }
+
+    var completionConnectionID: String {
+        return queryController?.completionConnectionID ?? "_"
+    }
+
+    var completionFieldNames: [String] {
+        return allFieldNames
+    }
 
     func update(database: String?,
                 table: String?,
@@ -245,7 +260,7 @@ final class SALightweightQueryViewController: NSViewController {
     private var fieldEditorTextSelectedRange = NSRange(location: 0, length: 0)
     private var isFieldEditorPresented = false
     private lazy var favoriteDocumentProxy = SALightweightQueryFavoriteDocumentProxy(queryController: self)
-    private let completionTablesListProxy = SALightweightQueryTablesListProxy()
+    private lazy var completionTablesListProxy = SALightweightQueryTablesListProxy(queryController: self)
     private let maxDisplayedRows = 10_000
     private let initialQueryRowPublishSize = 40
     private let remainingQueryRowPublishSize = 1_000
@@ -294,7 +309,12 @@ final class SALightweightQueryViewController: NSViewController {
     var queryExecutionDidEnd: (() -> Void)?
     var tableDocumentInstance: Any { favoriteDocumentProxy }
     var tablesListInstance: Any { completionTablesListProxy }
+    var completionProvider: Any { completionTablesListProxy }
     var textView: SPTextView { queryTextView }
+    var completionConnectionID: String {
+        guard let windowController = view.window?.windowController as? SPWindowController else { return "_" }
+        return windowController.lightweightNavigatorConnectionID()
+    }
 
     @discardableResult
     func ensureDocumentURLForLegacyQueryConsumers() -> URL? {

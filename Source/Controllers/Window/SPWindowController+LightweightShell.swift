@@ -332,8 +332,18 @@ extension SPWindowController {
     }
 
     @discardableResult
-    func performExplicitLegacyFallback(reason: String, selectingDatabase database: String? = nil, item: String? = nil) -> SPDatabaseDocument {
-        NSLog("Lightweight window switching to legacy database view: %@", reason)
+    func performExplicitLegacyFallback(reason: String,
+                                       selectingDatabase database: String? = nil,
+                                       item: String? = nil,
+                                       source: String = "Swift explicit legacy fallback",
+                                       file: StaticString = #fileID,
+                                       function: StaticString = #function,
+                                       line: UInt = #line) -> SPDatabaseDocument {
+        recordLightweightDBViewFallback(reason: reason,
+                                        source: source,
+                                        file: file,
+                                        function: function,
+                                        line: line)
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: database, item: item)
     }
 

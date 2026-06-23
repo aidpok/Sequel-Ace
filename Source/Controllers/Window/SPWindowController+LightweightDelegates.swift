@@ -4,20 +4,34 @@
 //
 
 import Cocoa
+import ObjectiveC
+
+private var lightweightCSVImportSourceReturnURLAssociationKey: UInt8 = 0
 
 final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDelegate {
+    enum ImportFormat: Int {
+        case automatic
+        case sql
+        case csv
+        case tsv
+    }
+
     private enum Layout {
         static let width: CGFloat = 384
         static let verticalPadding: CGFloat = 8
+        static let formatHeight: CGFloat = 34
         static let csvTitleHeight: CGFloat = 18
     }
 
     let encodingAccessory: SALightweightSQLImportEncodingAccessory
     let csvAccessory: SALightweightCSVImportAccessory
 
-    private let rootView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.width, height: 240))
+    private let rootView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.width, height: 282))
     private let stackView = NSStackView()
+    private let formatView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.width, height: Layout.formatHeight))
+    private let formatPopup = NSPopUpButton(frame: NSRect(x: 74, y: 4, width: 246, height: 26), pullsDown: false)
     private let csvTitleLabel = NSTextField(labelWithString: NSLocalizedString("CSV/TSV Options", comment: "lightweight CSV import accessory title"))
+    private var selectedURL: URL?
 
     var view: NSView {
         return rootView
@@ -25,6 +39,10 @@ final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDele
 
     var selectedEncoding: String.Encoding {
         return encodingAccessory.selectedEncoding
+    }
+
+    private var selectedImportFormat: ImportFormat {
+        return ImportFormat(rawValue: formatPopup.selectedItem?.tag ?? ImportFormat.automatic.rawValue) ?? .automatic
     }
 
     init(selectedEncoding: String.Encoding, initialURL: URL? = nil) {
@@ -42,6 +60,45 @@ final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDele
         return csvAccessory.saveSettings()
     }
 
+    @discardableResult
+    func saveCSVSettings(for url: URL) -> SALightweightCSVImportSettings {
+        var settings = csvAccessory.saveSettings()
+        if selectedImportFormat == .tsv {
+            settings.fieldTerminator = "\t"
+        } else if selectedImportFormat == .automatic {
+            settings = settings.applyingFileTypeInference(from: url)
+        }
+        return settings
+    }
+
+    func importFileKind(for url: URL) -> SPWindowController.LightweightImportFileKind? {
+        switch selectedImportFormat {
+        case .automatic:
+            return SPWindowController.lightweightImportFileKind(for: url)
+        case .sql:
+            return .sql
+        case .csv, .tsv:
+            return .csv
+        }
+    }
+
+    func needsTemporaryCSVImportCopy(for url: URL) -> Bool {
+        guard selectedImportFormat == .csv || selectedImportFormat == .tsv else { return false }
+        return !SALightweightCSVImportController.isSupportedFileURL(url)
+    }
+
+    func temporaryCSVFileExtension(for url: URL) -> String {
+        let baseExtension = selectedImportFormat == .tsv ? "tsv" : "csv"
+        let lowercasedName = url.lastPathComponent.lowercased()
+        if lowercasedName.hasSuffix(".gz") {
+            return "\(baseExtension).gz"
+        }
+        if lowercasedName.hasSuffix(".bz2") {
+            return "\(baseExtension).bz2"
+        }
+        return baseExtension
+    }
+
     func panelSelectionDidChange(_ sender: Any?) {
         guard let panel = sender as? NSOpenPanel else { return }
         updateSelection(for: panel.url)
@@ -50,8 +107,7 @@ final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDele
     func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
         if url.hasDirectoryPath { return true }
 
-        return SPWindowController.isLightweightSQLImportFileURL(url)
-            || SALightweightCSVImportController.isSupportedFileURL(url)
+        return true
     }
 
     private func configureView() {
@@ -66,7 +122,9 @@ final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDele
         csvTitleLabel.font = NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)
         csvTitleLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        configureFormatView()
         stackView.addArrangedSubview(encodingAccessory.view)
+        stackView.addArrangedSubview(formatView)
         stackView.addArrangedSubview(csvTitleLabel)
         stackView.addArrangedSubview(csvAccessory.rootView)
 
@@ -80,14 +138,61 @@ final class SALightweightImportOpenPanelAccessory: NSObject, NSOpenSavePanelDele
         ])
     }
 
+    private func configureFormatView() {
+        formatView.widthAnchor.constraint(equalToConstant: Layout.width).isActive = true
+        formatView.heightAnchor.constraint(equalToConstant: Layout.formatHeight).isActive = true
+
+        let label = NSTextField(labelWithString: NSLocalizedString("Format:", comment: "lightweight import format popup label"))
+        label.frame = NSRect(x: 0, y: 8, width: 68, height: 18)
+        label.alignment = .right
+        formatView.addSubview(label)
+
+        formatPopup.addItem(withTitle: NSLocalizedString("Automatic", comment: "lightweight import automatic format menu item"))
+        formatPopup.lastItem?.tag = ImportFormat.automatic.rawValue
+        formatPopup.addItem(withTitle: NSLocalizedString("SQL", comment: "lightweight import SQL format menu item"))
+        formatPopup.lastItem?.tag = ImportFormat.sql.rawValue
+        formatPopup.addItem(withTitle: NSLocalizedString("CSV", comment: "lightweight import CSV format menu item"))
+        formatPopup.lastItem?.tag = ImportFormat.csv.rawValue
+        formatPopup.addItem(withTitle: NSLocalizedString("TSV", comment: "lightweight import TSV format menu item"))
+        formatPopup.lastItem?.tag = ImportFormat.tsv.rawValue
+        formatPopup.target = self
+        formatPopup.action = #selector(importFormatChanged(_:))
+        formatView.addSubview(formatPopup)
+    }
+
+    @objc private func importFormatChanged(_ sender: Any?) {
+        updateSelection(for: selectedURL)
+    }
+
     private func updateSelection(for url: URL?) {
-        let isCSV = url.map { SALightweightCSVImportController.isSupportedFileURL($0) } ?? false
+        selectedURL = url
+
+        let isCSV = importFileKind(for: url) == .csv
         csvTitleLabel.isHidden = !isCSV
         csvAccessory.rootView.isHidden = !isCSV
 
         if isCSV {
-            _ = csvAccessory.loadCurrentSettings(inferringFrom: url)
+            var settings = csvAccessory.loadCurrentSettings(inferringFrom: selectedImportFormat == .automatic ? url : nil)
+            if selectedImportFormat == .tsv {
+                settings.fieldTerminator = "\t"
+                csvAccessory.updateUI(with: settings)
+            }
         }
+    }
+
+    private func importFileKind(for url: URL?) -> SPWindowController.LightweightImportFileKind? {
+        guard let url else {
+            switch selectedImportFormat {
+            case .csv, .tsv:
+                return .csv
+            case .sql:
+                return .sql
+            case .automatic:
+                return nil
+            }
+        }
+
+        return importFileKind(for: url)
     }
 }
 
@@ -438,8 +543,8 @@ extension SPWindowController {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = NSLocalizedString("Import", comment: "import title")
-        alert.informativeText = NSLocalizedString("Lightweight import supports SQL, CSV, and TSV files. Full database view fallback is available only if you choose it.", comment: "lightweight import route choice message")
-        alert.addButton(withTitle: NSLocalizedString("Choose Import File", comment: "lightweight import choose file button"))
+        alert.informativeText = NSLocalizedString("Lightweight import handles SQL, CSV, and TSV files without loading the full database view. Use the full database view only for legacy import options that are not supported here.", comment: "lightweight import route choice message")
+        alert.addButton(withTitle: NSLocalizedString("Choose Lightweight Import File", comment: "lightweight import choose file button"))
         alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
 
@@ -453,31 +558,35 @@ extension SPWindowController {
         }
     }
 
-    func lightweightImportFileKind(for url: URL) -> LightweightImportFileKind? {
+    static func lightweightImportFileKind(for url: URL) -> LightweightImportFileKind? {
         if isLightweightSQLImportFileURL(url) {
             return .sql
         }
 
-        if isLightweightCSVImportFileURL(url) {
+        if SALightweightCSVImportController.isSupportedFileURL(url) {
             return .csv
         }
 
         return nil
     }
 
-    func validateLightweightImportFileURL(_ url: URL) -> Bool {
-        guard lightweightImportFileKind(for: url) != nil else {
+    func lightweightImportFileKind(for url: URL) -> LightweightImportFileKind? {
+        return Self.lightweightImportFileKind(for: url)
+    }
+
+    func validateLightweightImportFileURL(_ url: URL, importKind: LightweightImportFileKind? = nil) -> Bool {
+        guard importKind ?? lightweightImportFileKind(for: url) != nil else {
             NSSound.beep()
             showLightweightError(title: NSLocalizedString("Import Unsupported", comment: "lightweight import unsupported file title"),
-                                 message: NSLocalizedString("Lightweight import supports .sql, .sql.gz, .sql.bz2, .csv, .csv.gz, .csv.bz2, .tsv, .tsv.gz, and .tsv.bz2 files.", comment: "lightweight import unsupported file message"))
+                                 message: NSLocalizedString("This file was not imported. Lightweight import supports .sql, .sql.gz, .sql.bz2, .csv, .csv.gz, .csv.bz2, .tsv, .tsv.gz, and .tsv.bz2 files. Run Import again and choose the full database view only if this file needs the legacy importer.", comment: "lightweight import unsupported file message"))
             return false
         }
 
         return true
     }
 
-    func startLegacyFileImportFlow() {
-        performExplicitLegacyFallback(reason: "User chose full database import flow", selectingDatabase: selectedDatabase, item: selectedTable).importFile()
+    func startLegacyFileImportFlow(reason: String = "User chose full database import flow from lightweight import router") {
+        performExplicitLegacyFallback(reason: reason, selectingDatabase: selectedDatabase, item: selectedTable).importFile()
     }
 
     func confirmLightweightSQLImport(sourceName: String) -> Bool {
@@ -536,25 +645,42 @@ extension SPWindowController {
         return true
     }
 
-    func startLightweightImport(url: URL, encoding: String.Encoding, csvSettings: SALightweightCSVImportSettings? = nil) {
-        guard validateLightweightImportFileURL(url) else { return }
+    func startLightweightImport(url: URL, encoding: String.Encoding, csvSettings: SALightweightCSVImportSettings? = nil, importKind: LightweightImportFileKind? = nil, sourceName: String? = nil, sourceReturnURL: URL? = nil) {
+        guard validateLightweightImportFileURL(url, importKind: importKind) else { return }
 
-        switch lightweightImportFileKind(for: url) {
+        switch importKind ?? lightweightImportFileKind(for: url) {
         case .sql:
             guard validateLightweightSQLImportFileSize(url: url) else { return }
-            guard confirmLightweightSQLImport(sourceName: url.lastPathComponent) else { return }
-            startLightweightSQLImport(url: url, encoding: encoding)
+            guard confirmLightweightSQLImport(sourceName: sourceName ?? url.lastPathComponent) else { return }
+            guard let resolvedEncoding = resolvedLightweightSQLImportEncoding(for: url, selectedEncoding: encoding) else {
+                NSSound.beep()
+                showLightweightError(title: NSLocalizedString("File read error", comment: "File read error title (Import Dialog)"),
+                                     message: NSLocalizedString("The SQL file encoding could not be detected. Choose an explicit encoding and try again.", comment: "lightweight SQL import autodetect read error"))
+                return
+            }
+            startLightweightSQLImport(url: url, encoding: resolvedEncoding, sourceName: sourceName)
         case .csv:
             startLightweightCSVImport(url: url,
                                       encoding: encoding,
-                                      settings: csvSettings ?? SALightweightCSVImportSettings.load(inferringFrom: url))
+                                      settings: csvSettings ?? SALightweightCSVImportSettings.load(inferringFrom: url),
+                                      sourceName: sourceName,
+                                      sourceReturnURL: sourceReturnURL)
         case .none:
             return
         }
     }
 
+    func resolvedLightweightSQLImportEncoding(for url: URL, selectedEncoding: String.Encoding) -> String.Encoding? {
+        guard selectedEncoding.rawValue == 0 else { return selectedEncoding }
+
+        let detectedEncoding = FileManager.default.detectEncodingforFile(atPath: url.path)
+        guard detectedEncoding != 0 else { return nil }
+
+        return String.Encoding(rawValue: detectedEncoding)
+    }
+
     @discardableResult
-    func startLightweightCSVImport(url: URL, encoding: String.Encoding = String.Encoding(rawValue: 0), settings: SALightweightCSVImportSettings, sourceName: String? = nil) -> Bool {
+    func startLightweightCSVImport(url: URL, encoding: String.Encoding = String.Encoding(rawValue: 0), settings: SALightweightCSVImportSettings, sourceName: String? = nil, sourceReturnURL: URL? = nil) -> Bool {
         guard !isLightweightConnectionBusyForImport(), let activeConnection, let database = selectedDatabase else {
             showLightweightImportUnavailableReason()
             return false
@@ -565,6 +691,7 @@ extension SPWindowController {
                                                          selectedTableName: selectedTable,
                                                          tableNames: lightweightTables,
                                                          fileURL: url)
+        setLightweightCSVImportSourceReturnURL(sourceReturnURL, for: controller)
         controller.sourceEncoding = encoding.rawValue
         controller.captureSettings(withFieldTerminator: settings.fieldTerminator,
                                    lineTerminator: settings.lineTerminator,
@@ -593,7 +720,7 @@ extension SPWindowController {
                         let sourceReturnRequest = controller.fieldMappingSourceReturnRequest
                         let shouldReturnToSource = sourceReturnRequest != .none
                         let preservedSettings = self.lightweightCSVImportSettings(from: controller, fallback: settings)
-                        let selectedSourceURL = sourceReturnRequest == .file ? controller.fileURL : nil
+                        let selectedSourceURL = sourceReturnRequest == .file ? self.lightweightCSVImportSourceReturnURL(for: controller) : nil
                         let clipboardKind = self.lightweightClipboardImportKind(forCSVImportURL: controller.fileURL,
                                                                                  settings: preservedSettings)
 
@@ -680,6 +807,14 @@ extension SPWindowController {
         activeLightweightCSVImportController = controller
         isLightweightImportRunning = true
         processing = true
+    }
+
+    func setLightweightCSVImportSourceReturnURL(_ url: URL?, for controller: SALightweightCSVImportController) {
+        objc_setAssociatedObject(controller, &lightweightCSVImportSourceReturnURLAssociationKey, url, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    func lightweightCSVImportSourceReturnURL(for controller: SALightweightCSVImportController) -> URL? {
+        return objc_getAssociatedObject(controller, &lightweightCSVImportSourceReturnURLAssociationKey) as? URL ?? controller.fileURL
     }
 
     @discardableResult
@@ -818,7 +953,7 @@ extension SPWindowController {
         alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
 
         if runLightweightModalAlert(alert) == .alertSecondButtonReturn {
-            startLegacyFileImportFlow()
+            startLegacyFileImportFlow(reason: "User chose full database import flow after lightweight CSV import failure")
         }
     }
 
@@ -841,12 +976,16 @@ extension SPWindowController {
         _ = runLightweightModalAlert(alert)
     }
 
-    func startLightweightSQLImport(url: URL, encoding: String.Encoding) {
+    func startLightweightSQLImport(url: URL, encoding: String.Encoding, sourceName: String? = nil, removeTemporaryFileWhenFinished: Bool = false) {
         guard !isLightweightConnectionBusyForImport(), let activeConnection, let database = selectedDatabase else {
+            if removeTemporaryFileWhenFinished {
+                try? FileManager.default.removeItem(at: url)
+            }
             showLightweightImportUnavailableReason()
             return
         }
 
+        let displaySourceName = sourceName ?? url.lastPathComponent
         let fieldNames = selectedTable.flatMap { table in
             lightweightStructureController.cachedColumnMetadata(for: table, database: database)
         }?.compactMap { $0["name"] } ?? []
@@ -869,10 +1008,13 @@ extension SPWindowController {
                                                            errorChoice: { [weak self] error in
                                                                self?.lightweightSQLImportErrorChoice(error) ?? .stop
                                                            },
-                                                           charsetErrorChoice: { [weak self] in
-                                                               self?.confirmLightweightCharsetImportError() ?? false
-                                                           }) { [weak self] result in
+                                                            charsetErrorChoice: { [weak self] in
+                                                                self?.confirmLightweightCharsetImportError() ?? false
+                                                            }) { [weak self] result in
             guard let self else { return }
+            if removeTemporaryFileWhenFinished {
+                try? FileManager.default.removeItem(at: url)
+            }
 
             self.isLightweightImportRunning = false
             self.processing = false
@@ -893,9 +1035,9 @@ extension SPWindowController {
             } else if result.errors.isEmpty {
                 let alert = NSAlert()
                 alert.messageText = NSLocalizedString("Import Complete", comment: "lightweight SQL import complete title")
-                alert.informativeText = String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), result.queriesPerformed, url.lastPathComponent)
+                alert.informativeText = String(format: NSLocalizedString("Imported %ld SQL statements from %@.", comment: "lightweight SQL import complete message"), result.queriesPerformed, displaySourceName)
                 alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
-                self.deliverLightweightSQLImportFinishedNotification(sourceName: url.lastPathComponent)
+                self.deliverLightweightSQLImportFinishedNotification(sourceName: displaySourceName)
                 _ = self.runLightweightModalAlert(alert)
             } else {
                 self.showLightweightSQLImportErrors(result.errors.joined(separator: "\n"))

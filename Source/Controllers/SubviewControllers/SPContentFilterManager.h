@@ -37,6 +37,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSURL *)contentFilterFileURL;
 - (BOOL)contentFilterIsUntitled;
 - (nullable id)contentFilterCustomQueryInstance;
+
+@optional
+- (nullable NSDictionary *)contentFiltersForFileURL:(NSURL *)fileURL;
+- (void)replaceContentFilterByArray:(NSArray *)contentFilterArray ofType:(NSString *)filterType forFileURL:(NSURL *)fileURL;
 @end
 
 @interface SPContentFilterManager : NSWindowController <NSOpenSavePanelDelegate>

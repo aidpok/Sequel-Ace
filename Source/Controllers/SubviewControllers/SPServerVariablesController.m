@@ -31,7 +31,6 @@
 #import "SPServerVariablesController.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPDatabaseDocument.h"
-#import "SPAppController.h"
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -155,8 +154,12 @@
 
 - (NSString *)_serverDisplayName
 {
-    SPDatabaseDocument *frontDocument = [SPAppDelegate frontDocument];
-    NSString *displayName = [frontDocument host];
+    NSString *displayName = nil;
+
+    id connectionDelegate = [connection delegate];
+    if ([connectionDelegate isKindOfClass:[SPDatabaseDocument class]]) {
+        displayName = [(SPDatabaseDocument *)connectionDelegate host];
+    }
 
     if (![displayName length]) {
         displayName = [connection host];

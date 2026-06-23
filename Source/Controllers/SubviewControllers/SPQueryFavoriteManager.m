@@ -33,8 +33,6 @@
 #import "ImageAndTextCell.h"
 #import "SPEncodingPopupAccessory.h"
 #import "SPQueryController.h"
-#import "SPDatabaseDocument.h"
-#import "SPConnectionController.h"
 #import "RegexKitLite.h"
 #import "SPTextView.h"
 #import "SPSplitView.h"
@@ -46,21 +44,32 @@
 #define SP_MULTIPLE_SELECTION_PLACEHOLDER_STRING NSLocalizedString(@"[multiple selection]", @"[multiple selection]")
 #define SP_NO_SELECTION_PLACEHOLDER_STRING       NSLocalizedString(@"[no selection]", @"[no selection]")
 
-@interface SPDatabaseDocumentQueryFavoriteContext : NSObject <SPQueryFavoriteManagerContext>
+@protocol SPQueryFavoriteLegacyDelegateContext <NSObject>
+- (nullable id)tableDocumentInstance;
+@end
+
+@protocol SPQueryFavoriteLegacyDocumentContext <NSObject>
+@optional
+- (nullable NSURL *)fileURL;
+- (BOOL)isUntitled;
+- (nullable id)customQueryInstance;
+@end
+
+@interface SPLegacyDocumentQueryFavoriteContext : NSObject <SPQueryFavoriteManagerContext>
 {
-	SPDatabaseDocument *databaseDocument;
+	id <SPQueryFavoriteLegacyDocumentContext> documentContext;
 }
 
-- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document;
+- (instancetype)initWithDocumentContext:(id)document;
 
 @end
 
-@implementation SPDatabaseDocumentQueryFavoriteContext
+@implementation SPLegacyDocumentQueryFavoriteContext
 
-- (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document
+- (instancetype)initWithDocumentContext:(id)document
 {
 	if ((self = [super init])) {
-		databaseDocument = document;
+		documentContext = (id <SPQueryFavoriteLegacyDocumentContext>)document;
 	}
 
 	return self;
@@ -68,17 +77,27 @@
 
 - (NSURL *)queryFavoriteFileURL
 {
-	return [databaseDocument fileURL];
+	if (![documentContext respondsToSelector:@selector(fileURL)]) return nil;
+
+	return [documentContext fileURL];
 }
 
 - (BOOL)queryFavoriteIsUntitled
 {
-	return [databaseDocument isUntitled] || ![databaseDocument fileURL];
+	BOOL isUntitled = YES;
+
+	if ([documentContext respondsToSelector:@selector(isUntitled)]) {
+		isUntitled = [documentContext isUntitled];
+	}
+
+	return isUntitled || ![self queryFavoriteFileURL];
 }
 
 - (id)queryFavoriteCustomQueryInstance
 {
-	return [databaseDocument customQueryInstance];
+	if (![documentContext respondsToSelector:@selector(customQueryInstance)]) return nil;
+
+	return [documentContext customQueryInstance];
 }
 
 @end
@@ -86,6 +105,8 @@
 @interface SPQueryFavoriteManager ()
 
 - (void)_initWithNoSelection;
+- (NSArray *)_documentQueryFavoritesForFileURL:(NSURL *)fileURL;
+- (void)_replaceDocumentQueryFavorites:(NSArray *)queryFavorites forFileURL:(NSURL *)fileURL;
 
 @end
 
@@ -102,12 +123,37 @@
 		return nil;
 	}
 
-	id delegateContext = [managerDelegate valueForKeyPath:@"tableDocumentInstance"];
+	if ([managerDelegate conformsToProtocol:@protocol(SPQueryFavoriteManagerContext)]) {
+		return [self initWithQueryFavoriteContext:managerDelegate];
+	}
+
+	if ([managerDelegate respondsToSelector:@selector(queryFavoriteManagerContext)]) {
+		id <SPQueryFavoriteManagerContext> providedContext = [(id <SPQueryFavoriteManagerContextProviding>)managerDelegate queryFavoriteManagerContext];
+
+		if (providedContext) {
+			return [self initWithQueryFavoriteContext:providedContext];
+		}
+	}
+
+	id delegateContext = nil;
+
+	if ([managerDelegate respondsToSelector:@selector(tableDocumentInstance)]) {
+		delegateContext = [(id <SPQueryFavoriteLegacyDelegateContext>)managerDelegate tableDocumentInstance];
+	}
+	else {
+		@try {
+			delegateContext = [managerDelegate valueForKeyPath:@"tableDocumentInstance"];
+		}
+		@catch (NSException *exception) {
+			delegateContext = nil;
+		}
+	}
+
 	if ([delegateContext conformsToProtocol:@protocol(SPQueryFavoriteManagerContext)]) {
 		return [self initWithQueryFavoriteContext:delegateContext];
 	}
 
-	return [self initWithQueryFavoriteContext:[[SPDatabaseDocumentQueryFavoriteContext alloc] initWithDatabaseDocument:delegateContext]];
+	return [self initWithQueryFavoriteContext:[[SPLegacyDocumentQueryFavoriteContext alloc] initWithDocumentContext:delegateContext]];
 }
 
 /**
@@ -171,8 +217,10 @@
 			@"", @"query",
 			nil]];
 
-		if([[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL]) {
-			for(id fav in [[SPQueryController sharedQueryController] favoritesForFileURL:delegatesFileURL])
+		NSArray *documentFavorites = [self _documentQueryFavoritesForFileURL:delegatesFileURL];
+
+		if(documentFavorites) {
+			for(id fav in documentFavorites)
 				[favorites addObject:[fav mutableCopy]];
 		}
 	}
@@ -512,9 +560,7 @@
 		}
 
 		if (delegatesFileURL) {
-			// Update current document's query favorites in the SPQueryController
-			[[SPQueryController sharedQueryController] replaceFavoritesByArray:
-				[self queryFavoritesForFileURL:delegatesFileURL] forFileURL:delegatesFileURL];
+			[self _replaceDocumentQueryFavorites:[self queryFavoritesForFileURL:delegatesFileURL] forFileURL:delegatesFileURL];
 		}
 
 		// Update global preferences' list
@@ -931,6 +977,26 @@
 
 #pragma mark -
 #pragma mark Private API
+
+- (NSArray *)_documentQueryFavoritesForFileURL:(NSURL *)fileURL
+{
+	if ([queryFavoriteContext respondsToSelector:@selector(loadQueryFavoritesForFileURL:)]) {
+		NSArray *contextFavorites = [queryFavoriteContext loadQueryFavoritesForFileURL:fileURL];
+
+		if (contextFavorites) return contextFavorites;
+	}
+
+	return [[SPQueryController sharedQueryController] favoritesForFileURL:fileURL];
+}
+
+- (void)_replaceDocumentQueryFavorites:(NSArray *)queryFavorites forFileURL:(NSURL *)fileURL
+{
+	if ([queryFavoriteContext respondsToSelector:@selector(saveQueryFavorites:forFileURL:)]) {
+		if ([queryFavoriteContext saveQueryFavorites:queryFavorites forFileURL:fileURL]) return;
+	}
+
+	[[SPQueryController sharedQueryController] replaceFavoritesByArray:queryFavorites forFileURL:fileURL];
+}
 
 - (void)_initWithNoSelection
 {

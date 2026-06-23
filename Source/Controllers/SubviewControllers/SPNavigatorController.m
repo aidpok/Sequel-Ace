@@ -51,6 +51,7 @@ static SPNavigatorController *sharedNavigatorController = nil;
 @interface SPNavigatorController () <NSOutlineViewDataSource, NSOutlineViewDelegate>
 
 - (SPWindowController *)activeWindowController;
+- (BOOL)windowControllerHasActiveLightweightConnection:(SPWindowController *)windowController;
 - (SPDatabaseDocument *)databaseDocumentForWindowController:(SPWindowController *)windowController;
 - (NSString *)navigatorConnectionIDForWindowController:(SPWindowController *)windowController;
 - (NSUInteger)openConnectionTargetCountForConnectionID:(NSString *)connectionID;
@@ -293,6 +294,11 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 	return [[SPAppDelegate tabManager] activeWindowController];
 }
 
+- (BOOL)windowControllerHasActiveLightweightConnection:(SPWindowController *)windowController
+{
+	return windowController && [windowController hasActiveLightweightConnection];
+}
+
 - (SPDatabaseDocument *)databaseDocumentForWindowController:(SPWindowController *)windowController
 {
 	SPDatabaseDocument *databaseDocument = [windowController loadedDatabaseDocumentIfAvailable];
@@ -301,12 +307,12 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 
 - (NSString *)navigatorConnectionIDForWindowController:(SPWindowController *)windowController
 {
+	if([self windowControllerHasActiveLightweightConnection:windowController])
+		return [windowController lightweightNavigatorConnectionID];
+
 	SPDatabaseDocument *databaseDocument = [self databaseDocumentForWindowController:windowController];
 	if(databaseDocument)
 		return [databaseDocument connectionID];
-
-	if(windowController && [windowController hasActiveLightweightConnection])
-		return [windowController lightweightNavigatorConnectionID];
 
 	return nil;
 }
@@ -396,8 +402,7 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 		if([pathArray count] > 1) {
 
 			SPWindowController *windowController = [self activeWindowController];
-			SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
-			if(!doc && [windowController hasActiveLightweightConnection]) {
+			if([self windowControllerHasActiveLightweightConnection:windowController]) {
 				if([windowController isProcessing]) {
 					[SPTooltip showWithObject:NSLocalizedString(@"Active connection window is busy. Please wait and try again.", @"active connection window is busy. please wait and try again. tooltip")
 							atLocation:pos
@@ -417,6 +422,7 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 				}
 				return;
 			}
+			SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
 			if(!doc)
 				return;
 			if([doc isWorking]) {
@@ -666,7 +672,6 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 
 	// Reset everything for current active doc connection
 	SPWindowController *windowController = [self activeWindowController];
-	SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
 	NSString *connectionID = [self navigatorConnectionIDForWindowController:windowController];
 	if(!connectionID || [connectionID length] < 2) return;
 
@@ -684,19 +689,18 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 	[syncButton setState:NSControlStateValueOff];
 	isFiltered = NO;
 
-	if(doc) {
-		if (![[doc getConnection] isConnected]) return;
-
-		[[doc databaseStructureRetrieval] queryDbStructureInBackgroundWithUserInfo:@{@"forceUpdate" : @YES}];
-		return;
-	}
-
-	if([windowController hasActiveLightweightConnection]) {
+	if([self windowControllerHasActiveLightweightConnection:windowController]) {
 		[windowController refreshLightweightDatabases];
 		[windowController refreshLightweightTables];
 		[self updateEntriesForLightweightWindowController:windowController];
 		[self performSelector:@selector(updateEntriesForLightweightWindowController:) withObject:windowController afterDelay:0.25];
+		return;
 	}
+
+	SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
+	if(!doc || ![[doc getConnection] isConnected]) return;
+
+	[[doc databaseStructureRetrieval] queryDbStructureInBackgroundWithUserInfo:@{@"forceUpdate" : @YES}];
 }
 
 - (IBAction)outlineViewAction:(id)sender
@@ -829,8 +833,16 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 		}
 
 		SPWindowController *windowController = [self activeWindowController];
-		SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
-		if (doc) {
+		if([self windowControllerHasActiveLightweightConnection:windowController]) {
+			NSString *key = [windowController lightweightNavigatorSelectedPath];
+			if([key length]) {
+				[self selectPath:key];
+			}
+		} else {
+			SPDatabaseDocument *doc = [self databaseDocumentForWindowController:windowController];
+			if(!doc)
+				return;
+
 			NSMutableString *key = [NSMutableString string];
 			[key setString:[doc connectionID]];
 			if([doc database] && [(NSString*)[doc database] length]){
@@ -842,13 +854,6 @@ static NSComparisonResult compareStrings(NSString *s1, NSString *s2, void* conte
 				[key appendString:[doc table]];
 			}
 			[self selectPath:key];
-		} else {
-			if([windowController hasActiveLightweightConnection]) {
-				NSString *key = [windowController lightweightNavigatorSelectedPath];
-				if([key length]) {
-					[self selectPath:key];
-				}
-			}
 		}
 	}
 }

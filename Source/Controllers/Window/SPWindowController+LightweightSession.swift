@@ -145,6 +145,7 @@ extension SPWindowController {
         guard let favoriteDictionary = favoriteDictionary else { return false }
 
         let info = SAConnectionInfoObjC.info(fromFavoriteDictionary: favoriteDictionary)
+        hydrateLightweightKeychainReferences(in: info, fromFavoriteDictionary: favoriteDictionary)
         return applyLightweightConnectionInfo(info, autoConnect: autoConnect)
     }
 
@@ -169,6 +170,37 @@ extension SPWindowController {
             connectionController.initiateConnection(nil)
         }
         return true
+    }
+
+    private func hydrateLightweightKeychainReferences(in info: SAConnectionInfoObjC, fromFavoriteDictionary favoriteDictionary: NSDictionary) {
+        let favoriteID = Self.stringValue(favoriteDictionary[SPFavoriteIDKey])
+        guard !favoriteID.isEmpty else { return }
+
+        info.connectionKeychainID = favoriteID
+
+        let favoriteName = Self.stringValue(favoriteDictionary[SPFavoriteNameKey])
+        guard !favoriteName.isEmpty else { return }
+
+        let keychain = SPKeychain()
+
+        if info.type != .vault {
+            let hostForKeychain = info.type == .socket ? "localhost" : info.host
+            let keychainName = keychain.name(forFavoriteName: favoriteName, id: favoriteID)
+            let keychainAccount = keychain.account(forUser: info.user, host: hostForKeychain, database: info.database)
+            if let keychainName, let keychainAccount, !keychainName.isEmpty, !keychainAccount.isEmpty {
+                info.connectionKeychainItemName = keychainName
+                info.connectionKeychainItemAccount = keychainAccount
+            }
+        }
+
+        if info.type != .vault {
+            let sshKeychainName = keychain.nameForSSH(forFavoriteName: favoriteName, id: favoriteID)
+            let sshKeychainAccount = keychain.account(forSSHUser: info.sshUser, sshHost: info.sshHost)
+            if let sshKeychainName, let sshKeychainAccount, !sshKeychainName.isEmpty, !sshKeychainAccount.isEmpty {
+                info.connectionSSHKeychainItemName = sshKeychainName
+                info.connectionSSHKeychainItemAccount = sshKeychainAccount
+            }
+        }
     }
 
     func lightweightConnectionDictionary(for info: SAConnectionInfoObjC, includePasswords: Bool) -> NSDictionary {

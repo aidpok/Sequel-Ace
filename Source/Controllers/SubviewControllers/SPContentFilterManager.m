@@ -56,6 +56,13 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 
 @end
 
+@interface SPContentFilterManager ()
+
+- (NSDictionary *)documentContentFiltersForFileURL:(NSURL *)fileURL;
+- (void)replaceDocumentContentFilters:(NSArray *)contentFilterArray ofType:(NSString *)compareType forFileURL:(NSURL *)fileURL;
+
+@end
+
 @implementation SPDatabaseDocumentContentFilterContext
 
 - (instancetype)initWithDatabaseDocument:(SPDatabaseDocument *)document
@@ -80,6 +87,16 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 - (id)contentFilterCustomQueryInstance
 {
 	return [databaseDocument customQueryInstance];
+}
+
+- (NSDictionary *)contentFiltersForFileURL:(NSURL *)fileURL
+{
+	return [[SPQueryController sharedQueryController] contentFilterForFileURL:fileURL];
+}
+
+- (void)replaceContentFilterByArray:(NSArray *)contentFilterArray ofType:(NSString *)compareType forFileURL:(NSURL *)fileURL
+{
+	[[SPQueryController sharedQueryController] replaceContentFilterByArray:contentFilterArray ofType:compareType forFileURL:fileURL];
 }
 
 @end
@@ -174,8 +191,8 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 			@"", @"Clause",
 			nil]];
 
-		if ([[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL]) {
-			id filters = [[SPQueryController sharedQueryController] contentFilterForFileURL:documentFileURL];
+		id filters = [self documentContentFiltersForFileURL:documentFileURL];
+		if (filters) {
 			if([filters objectForKey:filterType])
 				for(id fav in [filters objectForKey:filterType])
 					[contentFilters addObject:[fav mutableCopy]];
@@ -212,6 +229,30 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 
 #pragma mark -
 #pragma mark Accessor methods
+
+- (NSDictionary *)documentContentFiltersForFileURL:(NSURL *)fileURL
+{
+	if ([contentFilterContext respondsToSelector:@selector(contentFiltersForFileURL:)]) {
+		NSDictionary *filters = [contentFilterContext contentFiltersForFileURL:fileURL];
+
+		if (filters) {
+			return filters;
+		}
+	}
+
+	return [[SPQueryController sharedQueryController] contentFilterForFileURL:fileURL];
+}
+
+- (void)replaceDocumentContentFilters:(NSArray *)contentFilterArray ofType:(NSString *)compareType forFileURL:(NSURL *)fileURL
+{
+	if ([contentFilterContext respondsToSelector:@selector(replaceContentFilterByArray:ofType:forFileURL:)]) {
+		[contentFilterContext replaceContentFilterByArray:contentFilterArray ofType:compareType forFileURL:fileURL];
+
+		return;
+	}
+
+	[[SPQueryController sharedQueryController] replaceContentFilterByArray:contentFilterArray ofType:compareType forFileURL:fileURL];
+}
 
 /**
  * Returns the content filters array for fileURL.
@@ -476,9 +517,7 @@ static NSString *SPExportFilterAction = @"SPExportFilter";
 			[[self window] makeFirstResponder:contentFilterTableView];
 
 		if (documentFileURL) {
-			// Update current document's content filters in the SPQueryController
-			[[SPQueryController sharedQueryController] replaceContentFilterByArray:
-				[self contentFilterForFileURL:documentFileURL] ofType:filterType forFileURL:documentFileURL];
+			[self replaceDocumentContentFilters:[self contentFilterForFileURL:documentFileURL] ofType:filterType forFileURL:documentFileURL];
 		}
 
 		// Update global preferences' list

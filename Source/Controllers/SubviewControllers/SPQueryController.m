@@ -35,7 +35,6 @@
 #import "SPFunctions.h"
 #import "pthread.h"
 #import "SPCopyTable.h"
-#import "SPDatabaseDocument.h"
 
 @import FMDB;
 
@@ -53,6 +52,10 @@ static NSString *SPCompletionTokensFunctionsKey = @"core_builtin_functions";
 static NSString *SPCompletionTokensSnippetsKey  = @"function_argument_snippets";
 
 static NSUInteger SPMessageTruncateCharacterLength = 256;
+
+@protocol SPFileURLProviding <NSObject>
+- (NSURL *)fileURL;
+@end
 
 @interface SPQueryController ()
 
@@ -949,16 +952,21 @@ static SPQueryController *sharedQueryController = nil;
 	NSArray *allDocs = [SPAppDelegate orderedDocuments];
 	NSMutableArray *allURLs = [NSMutableArray array];
 
-	for (SPDatabaseDocument *databaseDocument in allDocs)
+	for (id document in allDocs)
 	{
-        if (![databaseDocument fileURL]) {
-            continue;
-        }
+		if (![document respondsToSelector:@selector(fileURL)]) {
+			continue;
+		}
 
-		if ([allURLs containsObject:[databaseDocument fileURL]]) {
+		NSURL *documentFileURL = [(id<SPFileURLProviding>)document fileURL];
+		if (!documentFileURL) {
+			continue;
+		}
+
+		if ([allURLs containsObject:documentFileURL]) {
 			return;
 		} else {
-			[allURLs addObject:[databaseDocument fileURL]];
+			[allURLs addObject:documentFileURL];
 		}
 	}
 

@@ -43,6 +43,15 @@
 
 @class SPWindow;
 
+@protocol SPFieldEditorControllerDelegate <NSObject>
+
+@optional
+- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary*)contextInfo;
+- (void)setFieldEditorSelectedRange:(NSRange)aRange;
+- (NSRange)fieldEditorSelectedRange;
+
+@end
+
 /**
  * @class SPFieldEditorController SPFieldEditorController.h
  *
@@ -152,7 +161,7 @@
 	IBOutlet NSTextField *bitSheetBitLabel56;
 
 	id usedSheet;
-	id callerInstance;
+	id <SPFieldEditorControllerDelegate> callerInstance;
 	NSDictionary *contextInfo;
 
 	id sheetEditData;
@@ -252,12 +261,5 @@
 - (void)setWasCutPaste;
 - (void)setAllowedUndo;
 - (void)setDoGroupDueToChars;
-
-@end
-
-@protocol SPFieldEditorControllerDelegate <NSObject>
-
-@optional
-- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary*)contextInfo;
 
 @end

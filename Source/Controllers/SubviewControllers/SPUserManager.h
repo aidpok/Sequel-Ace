@@ -89,6 +89,8 @@
 }
 
 @property (nonatomic, strong) SPMySQLConnection *connection;
+// Optional source for an already-known database list. If absent, the user manager
+// falls back to the active connection so lightweight windows do not need a legacy document.
 @property (nonatomic, weak) id<SPUserManagerDatabaseProviding> databaseProvider;
 @property (nonatomic, strong) SPServerSupport *serverSupport;
 @property (nonatomic, strong) NSPersistentStoreCoordinator *persistentStoreCoordinator;

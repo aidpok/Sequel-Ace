@@ -7,6 +7,113 @@ import Cocoa
 import ObjectiveC
 import UniformTypeIdentifiers
 
+private enum SALightweightDBViewFallbackDiagnostics {
+    static let reasonCountsDefaultsKey = "SALightweightDBViewFallbackReasonCounts"
+    static let sourceCountsDefaultsKey = "SALightweightDBViewFallbackSourceCounts"
+    static let totalCountDefaultsKey = "SALightweightDBViewFallbackTotalCount"
+    static let lastReasonDefaultsKey = "SALightweightDBViewFallbackLastReason"
+    static let lastSourceDefaultsKey = "SALightweightDBViewFallbackLastSource"
+    static let lastCallSiteDefaultsKey = "SALightweightDBViewFallbackLastCallSite"
+    static let lastRecordedAtDefaultsKey = "SALightweightDBViewFallbackLastRecordedAt"
+
+    private static let lock = NSLock()
+
+    static func record(reason: String,
+                       source: String,
+                       file: StaticString? = nil,
+                       function: StaticString? = nil,
+                       line: UInt? = nil) {
+        let fallbackReason = normalizedReason(reason)
+        let fallbackSource = normalizedSource(source)
+        let fallbackCallSite = callSite(file: file, function: function, line: line)
+        let defaults = UserDefaults.standard
+        let shouldLog = diagnosticsLoggingEnabled
+        let stackSignature = shouldLog ? currentStackSignature() : nil
+
+        let (reasonCount, sourceCount, totalCount): (Int, Int, Int) = {
+            lock.lock()
+            defer { lock.unlock() }
+
+            var reasonCounts = storedCounts(from: defaults, key: reasonCountsDefaultsKey)
+            let reasonCount = (reasonCounts[fallbackReason] ?? 0) + 1
+            reasonCounts[fallbackReason] = reasonCount
+
+            var sourceCounts = storedCounts(from: defaults, key: sourceCountsDefaultsKey)
+            let sourceCount = (sourceCounts[fallbackSource] ?? 0) + 1
+            sourceCounts[fallbackSource] = sourceCount
+
+            let totalCount = defaults.integer(forKey: totalCountDefaultsKey) + 1
+            defaults.set(reasonCounts, forKey: reasonCountsDefaultsKey)
+            defaults.set(sourceCounts, forKey: sourceCountsDefaultsKey)
+            defaults.set(totalCount, forKey: totalCountDefaultsKey)
+            defaults.set(fallbackReason, forKey: lastReasonDefaultsKey)
+            defaults.set(fallbackSource, forKey: lastSourceDefaultsKey)
+            if let fallbackCallSite {
+                defaults.set(fallbackCallSite, forKey: lastCallSiteDefaultsKey)
+            } else {
+                defaults.removeObject(forKey: lastCallSiteDefaultsKey)
+            }
+            defaults.set(Date(), forKey: lastRecordedAtDefaultsKey)
+            return (reasonCount, sourceCount, totalCount)
+        }()
+
+        guard shouldLog else { return }
+
+        let callSiteDescription = fallbackCallSite ?? "unknown"
+        let stackDescription = stackSignature ?? "unavailable"
+        NSLog("[SA UI Diagnostics] Lightweight window DBView fallback reason=%@ source=%@ callSite=%@ reasonCount=%ld sourceCount=%ld totalCount=%ld stack=%@",
+              fallbackReason,
+              fallbackSource,
+              callSiteDescription,
+              reasonCount,
+              sourceCount,
+              totalCount,
+              stackDescription)
+    }
+
+    private static var diagnosticsLoggingEnabled: Bool {
+        let environmentEnabled = ProcessInfo.processInfo.environment["SA_ENABLE_UI_DIAGNOSTICS"]
+            .map { ($0 as NSString).boolValue } ?? false
+        return environmentEnabled || UserDefaults.standard.bool(forKey: "SAEnableUIDiagnostics")
+    }
+
+    private static func normalizedReason(_ reason: String) -> String {
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedReason.isEmpty ? "Unspecified DBView fallback" : trimmedReason
+    }
+
+    private static func normalizedSource(_ source: String) -> String {
+        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedSource.isEmpty ? "Unspecified DBView fallback source" : trimmedSource
+    }
+
+    private static func callSite(file: StaticString?, function: StaticString?, line: UInt?) -> String? {
+        guard let file, let function, let line else { return nil }
+        return "\(file):\(line) \(function)"
+    }
+
+    private static func currentStackSignature() -> String {
+        return Thread.callStackSymbols
+            .dropFirst(2)
+            .prefix(12)
+            .joined(separator: " | ")
+    }
+
+    private static func storedCounts(from defaults: UserDefaults, key: String) -> [String: Int] {
+        guard let storedCounts = defaults.dictionary(forKey: key) else { return [:] }
+
+        var counts: [String: Int] = [:]
+        for (name, count) in storedCounts {
+            if let count = count as? Int {
+                counts[name] = count
+            } else if let count = count as? NSNumber {
+                counts[name] = count.intValue
+            }
+        }
+        return counts
+    }
+}
+
 @objc(SALightweightAppleScriptDocument)
 final class SALightweightAppleScriptDocument: NSObject {
     private weak var windowController: SPWindowController?
@@ -216,7 +323,27 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
 
     @objc(legacyDatabaseDocumentForExplicitFallbackWithReason:)
     func legacyDatabaseDocumentForExplicitFallback(reason: String) -> SPDatabaseDocument {
-        return performExplicitLegacyFallback(reason: reason, selectingDatabase: selectedDatabase, item: selectedTable)
+        return performExplicitLegacyFallback(reason: reason,
+                                             selectingDatabase: selectedDatabase,
+                                             item: selectedTable,
+                                             source: "Objective-C explicit legacy fallback")
+    }
+
+    @objc(recordLightweightDBViewFallbackWithReason:)
+    func recordLightweightDBViewFallback(reason: String) {
+        recordLightweightDBViewFallback(reason: reason, source: "Objective-C diagnostic bridge")
+    }
+
+    @nonobjc func recordLightweightDBViewFallback(reason: String,
+                                                  source: String,
+                                                  file: StaticString = #fileID,
+                                                  function: StaticString = #function,
+                                                  line: UInt = #line) {
+        SALightweightDBViewFallbackDiagnostics.record(reason: reason,
+                                                      source: source,
+                                                      file: file,
+                                                      function: function,
+                                                      line: line)
     }
 
     @objc func assignLightweightBundleProcessID(_ processID: String) {
@@ -873,7 +1000,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
             UserDefaults.standard.set(encodingNumber.uintValue, forKey: SPLastSQLFileEncoding)
         } else {
             let savedEncoding = UserDefaults.standard.integer(forKey: SPLastSQLFileEncoding)
-            encoding = savedEncoding == 0 ? .utf8 : String.Encoding(rawValue: UInt(savedEncoding))
+            encoding = String.Encoding(rawValue: UInt(savedEncoding))
         }
 
         startLightweightImport(url: url, encoding: encoding)
@@ -895,20 +1022,11 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
             return
         }
 
-        let prefs = UserDefaults.standard
-        if prefs.integer(forKey: SPLastSQLFileEncoding) == 0 {
-            prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
-        }
-
         presentLightweightImportOpenPanel(initialURL: nil)
     }
 
     @nonobjc func presentLightweightImportOpenPanel(initialURL: URL?, csvSettings: SALightweightCSVImportSettings? = nil) {
         let prefs = UserDefaults.standard
-        if prefs.integer(forKey: SPLastSQLFileEncoding) == 0 {
-            prefs.set(String.Encoding.utf8.rawValue, forKey: SPLastSQLFileEncoding)
-        }
-
         let selectedEncoding = String.Encoding(rawValue: UInt(prefs.integer(forKey: SPLastSQLFileEncoding)))
         let importAccessory = SALightweightImportOpenPanelAccessory(selectedEncoding: selectedEncoding, initialURL: initialURL)
         if let csvSettings {
@@ -917,6 +1035,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
 
         let panel = NSOpenPanel()
+        panel.allowsOtherFileTypes = true
         panel.allowedFileTypes = [
             SPFileExtensionSQL as String,
             "sql.gz",
@@ -948,14 +1067,29 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
             prefs.set(panel.directoryURL?.path, forKey: "exportPath")
             prefs.set(importAccessory.selectedEncoding.rawValue, forKey: SPLastSQLFileEncoding)
 
-            switch self.lightweightImportFileKind(for: url) {
+            switch importAccessory.importFileKind(for: url) {
             case .sql:
-                self.startLightweightImport(url: url, encoding: importAccessory.selectedEncoding)
-            case .csv:
-                let csvSettings = importAccessory.saveCSVSettings()
                 self.startLightweightImport(url: url,
                                             encoding: importAccessory.selectedEncoding,
-                                            csvSettings: csvSettings)
+                                            importKind: .sql,
+                                            sourceName: url.lastPathComponent)
+            case .csv:
+                do {
+                    let csvURL = importAccessory.needsTemporaryCSVImportCopy(for: url)
+                        ? try self.copyLightweightImportFileToTemporaryURL(url, fileExtension: importAccessory.temporaryCSVFileExtension(for: url))
+                        : url
+                    let csvSettings = importAccessory.saveCSVSettings(for: url)
+                    self.startLightweightImport(url: csvURL,
+                                                encoding: importAccessory.selectedEncoding,
+                                                csvSettings: csvSettings,
+                                                importKind: .csv,
+                                                sourceName: url.lastPathComponent,
+                                                sourceReturnURL: csvURL == url ? nil : url)
+                } catch {
+                    NSSound.beep()
+                    self.showLightweightError(title: NSLocalizedString("Import Error", comment: "Import Error title"),
+                                              message: String(format: NSLocalizedString("The selected file could not be prepared for lightweight CSV/TSV import. %@", comment: "lightweight import manual format temp copy error"), error.localizedDescription))
+                }
             case .none:
                 _ = self.validateLightweightImportFileURL(url)
             }
@@ -995,7 +1129,17 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
 
         let clipboardSourceName = NSLocalizedString("clipboard", comment: "clipboard import source name")
         guard confirmLightweightSQLImport(sourceName: clipboardSourceName) else { return }
-        runLightweightSQLImport(sql: clipboardText, sourceName: clipboardSourceName, encoding: .utf8)
+        do {
+            let temporaryURL = try writeLightweightSQLClipboardTemporaryFile(clipboardText)
+            startLightweightSQLImport(url: temporaryURL,
+                                      encoding: .utf8,
+                                      sourceName: clipboardSourceName,
+                                      removeTemporaryFileWhenFinished: true)
+        } catch {
+            NSSound.beep()
+            showLightweightError(title: NSLocalizedString("Import From Clipboard", comment: "import from clipboard title"),
+                                 message: String(format: NSLocalizedString("The clipboard text could not be written to a temporary SQL import file. %@", comment: "lightweight SQL clipboard temp write failure"), error.localizedDescription))
+        }
     }
 
     @nonobjc func lightweightClipboardImportKind(for text: String) -> LightweightClipboardImportKind {
@@ -1165,6 +1309,32 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
 
         return fileURL
+    }
+
+    @nonobjc func writeLightweightSQLClipboardTemporaryFile(_ text: String) throws -> URL {
+        let prefixPath = (SPImportClipboardTempFileNamePrefix as NSString).expandingTildeInPath
+        let directoryPath = (prefixPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: directoryPath,
+                                                withIntermediateDirectories: true,
+                                                attributes: nil)
+
+        let filePath = "\(prefixPath)\(UUID().uuidString).sql"
+        let fileURL = URL(fileURLWithPath: filePath)
+        try text.write(to: fileURL, atomically: false, encoding: .utf8)
+        return fileURL
+    }
+
+    @nonobjc func copyLightweightImportFileToTemporaryURL(_ url: URL, fileExtension: String) throws -> URL {
+        let prefixPath = (SPImportClipboardTempFileNamePrefix as NSString).expandingTildeInPath
+        let directoryPath = (prefixPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: directoryPath,
+                                                withIntermediateDirectories: true,
+                                                attributes: nil)
+
+        let filePath = "\(prefixPath)\(UUID().uuidString).\(fileExtension)"
+        let temporaryURL = URL(fileURLWithPath: filePath)
+        try FileManager.default.copyItem(at: url, to: temporaryURL)
+        return temporaryURL
     }
 
     @nonobjc func confirmLightweightClipboardCSVImportSettings(kind: LightweightClipboardImportKind,
@@ -1475,16 +1645,6 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
               !selectedDatabase.isEmpty else {
             NSSound.beep()
             return
-        }
-
-        if lightweightDatabaseHasUnsupportedCopyObjects(selectedDatabase, connection: activeConnection) {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Events Not Copied", comment: "database copy events unsupported message")
-            alert.informativeText = String(format: NSLocalizedString("Duplicating the database '%@' is only partially supported because events cannot be copied by the lightweight path yet. Tables, views, procedures, functions, and triggers will still be copied where possible.\n\nWould you like to continue?", comment: "database copy events unsupported informative message"), selectedDatabase)
-            alert.addButton(withTitle: NSLocalizedString("Continue", comment: "continue button"))
-            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-
-            guard runLightweightModalAlert(alert) != .alertSecondButtonReturn else { return }
         }
 
         guard let copyDetails = promptForLightweightDatabaseCopy(sourceDatabase: selectedDatabase) else {

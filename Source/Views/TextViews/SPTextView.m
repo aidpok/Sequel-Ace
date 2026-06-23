@@ -30,7 +30,6 @@
 
 #import "SPTextView.h"
 #import "SPCustomQuery.h"
-#import "SPDatabaseDocument.h"
 #import "SPNarrowDownCompletion.h"
 #import "SPQueryController.h"
 #import "SPTooltip.h"
@@ -45,7 +44,6 @@
 #import "SPEditorTokens.h"
 #import "SPSyntaxParser.h"
 #import "SPHelpViewerClient.h"
-#import "SPTableData.h"
 #import "SPBundleManager.h"
 
 #import "sequel-ace-Swift.h"
@@ -85,9 +83,15 @@ NSInteger _alphabeticSort(id string1, id string2, void *reverse);
 - (void)_setTextSelectionColor:(NSColor *)newSelectionColor onBackgroundColor:(NSColor *)aBackgroundColor;
 - (void)_positionCompletionPopup:(SPNarrowDownCompletion *)aPopup relativeToTextAtLocation:(NSUInteger)aLocation;
 - (id)_delegateValueForKeyIfAvailable:(NSString *)key;
+- (id)_valueForKey:(NSString *)key fromObjectIfAvailable:(id)object;
 - (id)_effectiveTableDocumentInstance;
 - (id)_effectiveTablesListInstance;
 - (id)_effectiveCustomQueryInstance;
+- (id)_effectiveCompletionProvider;
+- (NSString *)_completionConnectionIDWithProvider:(id)completionProvider tableDocumentInstance:(id)completionTableDocumentInstance;
+- (NSDictionary *)_completionDatabaseStructureForConnectionID:(NSString *)connectionID tableDocumentInstance:(id)completionTableDocumentInstance;
+- (NSArray *)_completionArrayFromObject:(id)object selectorName:(NSString *)selectorName;
+- (NSArray *)_completionFieldNamesWithProvider:(id)completionProvider tableDocumentInstance:(id)completionTableDocumentInstance;
 - (BOOL)_supportsQueryFavoriteTabTriggers;
 
 @property (assign) NSUInteger taskCount;
@@ -125,12 +129,16 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 - (id)_delegateValueForKeyIfAvailable:(NSString *)key
 {
-	id delegate = [self delegate];
+	return [self _valueForKey:key fromObjectIfAvailable:[self delegate]];
+}
+
+- (id)_valueForKey:(NSString *)key fromObjectIfAvailable:(id)object
+{
 	SEL selector = NSSelectorFromString(key);
-	if(!delegate || ![delegate respondsToSelector:selector])
+	if(!object || ![object respondsToSelector:selector])
 		return nil;
 
-	return [(NSObject *)delegate valueForKey:key];
+	return [(NSObject *)object valueForKey:key];
 }
 
 - (id)_effectiveTableDocumentInstance
@@ -146,6 +154,70 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 - (id)_effectiveCustomQueryInstance
 {
 	return customQueryInstance ?: [self _delegateValueForKeyIfAvailable:@"customQueryInstance"];
+}
+
+- (id)_effectiveCompletionProvider
+{
+	id queryInstance = [self _effectiveCustomQueryInstance];
+	id completionProvider = [self _valueForKey:@"completionProvider" fromObjectIfAvailable:queryInstance];
+	if(completionProvider)
+		return completionProvider;
+
+	completionProvider = [self _delegateValueForKeyIfAvailable:@"completionProvider"];
+	if(completionProvider)
+		return completionProvider;
+
+	return [self _effectiveTablesListInstance];
+}
+
+- (NSString *)_completionConnectionIDWithProvider:(id)completionProvider tableDocumentInstance:(id)completionTableDocumentInstance
+{
+	NSString *connectionID = [self _valueForKey:@"completionConnectionID" fromObjectIfAvailable:completionProvider];
+	if([connectionID length])
+		return connectionID;
+
+	connectionID = [self _valueForKey:@"connectionID" fromObjectIfAvailable:completionProvider];
+	if([connectionID length])
+		return connectionID;
+
+	connectionID = [self _valueForKey:@"connectionID" fromObjectIfAvailable:completionTableDocumentInstance];
+	return [connectionID length] ? connectionID : @"_";
+}
+
+- (NSDictionary *)_completionDatabaseStructureForConnectionID:(NSString *)connectionID tableDocumentInstance:(id)completionTableDocumentInstance
+{
+	if([completionTableDocumentInstance respondsToSelector:@selector(databaseStructureRetrieval)]) {
+		NSDictionary *documentStructure = [[[completionTableDocumentInstance databaseStructureRetrieval] structure] objectForKey:connectionID];
+		if([documentStructure isKindOfClass:[NSDictionary class]])
+			return documentStructure;
+	}
+
+	NSDictionary *navigatorStructure = [[SPNavigatorController sharedNavigatorController] dbStructureForConnection:connectionID];
+	return [navigatorStructure isKindOfClass:[NSDictionary class]] ? navigatorStructure : @{};
+}
+
+- (NSArray *)_completionArrayFromObject:(id)object selectorName:(NSString *)selectorName
+{
+	id value = [self _valueForKey:selectorName fromObjectIfAvailable:object];
+	return [value isKindOfClass:[NSArray class]] ? [NSArray arrayWithArray:value] : nil;
+}
+
+- (NSArray *)_completionFieldNamesWithProvider:(id)completionProvider tableDocumentInstance:(id)completionTableDocumentInstance
+{
+	NSArray *fieldNames = [self _completionArrayFromObject:completionProvider selectorName:@"completionFieldNames"];
+	if(fieldNames)
+		return fieldNames;
+
+	fieldNames = [self _completionArrayFromObject:completionProvider selectorName:@"allFieldNames"];
+	if(fieldNames)
+		return fieldNames;
+
+	fieldNames = [self _completionArrayFromObject:completionTableDocumentInstance selectorName:@"completionFieldNames"];
+	if(fieldNames)
+		return fieldNames;
+
+	fieldNames = [self _completionArrayFromObject:completionTableDocumentInstance selectorName:@"columnNames"];
+	return fieldNames ?: @[];
 }
 
 - (BOOL)_supportsQueryFavoriteTabTriggers
@@ -451,11 +523,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 		NSString* connectionID;
 		id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
-		id completionTablesListInstance = [self _effectiveTablesListInstance];
-		if([completionTableDocumentInstance respondsToSelector:@selector(connectionID)])
-			connectionID = [completionTableDocumentInstance connectionID];
-		else
-			connectionID = @"_";
+		id completionTablesListInstance = [self _effectiveCompletionProvider];
+		connectionID = [self _completionConnectionIDWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance];
 
 		// Try to get structure data
 		NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[SPNavigatorController sharedNavigatorController] dbStructureForConnection:connectionID]];
@@ -676,16 +745,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"table-view-small-square", @"image", @"", @"isRef", nil]];
 
 			// Add field names to completions list for currently selected table
-			if ([completionTableDocumentInstance isKindOfClass:[SPDatabaseDocument class]]
-				&& [completionTableDocumentInstance respondsToSelector:@selector(table)]
-				&& [completionTableDocumentInstance table] != nil) {
-				SPDatabaseDocument *completionDocument = (SPDatabaseDocument *)completionTableDocumentInstance;
-				for (id obj in [completionDocument->tableDataInstance columnNames])
-					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
-			}
-			else if ([completionTablesListInstance respondsToSelector:NSSelectorFromString(@"allFieldNames")])
-				for (id obj in [(NSObject *)completionTablesListInstance valueForKey:@"allFieldNames"])
-					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
+			for (id obj in [self _completionFieldNamesWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance])
+				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:obj, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 
 			// Add proc/func only for MySQL version 5 or higher
 			if(mySQLmajorVersion > 4) {
@@ -831,8 +892,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSString* prefix        = @"";
 	NSString *currentDb     = nil;
 	id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
-	id completionTablesListInstance = [self _effectiveTablesListInstance];
+	id completionTablesListInstance = [self _effectiveCompletionProvider];
 	id completionCustomQueryInstance = [self _effectiveCustomQueryInstance];
+	NSString *connectionID = [self _completionConnectionIDWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance];
 	id dbStructureRetriever = [completionTableDocumentInstance respondsToSelector:@selector(databaseStructureRetrieval)] ? [completionTableDocumentInstance databaseStructureRetrieval] : nil;
 
 	// Break for long stuff
@@ -997,11 +1059,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	// Check for table name aliases
 	NSString *alias = nil;
-	if (dbBrowseMode && completionTableDocumentInstance && completionCustomQueryInstance && dbStructureRetriever) {
+	if (dbBrowseMode && completionCustomQueryInstance) {
 		NSString *theDb = (dbName == nil) ? [NSString stringWithString:currentDb] : [NSString stringWithString:dbName];
-		NSString *connectionID = [completionTableDocumentInstance respondsToSelector:@selector(connectionID)] ? [completionTableDocumentInstance connectionID] : @"_";
 		NSString *conID = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, theDb];
-		NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[dbStructureRetriever structure] objectForKey:connectionID]];
+		NSDictionary *dbs = [self _completionDatabaseStructureForConnectionID:connectionID tableDocumentInstance:completionTableDocumentInstance];
 		if(theDb && dbs != nil && [dbs count] && [dbs objectForKey:conID] && [[dbs objectForKey:conID] isKindOfClass:[NSDictionary class]]) {
 			NSArray *allTables = [[dbs objectForKey:conID] allKeys];
 			// Check if found table name is known, if not parse for aliases
@@ -1679,13 +1740,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	NSString *connectionID;
 	id completionTableDocumentInstance = [self _effectiveTableDocumentInstance];
-	if([completionTableDocumentInstance respondsToSelector:@selector(connectionID)])
-		connectionID = [completionTableDocumentInstance connectionID];
-	else
-		connectionID = @"_";
+	id completionTablesListInstance = [self _effectiveCompletionProvider];
+	connectionID = [self _completionConnectionIDWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance];
 
 	NSArray *arr = nil;
-	id completionTablesListInstance = [self _effectiveTablesListInstance];
 	if([kind isEqualToString:@"$SP_ASLIST_ALL_TABLES"]) {
 		// TODO HansJB
 		// NSString *currentDb = nil;
@@ -1750,8 +1808,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		if ([completionTablesListInstance respondsToSelector:@selector(tableName)] && [completionTablesListInstance tableName])
 			currentTable = [completionTablesListInstance tableName];
 
-		if([completionTableDocumentInstance respondsToSelector:@selector(databaseStructureRetrieval)]) {
-			NSDictionary *dbs = [NSDictionary dictionaryWithDictionary:[[[completionTableDocumentInstance databaseStructureRetrieval] structure] objectForKey:connectionID]];
+		NSDictionary *dbs = [self _completionDatabaseStructureForConnectionID:connectionID tableDocumentInstance:completionTableDocumentInstance];
+		if([dbs count]) {
 			if(currentDb != nil && currentTable != nil && dbs != nil && [dbs count] && [dbs objectForKey:currentDb] && [[dbs objectForKey:currentDb] objectForKey:currentTable]) {
 				NSDictionary * theTable = [[dbs objectForKey:currentDb] objectForKey:currentTable];
 				NSArray *allFields = [theTable allKeys];
@@ -1786,21 +1844,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 					}
 				}
 			}
-			else if([completionTableDocumentInstance isKindOfClass:[SPDatabaseDocument class]]
-					&& [completionTableDocumentInstance respondsToSelector:@selector(table)]) {
-				SPDatabaseDocument *completionDocument = (SPDatabaseDocument *)completionTableDocumentInstance;
-				arr = [NSArray arrayWithArray:[completionDocument->tableDataInstance columnNames]];
-
-				if(arr == nil) {
-					arr = @[];
-				}
+			else {
+				arr = [self _completionFieldNamesWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance];
 				for(id w in arr)
 					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 			}
 		}
-		else if(completionTablesListInstance && [completionTablesListInstance respondsToSelector:NSSelectorFromString(@"allFieldNames")]) {
-			NSArray *fallbackFields = [(NSObject*)completionTablesListInstance valueForKey:@"allFieldNames"];
-			arr = fallbackFields ? [NSArray arrayWithArray:fallbackFields] : @[];
+		else {
+			arr = [self _completionFieldNamesWithProvider:completionTablesListInstance tableDocumentInstance:completionTableDocumentInstance];
 			for(id w in arr)
 				[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:w, @"display", @"field-small-square", @"image", @"", @"isRef", nil]];
 		}

@@ -43,18 +43,31 @@ struct SALightweightCSVImportSettings: Equatable {
     }
 
     func applyingFileTypeInference(from fileURL: URL?) -> SALightweightCSVImportSettings {
-        guard let fileURL, Self.isTabSeparatedFile(fileURL) else {
+        guard let fileURL else {
             return self
         }
 
         var inferred = self
-        inferred.fieldTerminator = "\t"
+
+        if Self.isTabSeparatedFile(fileURL) {
+            inferred.fieldTerminator = "\t"
+        }
+
+        if !Self.isCompressedFile(fileURL), let lineTerminator = Self.inferredLineTerminator(from: fileURL) {
+            inferred.lineTerminator = lineTerminator
+        }
+
         return inferred
     }
 
     static func isTabSeparatedFile(_ fileURL: URL) -> Bool {
         let fileName = fileURL.lastPathComponent.lowercased()
         return fileName.hasSuffix(".tsv") || fileName.hasSuffix(".tsv.gz") || fileName.hasSuffix(".tsv.bz2")
+    }
+
+    private static func isCompressedFile(_ fileURL: URL) -> Bool {
+        let fileName = fileURL.lastPathComponent.lowercased()
+        return fileName.hasSuffix(".gz") || fileName.hasSuffix(".bz2")
     }
 
     private static func boolValue(forKey key: String, in userDefaults: UserDefaults, defaultValue: Bool) -> Bool {
@@ -71,5 +84,77 @@ struct SALightweightCSVImportSettings: Equatable {
         }
 
         return defaultValue
+    }
+
+    private static func inferredLineTerminator(from fileURL: URL) -> String? {
+        let sniffByteCount = 64 * 1024
+
+        guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
+            return nil
+        }
+
+        defer {
+            fileHandle.closeFile()
+        }
+
+        let data = fileHandle.readData(ofLength: sniffByteCount + 1)
+        guard !data.isEmpty else {
+            return nil
+        }
+
+        let bytes = [UInt8](data)
+        let scanLimit = min(sniffByteCount, bytes.count)
+        var index = 0
+        var crlfCount = 0
+        var lfCount = 0
+        var crCount = 0
+        var firstLineTerminator: String?
+
+        while index < scanLimit {
+            switch bytes[index] {
+            case 0x0D:
+                if bytes.indices.contains(index + 1), bytes[index + 1] == 0x0A {
+                    crlfCount += 1
+                    if firstLineTerminator == nil {
+                        firstLineTerminator = "\\r\\n"
+                    }
+
+                    index += 2
+                    continue
+                }
+
+                crCount += 1
+                if firstLineTerminator == nil {
+                    firstLineTerminator = "\\r"
+                }
+
+                index += 1
+
+            case 0x0A:
+                lfCount += 1
+                if firstLineTerminator == nil {
+                    firstLineTerminator = "\\n"
+                }
+
+                index += 1
+
+            default:
+                index += 1
+            }
+        }
+
+        if crlfCount > lfCount, crlfCount > crCount {
+            return "\\r\\n"
+        }
+
+        if lfCount > crlfCount, lfCount > crCount {
+            return "\\n"
+        }
+
+        if crCount > crlfCount, crCount > lfCount {
+            return "\\r"
+        }
+
+        return firstLineTerminator
     }
 }

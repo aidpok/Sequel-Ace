@@ -30,7 +30,6 @@
 
 #import "SPProcessListController.h"
 #import "SPDatabaseDocument.h"
-#import "SPAppController.h"
 #import "SPDataCellFormatter.h"
 #import "SPThreadAdditions.h"
 
@@ -264,8 +263,13 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 
 - (NSString *)_serverDisplayName
 {
-	SPDatabaseDocument *frontDocument = [SPAppDelegate frontDocument];
-	NSString *displayName = [frontDocument host] ?: [frontDocument name];
+	NSString *displayName = nil;
+
+	id connectionDelegate = [connection delegate];
+	if ([connectionDelegate isKindOfClass:[SPDatabaseDocument class]]) {
+		SPDatabaseDocument *document = (SPDatabaseDocument *)connectionDelegate;
+		displayName = [document host] ?: [document name];
+	}
 
 	if (![displayName length]) {
 		displayName = [connection host];

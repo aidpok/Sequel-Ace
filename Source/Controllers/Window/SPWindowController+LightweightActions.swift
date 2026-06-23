@@ -11,6 +11,7 @@ private enum SALightweightDatabaseCopyObjectType {
     case procedure
     case function
     case trigger
+    case event
 }
 
 private struct SALightweightDatabaseCopyObject {
@@ -1186,13 +1187,41 @@ extension SPWindowController {
         }
     }
 
-    func showLightweightDatabaseRenameUnsupportedAlert(database: String) {
+    func showLightweightDatabaseRenameUnsupportedAlert(database: String, unsupportedTypes: [SALightweightDatabaseRenameObjectType]) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = NSLocalizedString("Database Rename Unsupported", comment: "databsse rename unsupported message")
-        alert.informativeText = String(format: NSLocalizedString("Renaming the database '%@' is currently unsupported as it contains objects other than tables (i.e. views, procedures, functions, events, etc.).\n\nIf you would like to rename a database please use the 'Duplicate Database', move any non-table objects manually then drop the old database.", comment: "databsse rename unsupported informative message"), database)
+        alert.messageText = NSLocalizedString("Database Rename Unsupported", comment: "database rename unsupported message")
+        let unsupportedDescription = lightweightDatabaseRenameUnsupportedDescription(for: unsupportedTypes)
+        alert.informativeText = String(format: NSLocalizedString("Renaming the database '%@' is currently supported only when it contains base tables. This database also contains %@, so Sequel Ace will not create a replacement database and automatically drop the original.\n\nUse 'Duplicate Database' instead; that copy path includes tables, views, routines, triggers, and events. After manually verifying the duplicate, drop the old database yourself.", comment: "database rename unsupported informative message"), database, unsupportedDescription)
         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
         _ = runLightweightModalAlert(alert)
+    }
+
+    func lightweightDatabaseRenameUnsupportedDescription(for types: [SALightweightDatabaseRenameObjectType]) -> String {
+        let orderedTypes: [SALightweightDatabaseRenameObjectType] = [.view, .procedure, .function, .trigger, .event]
+        let labels = orderedTypes.compactMap { type -> String? in
+            guard types.contains(type) else { return nil }
+            switch type {
+            case .view:
+                return NSLocalizedString("views", comment: "database rename unsupported views label")
+            case .procedure:
+                return NSLocalizedString("procedures", comment: "database rename unsupported procedures label")
+            case .function:
+                return NSLocalizedString("functions", comment: "database rename unsupported functions label")
+            case .trigger:
+                return NSLocalizedString("triggers", comment: "database rename unsupported triggers label")
+            case .event:
+                return NSLocalizedString("events", comment: "database rename unsupported events label")
+            case .table:
+                return nil
+            }
+        }
+
+        guard !labels.isEmpty else {
+            return NSLocalizedString("objects that cannot be safely moved by the lightweight rename path", comment: "database rename unsupported fallback label")
+        }
+
+        return labels.joined(separator: ", ")
     }
 
     func lightweightDatabaseRenamePreflight(from sourceDatabase: String, to targetDatabase: String, connection: SPMySQLConnection) -> SALightweightDatabaseRenamePreflightResult {
@@ -1206,7 +1235,15 @@ extension SPWindowController {
             return .failed(error?.isEmpty == false ? error! : NSLocalizedString("Unable to inspect database objects before rename.", comment: "database rename preflight failed"))
         }
 
-        guard objects.allSatisfy({ $0.type == .table }) else { return .unsupportedObjects }
+        let unsupportedTypes = objects
+            .filter { $0.type != .table }
+            .map { $0.type }
+            .reduce(into: [SALightweightDatabaseRenameObjectType]()) { types, type in
+                if !types.contains(type) {
+                    types.append(type)
+                }
+            }
+        guard unsupportedTypes.isEmpty else { return .unsupportedObjects(unsupportedTypes) }
 
         var options: [String] = []
         if let defaults = lightweightDatabaseDefaults(for: sourceDatabase, connection: connection) {
@@ -1268,6 +1305,21 @@ extension SPWindowController {
                 let routineType = stringValue(row["ROUTINE_TYPE"] ?? row["routine_type"]).uppercased()
                 guard !name.isEmpty else { continue }
                 objects.append((name: name, type: routineType == "PROCEDURE" ? .procedure : .function))
+            }
+        }
+
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["TRIGGER_NAME"] ?? row["trigger_name"])
+                guard !name.isEmpty else { continue }
+                objects.append((name: name, type: .trigger))
             }
         }
 
@@ -1370,9 +1422,10 @@ extension SPWindowController {
                                              message: String(format: NSLocalizedString("The name '%@' is already used.", comment: "message when trying to rename a table/view/proc/etc to an already used name"), targetDatabase))
                     completion(false)
                 }
-            case .unsupportedObjects:
+            case .unsupportedObjects(let unsupportedTypes):
                 DispatchQueue.main.async {
-                    self.showLightweightDatabaseRenameUnsupportedAlert(database: sourceDatabase)
+                    self.showLightweightDatabaseRenameUnsupportedAlert(database: sourceDatabase,
+                                                                       unsupportedTypes: unsupportedTypes)
                     completion(false)
                 }
             case .failed(let message):
@@ -1382,15 +1435,6 @@ extension SPWindowController {
                 }
             }
         }
-    }
-
-    func lightweightDatabaseHasUnsupportedCopyObjects(_ database: String, connection: SPMySQLConnection) -> Bool {
-        guard let quotedDatabase = connection.escapeAndQuoteString(database),
-              let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) LIMIT 1") else {
-            return false
-        }
-
-        return result.numberOfRows() > 0
     }
 
     func runLightweightDatabaseCopyMutation(from sourceDatabase: String,
@@ -1432,6 +1476,7 @@ extension SPWindowController {
             }
             let views = objects.filter { $0.type == .view }
             let triggers = objects.filter { $0.type == .trigger }
+            let events = objects.filter { $0.type == .event }
             var options: [String] = []
             if let defaults = self.lightweightDatabaseDefaults(for: sourceDatabase, connection: activeConnection) {
                 if let encoding = defaults.encoding, !encoding.isEmpty {
@@ -1555,6 +1600,26 @@ extension SPWindowController {
                 }
             }
 
+            if success {
+                for event in events {
+                    guard let createStatement = self.lightweightCreateDatabaseObjectCopyStatement(object: event,
+                                                                                                sourceDatabase: sourceDatabase,
+                                                                                                targetDatabase: targetDatabase,
+                                                                                                connection: activeConnection) else {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+
+                    _ = activeConnection.queryString(createStatement)
+                    if activeConnection.queryErrored() {
+                        success = false
+                        error = activeConnection.lastErrorMessage()
+                        break
+                    }
+                }
+            }
+
             if didDisableForeignKeyChecks {
                 _ = activeConnection.queryString("/*!32352 SET foreign_key_checks=1 */")
                 if activeConnection.queryErrored(), error == nil {
@@ -1657,6 +1722,21 @@ extension SPWindowController {
             }
         }
 
+        if connection.queryErrored() {
+            return objects
+        }
+
+        if let quotedDatabase = connection.escapeAndQuoteString(database),
+           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name") {
+            result.returnDataAsStrings = true
+            result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+            while let row = result.getRowAsDictionary() as? [String: Any] {
+                let name = stringValue(row["EVENT_NAME"] ?? row["event_name"])
+                guard !name.isEmpty else { continue }
+                objects.append(SALightweightDatabaseCopyObject(name: name, type: .event))
+            }
+        }
+
         return objects
     }
 
@@ -1674,6 +1754,8 @@ extension SPWindowController {
             keyword = "FUNCTION"
         case .trigger:
             keyword = "TRIGGER"
+        case .event:
+            keyword = "EVENT"
         case .table:
             return lightweightCreateTableCopyStatement(table: object.name,
                                                        sourceDatabase: sourceDatabase,
@@ -1722,6 +1804,8 @@ extension SPWindowController {
             preferredKeys = ["Create Function"]
         case "TRIGGER":
             preferredKeys = ["SQL Original Statement", "Create Trigger"]
+        case "EVENT":
+            preferredKeys = ["Create Event"]
         default:
             preferredKeys = ["Create Table"]
         }

@@ -37,6 +37,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSURL *)queryFavoriteFileURL;
 - (BOOL)queryFavoriteIsUntitled;
 - (nullable id)queryFavoriteCustomQueryInstance;
+@optional
+- (nullable NSArray *)loadQueryFavoritesForFileURL:(NSURL *)fileURL;
+- (BOOL)saveQueryFavorites:(NSArray *)queryFavorites forFileURL:(NSURL *)fileURL;
+@end
+
+@protocol SPQueryFavoriteManagerContextProviding <NSObject>
+- (nullable id <SPQueryFavoriteManagerContext>)queryFavoriteManagerContext;
 @end
 
 @interface SPQueryFavoriteManager : NSWindowController <NSOpenSavePanelDelegate>

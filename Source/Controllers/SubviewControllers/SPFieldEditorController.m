@@ -30,14 +30,11 @@
 
 #import "SPFieldEditorController.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#import "RegexKitLite.h"
 #import "SPTooltip.h"
 #import "SPGeometryDataView.h"
-#import "SPCopyTable.h"
 #import "SPWindow.h"
+#import "SPConstants.h"
 #include <objc/objc-runtime.h>
-#import "SPCustomQuery.h"
-#import "SPTableContent.h"
 #import "SPJSONFormatter.h"
 #import <SPMySQL/SPMySQL.h>
 #import "SPFunctions.h"
@@ -437,10 +434,15 @@ typedef enum {
 
 				// Locate the caret in editTextView
 				// (restore a given selection coming from the in-cell editing mode)
-				NSRange selRange = [callerInstance fieldEditorSelectedRange];
+				NSRange selRange = NSMakeRange(0,0);
+				if ([callerInstance respondsToSelector:@selector(fieldEditorSelectedRange)]) {
+					selRange = [callerInstance fieldEditorSelectedRange];
+				}
 
 				[editTextView setSelectedRange:selRange];
-				[callerInstance setFieldEditorSelectedRange:NSMakeRange(0,0)];
+				if ([callerInstance respondsToSelector:@selector(setFieldEditorSelectedRange:)]) {
+					[callerInstance setFieldEditorSelectedRange:NSMakeRange(0,0)];
+				}
 
 				// If the string content is NULL select NULL for convenience
 				if ([stringValue isEqualToString:[prefs objectForKey:SPNullValue]]) {

@@ -67,6 +67,8 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
 - (BOOL)_renameUserFrom:(NSString *)originalUser host:(NSString *)originalHost to:(NSString *)newUser host:(NSString *)newHost;
 - (void)contextWillSave:(NSNotification *)notice;
 - (void)_selectFirstChildOfParentNode;
+- (BOOL)_hasUsableConnection;
+- (NSArray *)_databaseNamesForSchemaPrivileges;
 
 @end
 
@@ -146,6 +148,12 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
 	// Set schema table double-click actions
 	[grantedTableView setDoubleAction:@selector(doubleClickSchemaPriv:)];
 	[availableTableView setDoubleAction:@selector(doubleClickSchemaPriv:)];
+
+	if (![self _hasUsableConnection]) {
+		SPLog(@"SPUserManager opened without an active MySQL connection.");
+		[super windowDidLoad];
+		return;
+	}
 
 	[self _initializeSchemaPrivs];
 	[self _initializeUsers];
@@ -369,9 +377,30 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
     SPLog(@"_initializeSchemaPrivs called.");
 	// Initialize Databases
 	[schemas removeAllObjects];
-	[schemas addObjectsFromArray:[databaseProvider userManagerDatabaseNames] ?: @[]];
+	[schemas addObjectsFromArray:[self _databaseNamesForSchemaPrivileges]];
 
 	[schemasTableView reloadData];
+}
+
+- (BOOL)_hasUsableConnection
+{
+	return (connection != nil && [connection isConnected]);
+}
+
+- (NSArray *)_databaseNamesForSchemaPrivileges
+{
+	NSArray *databaseNames = nil;
+	id<SPUserManagerDatabaseProviding> provider = [self databaseProvider];
+
+	if ([provider respondsToSelector:@selector(userManagerDatabaseNames)]) {
+		databaseNames = [provider userManagerDatabaseNames];
+	}
+
+	if (![databaseNames isKindOfClass:[NSArray class]] && [self _hasUsableConnection]) {
+		databaseNames = [connection databases];
+	}
+
+	return [databaseNames isKindOfClass:[NSArray class]] ? databaseNames : @[];
 }
 
 /**
@@ -523,17 +552,36 @@ static NSString *SPSchemaPrivilegesTabIdentifier = @"Schema Privileges";
 
 - (void)beginSheetModalForWindow:(NSWindow *)docWindow completionHandler:(void (^)(void))callback
 {
-	[docWindow beginSheet:self.window completionHandler:^(NSModalResponse returnCode) {
-		callback();
+	if (!docWindow) {
+		NSBeep();
+		if (callback) callback();
+		return;
+	}
+
+	NSWindow *userManagerWindow = [self window];
+
+	if (!userManagerWindow) {
+		NSBeep();
+		if (callback) callback();
+		return;
+	}
+
+	[docWindow beginSheet:userManagerWindow completionHandler:^(NSModalResponse returnCode) {
+		if (callback) callback();
 	}];
 }
 
 - (BOOL)validateUserManagementAccessShowingAlert
 {
+	if (![self _hasUsableConnection]) {
+		[NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Unable to open User Manager", @"unable to open user manager message") message:NSLocalizedString(@"User management requires an active MySQL connection.", @"unable to open user manager informative message") callback:nil];
+		return NO;
+	}
+
 	// Before displaying the user manager make sure the current user has access to the mysql.user table.
 	SPMySQLResult *result = [connection queryString:@"SELECT user FROM mysql.user LIMIT 1"];
 
-	if ([connection queryErrored] && ([result numberOfRows] == 0)) {
+	if (!result || ([connection queryErrored] && ([result numberOfRows] == 0))) {
 		[NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Unable to get list of users", @"unable to get list of users message") message:NSLocalizedString(@"An error occurred while trying to get the list of users. Please make sure you have the necessary privileges to perform user management, including access to the mysql.user table.", @"unable to get list of users informative message") callback:nil];
 		return NO;
 	}

@@ -193,6 +193,8 @@ final class SALightweightSaveConnectionAccessory: NSObject {
 }
 
 final class SALightweightSQLImportEncodingAccessory {
+    static let autodetectEncodingTag = 0
+
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 34))
     let popup = NSPopUpButton(frame: NSRect(x: 74, y: 4, width: 246, height: 26), pullsDown: false)
     let encodings: [String.Encoding] = [
@@ -219,6 +221,9 @@ final class SALightweightSQLImportEncodingAccessory {
         label.alignment = .right
         view.addSubview(label)
 
+        popup.addItem(withTitle: NSLocalizedString("Autodetect", comment: "Encoding autodetect menu item"))
+        popup.lastItem?.tag = Self.autodetectEncodingTag
+
         for encoding in encodings {
             popup.addItem(withTitle: String.localizedName(of: encoding))
             popup.lastItem?.tag = Int(encoding.rawValue)
@@ -232,7 +237,7 @@ final class SALightweightSQLImportEncodingAccessory {
     }
 
     var selectedEncoding: String.Encoding {
-        return String.Encoding(rawValue: UInt(popup.selectedItem?.tag ?? Int(String.Encoding.utf8.rawValue)))
+        return String.Encoding(rawValue: UInt(popup.selectedItem?.tag ?? Self.autodetectEncodingTag))
     }
 }
 
@@ -437,6 +442,7 @@ enum SALightweightDatabaseRenameObjectType {
     case view
     case procedure
     case function
+    case trigger
     case event
 }
 
@@ -444,7 +450,7 @@ enum SALightweightDatabaseRenamePreflightResult {
     case ready([String])
     case sourceMissing
     case targetExists
-    case unsupportedObjects
+    case unsupportedObjects([SALightweightDatabaseRenameObjectType])
     case failed(String)
 }
 
@@ -710,7 +716,8 @@ struct SALightweightPendingSQLFileOpen {
 
     @available(*, deprecated, message: "Use loadedDatabaseDocumentIfAvailable() for non-loading reads or legacyDatabaseDocumentForExplicitFallback() for intentional DBView fallback.")
     @objc var databaseDocument: SPDatabaseDocument {
-        return performExplicitLegacyFallback(reason: "Deprecated databaseDocument property access")
+        return performExplicitLegacyFallback(reason: "Deprecated databaseDocument property access",
+                                             source: "Deprecated databaseDocument property")
     }
 
     @objc let uniqueID: UUID = UUID()
