@@ -790,6 +790,26 @@ extension SPWindowController {
 
     func runLightweightLegacySheet(_ controller: SALightweightLegacySheetController, firstResponder: NSResponder?) -> NSApplication.ModalResponse {
         configureLightweightModalWindow(controller.window)
+        let keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak controller] event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard modifiers.contains(.command) else { return event }
+
+            switch event.charactersIgnoringModifiers ?? "" {
+            case ".":
+                controller?.cancel(nil)
+                return nil
+            case "\r", "\u{3}":
+                controller?.accept(nil)
+                return nil
+            default:
+                return event
+            }
+        }
+        defer {
+            if let keyMonitor = keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+            }
+        }
 
         guard let parentWindow = window else {
             controller.window.center()

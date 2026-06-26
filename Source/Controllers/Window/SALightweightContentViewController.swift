@@ -48,6 +48,7 @@ final class SALightweightContentViewController: NSViewController {
         var values: [ContentValue]
         var originalValues: [ContentValue]
         var isNew = false
+        var insertsWhenUnchanged = false
     }
 
     private struct ContentCacheEntry {
@@ -1216,7 +1217,7 @@ private extension SALightweightContentViewController {
 
     @objc func reloadContent(_ sender: Any?) {
         cancelActiveContentEditBeforeReload()
-        invalidateCurrentContentCache()
+        invalidateCurrentContentCache(includingColumnInfo: true)
         loadCurrentPage()
     }
 
@@ -1285,7 +1286,7 @@ private extension SALightweightContentViewController {
         loadCurrentPage()
     }
 
-    @objc func addRow(_ sender: Any?) {
+    func performAddRow(_ sender: Any?) {
         guard connection != nil, canModifyRows else { return }
 
         if let pendingNewRowIndex = rows.firstIndex(where: { $0.isNew }) {
@@ -1307,31 +1308,46 @@ private extension SALightweightContentViewController {
         updateControls()
     }
 
-    @objc func duplicateRow(_ sender: Any?) {
-        guard let connection = connection, canModifyRows else { return }
+    func performDuplicateRow(_ sender: Any?) {
+        guard connection != nil, canModifyRows else { return }
 
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0, selectedRow < rows.count else { return }
 
-        let row = rows[selectedRow]
-        let columnsToInsert = columnInfo.enumerated().filter { !$0.element.isAutoIncrement && row.values[$0.offset].isLoaded }
-        guard !columnsToInsert.isEmpty else {
-            addRow(sender)
+        if let pendingNewRowIndex = rows.firstIndex(where: { $0.isNew }) {
+            tableView.selectRowIndexes(IndexSet(integer: pendingNewRowIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(pendingNewRowIndex)
+            tableView.editColumn(firstEditableContentColumnIndex(), row: pendingNewRowIndex, with: nil, select: true)
             return
         }
 
-        let columnList = columnsToInsert.map { Self.backtickQuoted($0.element.name) }.joined(separator: ", ")
-        let valueList = columnsToInsert.compactMap { Self.sqlValue(row.values[$0.offset], columnInfo: $0.element, connection: connection) }.joined(separator: ", ")
-        let query = "INSERT INTO \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) (\(columnList)) VALUES (\(valueList))"
-        guard confirmQueryWarningIfNeeded(query) else { return }
-
-        let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterAddingRow) ? .reload : .leaveCurrentRows
-        runMutation(status: NSLocalizedString("Duplicating row...", comment: "lightweight content duplicating row"), reloadPolicy: reloadPolicy, requiresAffectedRows: true) { connection in
-            _ = connection.queryString(query)
+        let row = rows[selectedRow]
+        let duplicatedValues = columnInfo.enumerated().map { index, column -> ContentValue in
+            guard !column.isAutoIncrement else { return .null }
+            guard index < row.values.count else { return Self.defaultNewRowValue(for: column) }
+            switch row.values[index] {
+            case .notLoaded:
+                return Self.defaultNewRowValue(for: column)
+            default:
+                return row.values[index]
+            }
         }
+
+        let duplicatedRow = ContentRow(values: duplicatedValues, originalValues: duplicatedValues, isNew: true, insertsWhenUnchanged: true)
+        let insertionIndex = min(selectedRow + 1, rows.count)
+        rows.insert(duplicatedRow, at: insertionIndex)
+        displayCache.invalidateAll()
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(integer: insertionIndex), byExtendingSelection: false)
+        tableView.scrollRowToVisible(insertionIndex)
+        tableView.editColumn(firstEditableContentColumnIndex(), row: insertionIndex, with: nil, select: true)
+
+        updateStatus()
+        updateControls()
+        cacheCurrentContentState()
     }
 
-    @objc func deleteRows(_ sender: Any?) {
+    func performDeleteRows(_ sender: Any?) {
         guard connection != nil, canModifyRows else { return }
 
         let selectedIndexes = tableView.selectedRowIndexes
@@ -1392,8 +1408,8 @@ private extension SALightweightContentViewController {
         }
     }
 
-    @objc func removeRow(_ sender: Any?) {
-        deleteRows(sender)
+    func performRemoveRow(_ sender: Any?) {
+        performDeleteRows(sender)
     }
 
     @objc func copySelectedContentRows(_ sender: Any?) {
@@ -1720,6 +1736,21 @@ private extension SALightweightContentViewController {
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld of %ld", comment: "lightweight content page label with total"), pageIndex + 1, maximumPage)
         } else {
             pageLabel.stringValue = String(format: NSLocalizedString("Page %ld", comment: "lightweight content page label"), pageIndex + 1)
+        }
+    }
+
+    func canPerformRowAction(_ action: Selector) -> Bool {
+        switch action {
+        case #selector(addRow(_:)):
+            return canModifyRows
+        case #selector(duplicateRow(_:)):
+            let selectedRow = tableView.selectedRow
+            let selectedRowIsNew = selectedRow >= 0 && selectedRow < rows.count && rows[selectedRow].isNew
+            return canModifyRows && tableView.numberOfSelectedRows == 1 && !selectedRowIsNew
+        case #selector(removeRow(_:)), #selector(deleteRows(_:)), #selector(deleteBackward(_:)), #selector(deleteForward(_:)):
+            return canModifyRows && tableView.numberOfSelectedRows > 0
+        default:
+            return false
         }
     }
 
@@ -2342,11 +2373,14 @@ private extension SALightweightContentViewController {
         }
     }
 
-    func invalidateCurrentContentCache() {
+    func invalidateCurrentContentCache(includingColumnInfo: Bool = false) {
         guard let currentTableKey = currentTableKey else { return }
 
         contentCache.removeValue(forKey: currentTableKey)
         contentCacheOrder.removeAll { $0 == currentTableKey }
+        if includingColumnInfo {
+            columnInfoCache.removeValue(forKey: currentTableKey)
+        }
     }
 
     func showInvalidRuleFilterAlert(error: Error?) {
@@ -3319,6 +3353,22 @@ extension SALightweightContentViewController {
         }
     }
 
+    @objc func addRow(_ sender: Any?) {
+        performAddRow(sender)
+    }
+
+    @objc func duplicateRow(_ sender: Any?) {
+        performDuplicateRow(sender)
+    }
+
+    @objc func deleteRows(_ sender: Any?) {
+        performDeleteRows(sender)
+    }
+
+    @objc func removeRow(_ sender: Any?) {
+        performRemoveRow(sender)
+    }
+
     func exportResultRowCount() -> Int {
         return currentResultRowCount()
     }
@@ -3436,7 +3486,13 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         let oldRowValues = rows[row].originalValues
         let newValue = Self.editedString(from: object)
         let currentDisplayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
-        guard newValue != currentDisplayValue else {
+        if newValue == currentDisplayValue {
+            if rows[row].isNew && rows[row].insertsWhenUnchanged,
+               let updatedValue = Self.sqlValue(forEditedString: newValue, columnInfo: columnInfo[columnIndex], connection: connection) {
+                saveNewContentRow(row: row, editedColumnIndex: columnIndex, updatedValue: updatedValue, connection: connection)
+                return
+            }
+
             if rows[row].isNew {
                 cancelNewContentRow(row)
             }

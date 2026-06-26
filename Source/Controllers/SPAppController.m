@@ -1662,6 +1662,14 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
             goto validateMenuItemDone;
         }
 
+        if (action == @selector(addRow:) ||
+            action == @selector(duplicateRow:) ||
+            action == @selector(removeRow:))
+        {
+            isValid = [activeWindowController validateLightweightContentRowMenuItem:menuItem];
+            goto validateMenuItemDone;
+        }
+
         if (action == @selector(copy:)) {
             isValid = [activeWindowController canCopyActiveLightweightSelection:menuItem];
             goto validateMenuItemDone;
@@ -1758,6 +1766,9 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
         action == @selector(focusOnTableContentFilter:) ||
         action == @selector(showFilterTable:) ||
         action == @selector(makeTableListFilterHaveFocus:) ||
+        action == @selector(addRow:) ||
+        action == @selector(duplicateRow:) ||
+        action == @selector(removeRow:) ||
         action == @selector(checkTable:) ||
         action == @selector(analyzeTable:) ||
         action == @selector(repairTable:) ||

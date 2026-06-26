@@ -861,6 +861,34 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
     }
 
+    @objc func validateLightweightContentRowMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard loadedDatabaseDocument == nil,
+              activeLightweightDetailKey?.viewMode == .content else { return false }
+
+        return lightweightContentController.validateMenuItem(menuItem)
+    }
+
+    @objc func addRow(_ sender: Any?) {
+        guard loadedDatabaseDocument == nil,
+              activeLightweightDetailKey?.viewMode == .content else { return }
+
+        lightweightContentController.addRow(sender)
+    }
+
+    @objc func duplicateRow(_ sender: Any?) {
+        guard loadedDatabaseDocument == nil,
+              activeLightweightDetailKey?.viewMode == .content else { return }
+
+        lightweightContentController.duplicateRow(sender)
+    }
+
+    @objc func removeRow(_ sender: Any?) {
+        guard loadedDatabaseDocument == nil,
+              activeLightweightDetailKey?.viewMode == .content else { return }
+
+        lightweightContentController.removeRow(sender)
+    }
+
     @objc func copyActiveLightweightSelection(_ sender: Any?) {
         guard hasActiveLightweightConnection else { return }
 

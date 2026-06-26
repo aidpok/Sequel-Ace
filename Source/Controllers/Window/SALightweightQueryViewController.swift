@@ -2459,13 +2459,18 @@ private extension SALightweightQueryViewController {
                 }
 
                 if didPublishRows, self.columnDefinitions.count == finalResult.columnDefinitions.count, self.rows.count == finalResult.rows.count {
+                    if !preservingResultGridState {
+                        self.displayCache.invalidateAll()
+                        self.rebuildColumns(force: true)
+                        self.tableView.reloadData()
+                    }
                     SALightweightResultGrid.reloadVisibleCells(in: self.tableView, columnBuffer: SALightweightResultGrid.autosizeColumnBuffer)
                 } else {
                     self.columnDefinitions = finalResult.columnDefinitions
                     self.rows = finalResult.rows
                     self.displayCache.invalidateAll()
                     self.columnWidthCache.invalidateAll()
-                    self.rebuildColumns()
+                    self.rebuildColumns(force: !preservingResultGridState)
                 }
                 self.updateDataTableBundleSupport()
                 self.updateStatus(for: finalResult, queryCount: max(finalResult.queriesRun, runnableQueries.count))
@@ -3552,7 +3557,7 @@ private extension SALightweightQueryViewController {
         setStatusText(String(format: NSLocalizedString("Loading rows... %ld loaded", comment: "lightweight query loading rows status"), rows.count))
     }
 
-    func rebuildColumns() {
+    func rebuildColumns(force: Bool = false) {
         let benchmarkStart = CFAbsoluteTimeGetCurrent()
         defer {
             updateDataTableBundleSupport()
@@ -3564,7 +3569,8 @@ private extension SALightweightQueryViewController {
         preserveResultColumnWidths()
         let columnSignature = currentColumnSignature()
 
-        if columnSignature == displayedColumnSignature,
+        if !force,
+           columnSignature == displayedColumnSignature,
            tableView.tableColumns.count == columnDefinitions.count {
             updateExistingColumns(font: tableFont, showColumnTypes: showColumnTypes)
             applyQuerySortIndicator()
