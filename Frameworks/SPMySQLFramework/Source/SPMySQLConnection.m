@@ -885,10 +885,12 @@ asm(".desc ___crashreporter_info__, 0x10");
 		mysql_options(theConnection, MYSQL_ENABLE_CLEARTEXT_PLUGIN, [@"On" UTF8String]);
 	}
 
+#ifndef LIBMARIADB
 	if (requestServerPublicKey) {
 		bool trueMyBool = TRUE;
 		mysql_options(theConnection, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &trueMyBool);
 	}
+#endif
     
 	// Set up the connection variables in the format MySQL needs, from the class-wide variables
 	const char *theHost = NULL;
