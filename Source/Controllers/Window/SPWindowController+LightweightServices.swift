@@ -654,7 +654,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
     }
 
     private func csvEscapedLightweightSchemeValue(_ value: String) -> String {
-        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+        return SALightweightResultGrid.csvEscaped(value)
     }
 
     private func tabLightweightSchemeValue(_ value: Any, connection: SPMySQLConnection) -> String {
