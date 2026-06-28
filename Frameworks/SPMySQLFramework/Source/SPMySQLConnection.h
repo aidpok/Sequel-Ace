@@ -56,6 +56,9 @@ typedef struct st_mysql MYSQL;
 	// Clear text plugin
 	BOOL enableClearTextPlugin;
 
+	// Server public key request for caching_sha2_password over non-TLS connections
+	BOOL requestServerPublicKey;
+
 	// SSL connection details
 	BOOL useSSL;
 	NSString *sslKeyFilePath;
@@ -157,6 +160,8 @@ typedef struct st_mysql MYSQL;
 @property (readwrite) BOOL allowDataLocalInfile;
 
 @property (readwrite) BOOL enableClearTextPlugin;
+
+@property (readwrite) BOOL requestServerPublicKey;
 
 @property (readwrite) BOOL useSSL;
 @property (readwrite, copy) NSString *sslKeyFilePath;
