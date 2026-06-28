@@ -84,6 +84,11 @@ static const NSInteger SALightweightTableObjectTypeViewValue = 1;
 static const NSInteger SALightweightTableObjectTypeProcedureValue = 2;
 static const NSInteger SALightweightTableObjectTypeFunctionValue = 3;
 
+static BOOL SALightweightTableObjectTypeSupportsContent(NSInteger objectType)
+{
+    return objectType == SALightweightTableObjectTypeTableValue || objectType == SALightweightTableObjectTypeViewValue;
+}
+
 #define SAUIDiagnosticLog(fmt, ...) \
     do { \
         if (SAUIDiagnosticsEnabled()) { \
@@ -790,11 +795,12 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 
 - (NSDictionary *)lightweightResumeStateDictionary
 {
-    NSMutableArray *tabs = [NSMutableArray array];
-    NSMutableDictionary *win = [NSMutableDictionary dictionary];
+    NSMutableArray *windows = [NSMutableArray array];
     NSMutableArray *processedWindows = [NSMutableArray array];
 
     for (NSWindow *window in [self.tabManager orderedWindows]) {
+        NSMutableArray *tabs = [NSMutableArray array];
+        NSMutableDictionary *win = [NSMutableDictionary dictionary];
         NSArray *tabGroupWindows = [[window tabGroup] windows];
         NSArray *windowsToProcess = [tabGroupWindows count] > 0 ? tabGroupWindows : ([[window tabbedWindows] count] > 0 ? [window tabbedWindows] : @[window]);
         for (NSWindow *processedWindow in windowsToProcess) {
@@ -821,20 +827,23 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 
             [processedWindows addObject:windowController.uniqueID];
         }
+
+        if ([tabs count] > 0) {
+            [win setObject:tabs forKey:@"tabs"];
+            if (![win objectForKey:@"selectedTabIndex"]) {
+                [win setObject:@0 forKey:@"selectedTabIndex"];
+            }
+            [windows addObject:win];
+        }
     }
 
-    if (![tabs count]) {
+    if (![windows count]) {
         return nil;
-    }
-
-    [win setObject:tabs forKey:@"tabs"];
-    if (![win objectForKey:@"selectedTabIndex"]) {
-        [win setObject:@0 forKey:@"selectedTabIndex"];
     }
 
     NSMutableDictionary *resumeState = [@{
         @"version": @1,
-        @"windows": @[win]
+        @"windows": windows
     } mutableCopy];
 
     NSDictionary *consoleState = [self lightweightConsoleResumeStateDictionary];
@@ -890,8 +899,7 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
     }
 
     BOOL restoredAnyWindow = NO;
-    NSWindow *window = nil;
-    NSString *restoredFrame = nil;
+    BOOL usedInitialWindow = NO;
     NSMutableArray *createdWindowControllers = [NSMutableArray array];
 
     @try {
@@ -907,14 +915,25 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 
             NSMutableDictionary *restoredTabsByIndex = [NSMutableDictionary dictionary];
             SPWindowController *firstRestoredWindowController = nil;
+            NSWindow *window = nil;
+            NSString *restoredFrame = nil;
             for (NSUInteger tabIndex = 0; tabIndex < [tabs count]; tabIndex++) {
                 NSDictionary *tab = [tabs objectAtIndex:tabIndex];
                 if (![tab isKindOfClass:[NSDictionary class]] || ![[tab objectForKey:@"isLightweight"] boolValue]) {
                     continue;
                 }
 
-                BOOL isFirstRestoredWindow = window == nil;
-                SPWindowController *newWindowController = isFirstRestoredWindow ? [self.tabManager replaceTabServiceWithInitialWindow] : [self.tabManager newWindowForTabInWindow:window];
+                BOOL isFirstRestoredTab = window == nil;
+                BOOL usesInitialWindow = !usedInitialWindow;
+                SPWindowController *newWindowController = nil;
+                if (usesInitialWindow) {
+                    newWindowController = [self.tabManager replaceTabServiceWithInitialWindow];
+                    usedInitialWindow = YES;
+                } else if (isFirstRestoredTab) {
+                    newWindowController = [self.tabManager newWindowForWindow];
+                } else {
+                    newWindowController = [self.tabManager newWindowForTabInWindow:window];
+                }
                 [createdWindowControllers addObject:newWindowController];
                 if (window == nil) {
                     window = newWindowController.window;
@@ -938,9 +957,12 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
                     SPLog(@"Skipping invalid lightweight resume tab at index %lu", (unsigned long)tabIndex);
                     [newWindowController close];
                     [createdWindowControllers removeObject:newWindowController];
-                    if (isFirstRestoredWindow) {
+                    if (isFirstRestoredTab) {
                         window = nil;
                         restoredFrame = nil;
+                    }
+                    if (usesInitialWindow) {
+                        usedInitialWindow = NO;
                     }
                 }
             }
@@ -1590,17 +1612,23 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
         [self configureLightweightTableMenuForWindowController:activeWindowController];
 
         if (action == @selector(viewStructure:) ||
-            action == @selector(viewContent:) ||
             action == @selector(viewStatus:) ||
             action == @selector(viewRelations:) ||
             action == @selector(viewTriggers:) ||
             action == @selector(viewStructure) ||
-            action == @selector(viewContent) ||
             action == @selector(viewStatus) ||
             action == @selector(viewRelations) ||
             action == @selector(viewTriggers))
         {
             isValid = [activeWindowController hasSelectedLightweightTable];
+            goto validateMenuItemDone;
+        }
+
+        if (action == @selector(viewContent:) ||
+            action == @selector(viewContent))
+        {
+            NSInteger selectedObjectType = [activeWindowController selectedLightweightTableObjectType];
+            isValid = [activeWindowController hasSelectedLightweightTable] && SALightweightTableObjectTypeSupportsContent(selectedObjectType);
             goto validateMenuItemDone;
         }
 
@@ -1618,7 +1646,8 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
             action == @selector(focusOnTableContentFilter) ||
             action == @selector(showFilterTable))
         {
-            isValid = [activeWindowController hasSelectedLightweightTable];
+            NSInteger selectedObjectType = [activeWindowController selectedLightweightTableObjectType];
+            isValid = [activeWindowController hasSelectedLightweightTable] && SALightweightTableObjectTypeSupportsContent(selectedObjectType);
             goto validateMenuItemDone;
         }
 

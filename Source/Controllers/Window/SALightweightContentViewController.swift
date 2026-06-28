@@ -41,6 +41,8 @@ final class SALightweightContentViewController: NSViewController {
         let isNullable: Bool
         let isPrimary: Bool
         let isAutoIncrement: Bool
+        let isGenerated: Bool
+        let defaultValue: String?
         let defaultExpression: String?
     }
 
@@ -48,7 +50,6 @@ final class SALightweightContentViewController: NSViewController {
         var values: [ContentValue]
         var originalValues: [ContentValue]
         var isNew = false
-        var insertsWhenUnchanged = false
     }
 
     private struct ContentCacheEntry {
@@ -73,6 +74,11 @@ final class SALightweightContentViewController: NSViewController {
         case reload
         case leaveCurrentRows
         case removeRows(IndexSet)
+    }
+
+    private struct MutationExecutionResult {
+        let affectedRows: UInt64?
+        let expectedAffectedRows: UInt64?
     }
 
     fileprivate struct ContentFilterDefinition {
@@ -135,6 +141,7 @@ final class SALightweightContentViewController: NSViewController {
     private var hasNextPage = false
     private var isLoading = false
     private var isLoadingSortPreservingColumns = false
+    private var suppressPendingNewRowSelectionCommit = false
     private var sortColumn: String?
     private var sortAscending = true
     private var didRegisterPreferenceObservers = false
@@ -205,6 +212,20 @@ final class SALightweightContentViewController: NSViewController {
 
     private var canModifyRows: Bool {
         tableObjectType == .table && !isLoading
+    }
+
+    private var canEditExistingCells: Bool {
+        (tableObjectType == .table || tableObjectType == .view) && !isLoading
+    }
+
+    private func canEditColumn(at columnIndex: Int) -> Bool {
+        guard tableObjectType == .table || tableObjectType == .view,
+              columnIndex >= 0,
+              columnIndex < columnInfo.count else {
+            return tableObjectType == .table || tableObjectType == .view
+        }
+
+        return !columnInfo[columnIndex].isGenerated
     }
 
     private lazy var statusLabel: NSTextField = {
@@ -327,6 +348,18 @@ final class SALightweightContentViewController: NSViewController {
         deleteRows(sender)
     }
 
+    override func cancelOperation(_ sender: Any?) {
+        let selectedRow = tableView.selectedRow
+        if selectedRow >= 0,
+           selectedRow < rows.count,
+           rows[selectedRow].isNew {
+            cancelNewContentRow(selectedRow)
+            return
+        }
+
+        super.cancelOperation(sender)
+    }
+
     func focusRowFilter() {
         setRuleFilterVisible(true, animate: false)
         focusFirstFilterValueField()
@@ -352,6 +385,7 @@ final class SALightweightContentViewController: NSViewController {
             let key = (structureRow["Key"] ?? "").uppercased()
             let extra = (structureRow["Extra"] ?? "").lowercased()
             let defaultExpression = Self.defaultExpression(from: structureRow["default"])
+            let defaultValue = Self.defaultLiteralValue(from: structureRow["default"], typeGrouping: parsedType.typeGrouping)
             return ColumnInfo(
                 name: name,
                 type: parsedType.type,
@@ -362,6 +396,8 @@ final class SALightweightContentViewController: NSViewController {
                 isNullable: structureRow["null"] == "1",
                 isPrimary: key == "PRI",
                 isAutoIncrement: extra.contains("auto_increment"),
+                isGenerated: Self.isGeneratedColumn(extra: extra),
+                defaultValue: defaultValue,
                 defaultExpression: defaultExpression
             )
         }
@@ -763,6 +799,21 @@ private extension SALightweightContentViewController.ColumnInfo {
         definition["typegrouping"] = typeGrouping
         definition["null"] = isNullable ? "1" : "0"
 
+        if isAutoIncrement {
+            definition["autoincrement"] = "1"
+        }
+
+        if isGenerated {
+            definition["generatedalways"] = "GENERATED"
+        }
+
+        if let defaultValue = defaultValue {
+            definition["default"] = defaultValue
+        } else if let defaultExpression = defaultExpression {
+            definition["default"] = defaultExpression
+            definition["isfunction"] = "1"
+        }
+
         if !length.isEmpty {
             definition["length"] = length
             definition["char_length"] = NSNumber(value: Int(length) ?? 0)
@@ -1131,6 +1182,7 @@ private extension SALightweightContentViewController {
             let key = Self.displayString(for: row["Key"]).uppercased()
             let extra = Self.displayString(for: row["Extra"]).lowercased()
             let defaultExpression = Self.defaultExpression(from: row["Default"])
+            let defaultValue = Self.defaultLiteralValue(from: row["Default"], typeGrouping: parsedType.typeGrouping)
             loadedColumns.append(ColumnInfo(
                 name: name,
                 type: parsedType.type,
@@ -1141,11 +1193,22 @@ private extension SALightweightContentViewController {
                 isNullable: Self.displayString(for: row["Null"]).uppercased() == "YES",
                 isPrimary: key == "PRI",
                 isAutoIncrement: extra.contains("auto_increment"),
+                isGenerated: Self.isGeneratedColumn(extra: extra),
+                defaultValue: defaultValue,
                 defaultExpression: defaultExpression
             ))
         }
 
         return loadedColumns
+    }
+
+    private static func isGeneratedColumn(extra: String) -> Bool {
+        let normalized = extra
+            .replacingOccurrences(of: "_", with: " ")
+            .lowercased()
+
+        guard normalized.contains("generated") else { return false }
+        return !normalized.contains("default generated")
     }
 
     private static func defaultExpression(from value: Any?) -> String? {
@@ -1177,9 +1240,48 @@ private extension SALightweightContentViewController {
         return nil
     }
 
+    private static func defaultLiteralValue(from value: Any?, typeGrouping: String) -> String? {
+        guard let value = value, !(value is NSNull) else { return nil }
+
+        let rawValue = displayString(for: value)
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
+        guard trimmed.uppercased() != "NULL", trimmed != nullValue else { return nil }
+        guard defaultExpression(from: value) == nil else { return nil }
+
+        if typeGrouping == "bit" {
+            return bitDefaultDisplayValue(from: trimmed) ?? trimmed
+        }
+
+        return unquotedSQLStringLiteral(trimmed) ?? rawValue
+    }
+
+    private static func bitDefaultDisplayValue(from value: String) -> String? {
+        let uppercased = value.uppercased()
+        if uppercased.hasPrefix("B'"), value.hasSuffix("'") {
+            return String(value.dropFirst(2).dropLast())
+        }
+
+        return unquotedSQLStringLiteral(value)
+    }
+
+    private static func unquotedSQLStringLiteral(_ value: String) -> String? {
+        guard value.count >= 2,
+              let first = value.first,
+              let last = value.last,
+              (first == "'" || first == "\""),
+              first == last else { return nil }
+
+        let body = String(value.dropFirst().dropLast())
+        let quote = String(first)
+        return body
+            .replacingOccurrences(of: quote + quote, with: quote)
+            .replacingOccurrences(of: "\\" + quote, with: quote)
+    }
+
     private static func orderedColumnInfo(_ columnInfo: [ColumnInfo], fieldNames: [String]) -> [ColumnInfo] {
         return fieldNames.map { fieldName in
-            columnInfo.first { $0.name == fieldName } ?? ColumnInfo(name: fieldName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
+            columnInfo.first { $0.name == fieldName } ?? ColumnInfo(name: fieldName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, isGenerated: false, defaultValue: nil, defaultExpression: nil)
         }
     }
 
@@ -1299,6 +1401,8 @@ private extension SALightweightContentViewController {
         let values = columnInfo.map(Self.defaultNewRowValue(for:))
         let newRow = ContentRow(values: values, originalValues: values, isNew: true)
         rows.append(newRow)
+        suppressPendingNewRowSelectionCommit = true
+        defer { suppressPendingNewRowSelectionCommit = false }
         tableView.reloadData()
         let rowIndex = rows.count - 1
         tableView.selectRowIndexes(IndexSet(integer: rowIndex), byExtendingSelection: false)
@@ -1322,21 +1426,30 @@ private extension SALightweightContentViewController {
         }
 
         let row = rows[selectedRow]
-        let duplicatedValues = columnInfo.enumerated().map { index, column -> ContentValue in
-            guard !column.isAutoIncrement else { return .null }
-            guard index < row.values.count else { return Self.defaultNewRowValue(for: column) }
-            switch row.values[index] {
-            case .notLoaded:
-                return Self.defaultNewRowValue(for: column)
-            default:
-                return row.values[index]
-            }
+        if row.values.contains(where: {
+            if case .notLoaded = $0 { return true }
+            return false
+        }) {
+            hydrateRowForDuplicate(rowIndex: selectedRow)
+            return
         }
 
-        let duplicatedRow = ContentRow(values: duplicatedValues, originalValues: duplicatedValues, isNew: true, insertsWhenUnchanged: true)
+        insertDuplicateRow(from: row.values, after: selectedRow)
+    }
+
+    private func insertDuplicateRow(from sourceValues: [ContentValue], after selectedRow: Int) {
+        let duplicatedValues = columnInfo.enumerated().map { index, column -> ContentValue in
+            guard !column.isAutoIncrement, !column.isGenerated else { return .null }
+            guard index < sourceValues.count else { return Self.defaultNewRowValue(for: column) }
+            return sourceValues[index]
+        }
+
+        let duplicatedRow = ContentRow(values: duplicatedValues, originalValues: duplicatedValues, isNew: true)
         let insertionIndex = min(selectedRow + 1, rows.count)
         rows.insert(duplicatedRow, at: insertionIndex)
         displayCache.invalidateAll()
+        suppressPendingNewRowSelectionCommit = true
+        defer { suppressPendingNewRowSelectionCommit = false }
         tableView.reloadData()
         tableView.selectRowIndexes(IndexSet(integer: insertionIndex), byExtendingSelection: false)
         tableView.scrollRowToVisible(insertionIndex)
@@ -1347,11 +1460,81 @@ private extension SALightweightContentViewController {
         cacheCurrentContentState()
     }
 
+    private func hydrateRowForDuplicate(rowIndex: Int) {
+        guard rowIndex >= 0,
+              rowIndex < rows.count,
+              let connection = connection else { return }
+
+        guard let whereClause = Self.rowIdentityWhereClause(for: rows[rowIndex].originalValues, columnInfo: columnInfo, connection: connection) else {
+            showContentError(
+                title: NSLocalizedString("Unable to duplicate row", comment: "lightweight content duplicate hydrate no identity title"),
+                message: NSLocalizedString("This row contains BLOB/TEXT values that are not loaded, and the row cannot be uniquely identified for safe loading. Reload the table or add/use a primary key before duplicating.", comment: "lightweight content duplicate hydrate no identity message")
+            )
+            statusLabel.stringValue = NSLocalizedString("Duplicate blocked because unloaded values could not be safely loaded.", comment: "lightweight content duplicate hydrate blocked status")
+            return
+        }
+
+        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let selectedColumns = columnInfo.map { Self.backtickQuoted($0.name) }.joined(separator: ", ")
+        let query = "SELECT \(selectedColumns) FROM \(tableReference) WHERE \(whereClause) LIMIT 1"
+
+        statusLabel.stringValue = NSLocalizedString("Loading row before duplicate...", comment: "lightweight content duplicate hydrate loading status")
+        isLoading = true
+        updateControls()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
+            guard let self = self, let connection = connection else { return }
+
+            _ = connection.selectDatabase(self.database)
+            let result = connection.queryString(query)
+            result?.defaultRowReturnType = SPMySQLResultRowAsArray
+            let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
+            let hydratedRow = result?.getRowAsArray()?.map { Self.contentValue(for: $0) }
+
+            DispatchQueue.main.async {
+                self.isLoading = false
+
+                if let error = error, !error.isEmpty {
+                    self.statusLabel.stringValue = error
+                    self.showContentError(title: NSLocalizedString("Unable to duplicate row", comment: "lightweight content duplicate hydrate error title"), message: error)
+                    self.updateControls()
+                    return
+                }
+
+                guard let hydratedRow = hydratedRow, !hydratedRow.isEmpty else {
+                    self.showContentError(
+                        title: NSLocalizedString("Unable to duplicate row", comment: "lightweight content duplicate hydrate missing row title"),
+                        message: NSLocalizedString("The selected row could not be loaded safely, so it was not duplicated.", comment: "lightweight content duplicate hydrate missing row message")
+                    )
+                    self.statusLabel.stringValue = NSLocalizedString("Duplicate blocked because the row could not be loaded.", comment: "lightweight content duplicate hydrate missing row status")
+                    self.updateControls()
+                    return
+                }
+
+                guard rowIndex < self.rows.count,
+                      let currentWhereClause = Self.rowIdentityWhereClause(for: self.rows[rowIndex].originalValues, columnInfo: self.columnInfo, connection: connection),
+                      currentWhereClause == whereClause else {
+                    self.statusLabel.stringValue = NSLocalizedString("Duplicate cancelled because the selected row changed.", comment: "lightweight content duplicate hydrate stale row status")
+                    self.updateControls()
+                    return
+                }
+
+                self.rows[rowIndex].values = hydratedRow
+                self.rows[rowIndex].originalValues = hydratedRow
+                self.displayCache.invalidateAll()
+                self.insertDuplicateRow(from: hydratedRow, after: rowIndex)
+            }
+        }
+    }
+
     func performDeleteRows(_ sender: Any?) {
         guard connection != nil, canModifyRows else { return }
 
         let selectedIndexes = tableView.selectedRowIndexes
         guard !selectedIndexes.isEmpty else { return }
+        let allowsDeleteAllRows = allowsDeletingAllRows(for: selectedIndexes)
+        let canPromptForAutoIncrementReset = allowsDeleteAllRows && columnInfo.contains { $0.isAutoIncrement }
+
         if selectedIndexes.count == 1,
            let selectedRow = selectedIndexes.first,
            selectedRow >= 0,
@@ -1373,9 +1556,22 @@ private extension SALightweightContentViewController {
         alert.addButton(withTitle: selectedIndexes.count == 1
             ? NSLocalizedString("Delete Selected Row", comment: "delete selected row button")
             : NSLocalizedString("Delete Selected Rows", comment: "delete selected rows button"))
+        if allowsDeleteAllRows {
+            alert.addButton(withTitle: NSLocalizedString("Delete ALL ROWS IN TABLE", comment: "delete all rows in table button"))
+        }
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
+        if canPromptForAutoIncrementReset {
+            alert.showsSuppressionButton = true
+            alert.suppressionButton?.state = UserDefaults.standard.bool(forKey: SPResetAutoIncrementAfterDeletionOfAllRows) ? .on : .off
+            alert.suppressionButton?.title = NSLocalizedString("Reset AUTO_INCREMENT after deletion\n(only for Delete ALL ROWS IN TABLE)?", comment: "reset auto_increment after deletion of all rows message")
+            alert.suppressionButton?.cell?.controlSize = .small
+            alert.suppressionButton?.font = NSFont.systemFont(ofSize: 11)
+        }
 
-        guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
+        let alertResponse = alert.runModalCenteredInKeyWindow()
+        let isDeleteSelectedRowsRequest = alertResponse == .alertFirstButtonReturn
+        let isDeleteAllRowsRequest = allowsDeleteAllRows && alertResponse == .alertSecondButtonReturn
+        guard isDeleteSelectedRowsRequest || isDeleteAllRowsRequest else { return }
 
         if UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
            UserDefaults.standard.bool(forKey: SPShowWarningBeforeDeleteQuery) {
@@ -1395,17 +1591,51 @@ private extension SALightweightContentViewController {
             }
         }
 
+        if isDeleteAllRowsRequest {
+            let resetAutoIncrement = canPromptForAutoIncrementReset && alert.suppressionButton?.state == .on
+            let expectedAffectedRows = UInt64(selectedIndexes.count)
+            runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows"), reloadPolicy: .reload, onSuccess: {
+                UserDefaults.standard.set(resetAutoIncrement, forKey: SPResetAutoIncrementAfterDeletionOfAllRows)
+            }) { [database, table] connection in
+                let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+                _ = connection.queryString("DELETE FROM \(tableReference)")
+                let deletedRows = connection.queryErrored() ? 0 : connection.rowsAffectedByLastQuery()
+                if resetAutoIncrement, !connection.queryErrored() {
+                    _ = connection.queryString("ALTER TABLE \(tableReference) AUTO_INCREMENT = 1")
+                }
+                return MutationExecutionResult(affectedRows: deletedRows, expectedAffectedRows: expectedAffectedRows)
+            }
+            return
+        }
+
         let rowsToDelete = selectedIndexes.compactMap { index in index < rows.count ? rows[index] : nil }
         let reloadPolicy: MutationReloadPolicy = UserDefaults.standard.bool(forKey: SPReloadAfterRemovingRow) ? .reload : .removeRows(selectedIndexes)
         runMutation(status: NSLocalizedString("Deleting rows...", comment: "lightweight content deleting rows"), reloadPolicy: reloadPolicy) { [database, table, columnInfo] connection in
+            var affectedRows: UInt64 = 0
             for row in rowsToDelete {
                 guard let whereClause = Self.rowIdentityWhereClause(for: row.originalValues, columnInfo: columnInfo, connection: connection) else { continue }
                 let limit = columnInfo.contains { $0.isPrimary } ? "" : " LIMIT 1"
                 let query = "DELETE FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) WHERE \(whereClause)\(limit)"
                 _ = connection.queryString(query)
                 if connection.queryErrored() { break }
+                affectedRows += connection.rowsAffectedByLastQuery()
             }
+            return MutationExecutionResult(affectedRows: affectedRows, expectedAffectedRows: UInt64(rowsToDelete.count))
         }
+    }
+
+    private func allowsDeletingAllRows(for selectedIndexes: IndexSet) -> Bool {
+        guard tableObjectType == .table,
+              !rows.isEmpty,
+              selectedIndexes.count == rows.count,
+              !rows.contains(where: { $0.isNew }),
+              !limitResults,
+              !hasNextPage,
+              !isRuleFilterActive,
+              advancedFilterWhereClause == nil,
+              columnFilterTerms == nil else { return false }
+
+        return true
     }
 
     func performRemoveRow(_ sender: Any?) {
@@ -1485,7 +1715,10 @@ private extension SALightweightContentViewController {
         SALightweightResultGrid.exportResult(fileExtension: fileExtension, content: content, defaultName: "\(table).\(fileExtension)")
     }
 
-    private func runMutation(status: String, reloadPolicy: MutationReloadPolicy = .reload, requiresAffectedRows: Bool = false, mutation: @escaping (SPMySQLConnection) -> Void) {
+    private func runMutation(status: String,
+                             reloadPolicy: MutationReloadPolicy = .reload,
+                             onSuccess: (() -> Void)? = nil,
+                             mutation: @escaping (SPMySQLConnection) -> MutationExecutionResult) {
         guard let connection = connection else { return }
 
         statusLabel.stringValue = status
@@ -1496,9 +1729,8 @@ private extension SALightweightContentViewController {
             guard let self = self, let connection = connection else { return }
 
             _ = connection.selectDatabase(self.database)
-            mutation(connection)
+            let mutationResult = mutation(connection)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
-            let affectedRows: UInt64? = error == nil && requiresAffectedRows ? connection.rowsAffectedByLastQuery() : nil
 
             DispatchQueue.main.async {
                 self.isLoading = false
@@ -1509,11 +1741,14 @@ private extension SALightweightContentViewController {
                     return
                 }
 
-                if let affectedRows = affectedRows, affectedRows == 0 {
-                    self.handleNoAffectedRowsAfterContentMutation()
+                if let affectedRows = mutationResult.affectedRows,
+                   let expectedAffectedRows = mutationResult.expectedAffectedRows,
+                   affectedRows != expectedAffectedRows {
+                    self.handleUnexpectedAffectedRowsAfterDelete(expected: expectedAffectedRows, actual: affectedRows)
                     return
                 }
 
+                onSuccess?()
                 self.finishSuccessfulMutation(reloadPolicy: reloadPolicy)
             }
         }
@@ -1591,13 +1826,13 @@ private extension SALightweightContentViewController {
             let columnName = columns[columnIndex]
             let column = columnIndex < columnInfo.count
                 ? columnInfo[columnIndex]
-                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
+                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, isGenerated: false, defaultValue: nil, defaultExpression: nil)
             let tableColumn = SALightweightResultGrid.configuredColumn(
                 identifier: columnIndex,
                 title: columnName,
                 descriptor: Self.gridColumnDescriptor(columnName: columnName, column: column),
                 font: tableFont,
-                editable: tableObjectType == .table,
+                editable: canEditColumn(at: columnIndex),
                 headerToolTip: legacyHeaderToolTip(for: column),
                 headerAttributedString: contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes),
                 savedWidth: savedWidth(for: columnName),
@@ -1649,6 +1884,7 @@ private extension SALightweightContentViewController {
                 column?.length ?? "",
                 column?.values.joined(separator: "\u{1f}") ?? "",
                 column?.isNullable == true ? "1" : "0",
+                column?.isGenerated == true ? "1" : "0",
                 String(describing: tableObjectType)
             ].joined(separator: "\u{1e}")
         }
@@ -1662,14 +1898,14 @@ private extension SALightweightContentViewController {
             let columnName = columns[columnIndex]
             let column = columnIndex < columnInfo.count
                 ? columnInfo[columnIndex]
-                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, defaultExpression: nil)
+                : ColumnInfo(name: columnName, type: "", typeGrouping: "", length: "", values: [], comment: "", isNullable: false, isPrimary: false, isAutoIncrement: false, isGenerated: false, defaultValue: nil, defaultExpression: nil)
             let tableColumn = tableView.tableColumns[displayIndex]
             SALightweightResultGrid.updateColumn(tableColumn,
                                                  identifier: columnIndex,
                                                  title: columnName,
                                                  descriptor: Self.gridColumnDescriptor(columnName: columnName, column: column),
                                                  font: tableFont,
-                                                 editable: tableObjectType == .table,
+                                                 editable: canEditColumn(at: columnIndex),
                                                  headerToolTip: legacyHeaderToolTip(for: column),
                                                  headerAttributedString: contentHeaderTitle(for: columnIndex, columnName: columnName, showColumnTypes: showColumnTypes))
         }
@@ -1755,16 +1991,25 @@ private extension SALightweightContentViewController {
     }
 
     private func firstEditableContentColumnIndex() -> Int {
-        return tableView.tableColumns.firstIndex(where: { !$0.isHidden }) ?? 0
+        return tableView.tableColumns.firstIndex { tableColumn in
+            guard !tableColumn.isHidden,
+                  let columnIndex = Int(tableColumn.identifier.rawValue) else { return false }
+
+            return canEditColumn(at: columnIndex)
+        } ?? 0
     }
 
     private static func defaultNewRowValue(for column: ColumnInfo) -> ContentValue {
-        if column.isAutoIncrement {
+        if column.isAutoIncrement || column.isGenerated {
             return .null
         }
 
         if let defaultExpression = column.defaultExpression, !defaultExpression.isEmpty {
             return .object(defaultExpression)
+        }
+
+        if let defaultValue = column.defaultValue {
+            return .object(defaultValue)
         }
 
         if column.isNullable {
@@ -2587,9 +2832,9 @@ private extension SALightweightContentViewController {
         if let length = UInt64(column.length) {
             editor.textMaxLength = length
         }
-        editor.fieldType = column.type
-        editor.fieldEncoding = ""
-        editor.allowNULL = !column.isNullable
+                    editor.fieldType = column.type
+                    editor.fieldEncoding = ""
+                    editor.allowNULL = !column.isNullable
 
         let originalData: Any
         switch rows[row].values[columnIndex] {
@@ -2607,13 +2852,13 @@ private extension SALightweightContentViewController {
                     fieldName: column.name,
                     usingEncoding: connection.stringEncoding(),
                     isObjectBlob: column.typeGrouping == "textdata" || column.typeGrouping == "blobdata",
-                    isEditable: canModifyRows,
+                    isEditable: canEditExistingCells,
                     with: window,
                     sender: self,
                     contextInfo: [
                         "rowIndex": NSNumber(value: row),
                         "columnIndex": NSNumber(value: columnIndex),
-                        "isFieldEditable": NSNumber(value: canModifyRows),
+                        "isFieldEditable": NSNumber(value: canEditExistingCells),
                         "disableSheetAnimation": NSNumber(value: true),
                         "deferTextLoading": NSNumber(value: true)
                     ])
@@ -2680,13 +2925,33 @@ private extension SALightweightContentViewController {
         case .notLoaded:
             return nil
         case .object(let object):
+            if columnInfo.typeGrouping == "bit",
+               let bitLiteral = bitSQLLiteral(for: object, columnInfo: columnInfo) {
+                return bitLiteral
+            }
+
+            if let number = object as? NSNumber,
+               isNumericColumn(columnInfo) {
+                return number.stringValue
+            }
+
             if let data = object as? Data {
-                return connection.escapeAndQuoteData(data) ?? "'\(data.map { String(format: "%02X", $0) }.joined())'"
+                return dataSQLLiteral(data, connection: connection)
+            }
+
+            if let geometry = object as? SPMySQLGeometryData,
+               let data = geometry.data() {
+                return dataSQLLiteral(data, connection: connection)
             }
 
             let value = String(describing: object)
-            if columnInfo.typeGrouping == "bit" {
-                return "b'\(value)'"
+            if isNumericColumn(columnInfo),
+               let numericValue = numericSQLLiteral(value, columnInfo: columnInfo) {
+                return numericValue
+            }
+
+            if let binaryValue = binarySQLLiteral(value, columnInfo: columnInfo) {
+                return binaryValue
             }
 
             return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
@@ -2701,7 +2966,7 @@ private extension SALightweightContentViewController {
             return EditedContentSQLValue(sql: expression, localValue: .object(value), requiresReload: true)
         }
 
-        let localValue: ContentValue = value == (UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL") && columnInfo.isNullable
+        let localValue: ContentValue = shouldSaveEditedValueAsNULL(value, columnInfo: columnInfo)
             ? .null
             : .object(value)
         guard let sqlValue = sqlValue(localValue, columnInfo: columnInfo, connection: connection) else { return nil }
@@ -2907,7 +3172,7 @@ private extension SALightweightContentViewController {
                   columnIndex < columns.count,
                   columnIndex < columnInfo.count else { return nil }
 
-            if skipAutoIncrement, columnInfo[columnIndex].isAutoIncrement {
+            if columnInfo[columnIndex].isGenerated || (skipAutoIncrement && columnInfo[columnIndex].isAutoIncrement) {
                 return nil
             }
 
@@ -2924,25 +3189,7 @@ private extension SALightweightContentViewController {
     }
 
     func sqlInsertValue(for value: ContentValue, columnInfo: ColumnInfo, connection: SPMySQLConnection) -> String {
-        switch value {
-        case .null, .notLoaded:
-            return "NULL"
-        case .object(let object):
-            if let data = object as? Data {
-                return connection.escapeAndQuoteData(data) ?? Self.singleQuoted(data.map { String(format: "%02X", $0) }.joined())
-            }
-
-            let displayValue = Self.displayString(for: value, columnInfo: columnInfo, truncate: false)
-            if columnInfo.typeGrouping == "integer" || columnInfo.typeGrouping == "float" || columnInfo.type.uppercased() == "YEAR" {
-                return displayValue
-            }
-
-            if columnInfo.typeGrouping == "bit" {
-                return "b'\(displayValue)'"
-            }
-
-            return connection.escapeAndQuoteString(displayValue) ?? Self.singleQuoted(displayValue)
-        }
+        return Self.sqlValue(value, columnInfo: columnInfo, connection: connection) ?? "NULL"
     }
 
     func columnName(for tableColumn: NSTableColumn) -> String {
@@ -2970,13 +3217,145 @@ private extension SALightweightContentViewController {
         return connection.escapeAndQuoteString(value) ?? "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
+    private static func shouldSaveEditedValueAsNULL(_ value: String, columnInfo: ColumnInfo) -> Bool {
+        guard columnInfo.isNullable else { return false }
+
+        if value == (UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL") {
+            return true
+        }
+
+        return value.isEmpty && (isNumericColumn(columnInfo) || columnInfo.typeGrouping == "date")
+    }
+
+    private static func dataSQLLiteral(_ data: Data, connection: SPMySQLConnection) -> String {
+        return connection.escapeAndQuoteData(data) ?? "X'\(hexString(for: data))'"
+    }
+
+    private static func hexString(for data: Data) -> String {
+        return data.map { String(format: "%02X", $0) }.joined()
+    }
+
+    private static func binarySQLLiteral(_ value: String, columnInfo: ColumnInfo) -> String? {
+        guard columnInfo.typeGrouping == "binary" || columnInfo.typeGrouping == "blobdata" else { return nil }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hexValue: String?
+        if trimmed.count >= 3,
+           trimmed.lowercased().hasPrefix("x'"),
+           trimmed.hasSuffix("'") {
+            hexValue = String(trimmed.dropFirst(2).dropLast())
+        } else if trimmed.lowercased().hasPrefix("0x") {
+            hexValue = String(trimmed.dropFirst(2))
+        } else {
+            hexValue = nil
+        }
+
+        guard let hexValue = hexValue,
+              !hexValue.isEmpty,
+              hexValue.count.isMultiple(of: 2),
+              hexValue.range(of: #"^[0-9A-Fa-f]+$"#, options: .regularExpression) != nil else { return nil }
+
+        return "X'\(hexValue.uppercased())'"
+    }
+
+    private static func bitSQLLiteral(for object: Any, columnInfo: ColumnInfo) -> String? {
+        if let data = object as? Data {
+            return bitSQLLiteral(fromBits: bitString(for: data, columnInfo: columnInfo))
+        }
+
+        return bitSQLLiteral(from: String(describing: object), columnInfo: columnInfo)
+    }
+
+    private static func bitSQLLiteral(from value: String, columnInfo: ColumnInfo) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "b'0'"
+        }
+
+        let lowercased = trimmed.lowercased()
+        let bits: String
+        if lowercased.hasPrefix("b'"), trimmed.hasSuffix("'") {
+            bits = String(trimmed.dropFirst(2).dropLast())
+        } else if lowercased.hasPrefix("0b") {
+            bits = String(trimmed.dropFirst(2))
+        } else if lowercased.hasPrefix("0x"),
+                  let hexBits = bitString(fromHex: String(trimmed.dropFirst(2)), columnInfo: columnInfo) {
+            bits = hexBits
+        } else {
+            bits = trimmed
+        }
+
+        return bitSQLLiteral(fromBits: bits)
+    }
+
+    private static func bitSQLLiteral(fromBits bits: String) -> String? {
+        let normalized = bits.isEmpty ? "0" : bits
+        guard normalized.range(of: #"^[01]+$"#, options: .regularExpression) != nil else { return nil }
+        return "b'\(normalized)'"
+    }
+
+    private static func bitString(for data: Data, columnInfo: ColumnInfo) -> String {
+        let rawBits = data.map { byte -> String in
+            let bits = String(byte, radix: 2)
+            return String(repeating: "0", count: max(0, 8 - bits.count)) + bits
+        }.joined()
+
+        guard let bitLength = Int(columnInfo.length),
+              bitLength > 0,
+              bitLength < rawBits.count else { return rawBits }
+
+        return String(rawBits.suffix(bitLength))
+    }
+
+    private static func bitString(fromHex value: String, columnInfo: ColumnInfo) -> String? {
+        guard !value.isEmpty,
+              value.count.isMultiple(of: 2),
+              value.range(of: #"^[0-9A-Fa-f]+$"#, options: .regularExpression) != nil else { return nil }
+
+        var data = Data()
+        var index = value.startIndex
+        while index < value.endIndex {
+            let nextIndex = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<nextIndex], radix: 16) else { return nil }
+            data.append(byte)
+            index = nextIndex
+        }
+
+        return bitString(for: data, columnInfo: columnInfo)
+    }
+
+    private static func isNumericColumn(_ columnInfo: ColumnInfo) -> Bool {
+        return columnInfo.typeGrouping == "integer"
+            || columnInfo.typeGrouping == "float"
+            || columnInfo.type.uppercased() == "YEAR"
+    }
+
+    private static func numericSQLLiteral(_ value: String, columnInfo: ColumnInfo) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let pattern = columnInfo.typeGrouping == "integer" || columnInfo.type.uppercased() == "YEAR"
+            ? #"^[+-]?[0-9]+$"#
+            : #"^[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))(?:[eE][+-]?[0-9]+)?$"#
+
+        guard trimmed.range(of: pattern, options: .regularExpression) != nil else { return nil }
+        return trimmed
+    }
+
     private static func rowIdentityWhereClause(for values: [ContentValue], columnInfo: [ColumnInfo], connection: SPMySQLConnection) -> String? {
         let primaryColumns = columnInfo.enumerated().filter { $0.element.isPrimary }
-        let identityColumns = primaryColumns.isEmpty ? Array(columnInfo.enumerated()) : primaryColumns
+        let candidateColumns = primaryColumns.isEmpty ? Array(columnInfo.enumerated()) : primaryColumns
+        let identityColumns = candidateColumns.filter { index, column in
+            guard index < values.count else { return false }
+            return canUseColumnForRowIdentity(column, value: values[index])
+        }
 
         guard !identityColumns.isEmpty else { return nil }
+        if !primaryColumns.isEmpty && identityColumns.count != primaryColumns.count {
+            return nil
+        }
 
-        let parts = identityColumns.compactMap { index, column -> String? in
+        let parts = identityColumns.map { index, column -> String? in
             guard index < values.count else { return nil }
 
             if case .null = values[index] {
@@ -2987,9 +3366,20 @@ private extension SALightweightContentViewController {
             return "\(backtickQuoted(column.name)) = \(sqlValue)"
         }
 
-        guard !parts.isEmpty else { return nil }
+        guard !parts.isEmpty, parts.allSatisfy({ $0 != nil }) else { return nil }
 
-        return parts.joined(separator: " AND ")
+        return parts.compactMap { $0 }.joined(separator: " AND ")
+    }
+
+    private static func canUseColumnForRowIdentity(_ column: ColumnInfo, value: ContentValue) -> Bool {
+        guard !column.isGenerated else { return false }
+        guard column.typeGrouping != "blobdata", column.typeGrouping != "textdata" else { return false }
+
+        if case .notLoaded = value {
+            return false
+        }
+
+        return true
     }
 
     static func backtickQuoted(_ value: String) -> String {
@@ -3180,23 +3570,41 @@ private extension SALightweightContentViewController {
         updateControls()
     }
 
-    private func saveNewContentRow(row: Int, editedColumnIndex: Int, updatedValue: EditedContentSQLValue, connection: SPMySQLConnection) {
+    @discardableResult
+    private func commitPendingNewContentRow(row: Int) -> Bool {
+        guard let connection = connection,
+              row >= 0,
+              row < rows.count,
+              rows[row].isNew,
+              !isLoading else { return true }
+
+        saveNewContentRow(row: row, editedColumnIndex: nil, updatedValue: nil, connection: connection)
+        return false
+    }
+
+    private func saveNewContentRow(row: Int, editedColumnIndex: Int?, updatedValue: EditedContentSQLValue?, connection: SPMySQLConnection) {
         guard row >= 0, row < rows.count, rows[row].isNew else { return }
 
         var newValues = rows[row].values
-        newValues[editedColumnIndex] = updatedValue.localValue
+        if let editedColumnIndex = editedColumnIndex,
+           let updatedValue = updatedValue,
+           editedColumnIndex >= 0,
+           editedColumnIndex < newValues.count {
+            newValues[editedColumnIndex] = updatedValue.localValue
+        }
 
         var insertColumns: [String] = []
         var insertValues: [String] = []
         for (index, column) in columnInfo.enumerated() {
-            guard index < newValues.count, !column.isAutoIncrement else { continue }
+            guard index < newValues.count, !column.isAutoIncrement, !column.isGenerated else { continue }
 
             let editedSQLValue: EditedContentSQLValue?
-            if index == editedColumnIndex {
+            if let editedColumnIndex = editedColumnIndex,
+               index == editedColumnIndex,
+               let updatedValue = updatedValue {
                 editedSQLValue = updatedValue
             } else {
-                let displayValue = displayString(for: newValues[index], columnIndex: index, truncate: false)
-                editedSQLValue = Self.sqlValue(forEditedString: displayValue, columnInfo: column, connection: connection)
+                editedSQLValue = Self.sqlValue(forNewRowValue: newValues[index], columnInfo: column, connection: connection)
             }
 
             guard let sqlValue = editedSQLValue?.sql else { continue }
@@ -3242,6 +3650,11 @@ private extension SALightweightContentViewController {
                     return
                 }
 
+                guard affectedRows == 1 else {
+                    self.handleUnexpectedAffectedRowsAfterContentMutation(expected: 1, actual: affectedRows, row: row, columnIndex: editedColumnIndex, cancelsNewRow: true)
+                    return
+                }
+
                 guard row >= 0, row < self.rows.count else { return }
                 if reloadAfterAdd {
                     self.loadCurrentPage()
@@ -3260,6 +3673,19 @@ private extension SALightweightContentViewController {
                 self.updateControls()
             }
         }
+    }
+
+    private static func sqlValue(forNewRowValue value: ContentValue, columnInfo: ColumnInfo, connection: SPMySQLConnection) -> EditedContentSQLValue? {
+        let displayValue = displayString(for: value, columnInfo: columnInfo, truncate: false)
+        if let expression = SALightweightResultGrid.editedSQLExpression(for: displayValue,
+                                                                        typeGrouping: columnInfo.typeGrouping,
+                                                                        defaultExpression: columnInfo.defaultExpression,
+                                                                        allowsStringUUIDFunction: true) {
+            return EditedContentSQLValue(sql: expression, localValue: value, requiresReload: true)
+        }
+
+        guard let sql = sqlValue(value, columnInfo: columnInfo, connection: connection) else { return nil }
+        return EditedContentSQLValue(sql: sql, localValue: value, requiresReload: false)
     }
 
     private func showContentError(title: String, message: String) {
@@ -3287,6 +3713,41 @@ private extension SALightweightContentViewController {
         }
 
         statusLabel.stringValue = NSLocalizedString("No rows were affected.", comment: "lightweight content no affected rows mutation status")
+        updateControls()
+    }
+
+    private func handleUnexpectedAffectedRowsAfterDelete(expected: UInt64, actual: UInt64) {
+        let title = NSLocalizedString("Unexpected number of rows removed!", comment: "Table Content : Remove Row : Result : n Error title")
+        let message: String
+        if actual > expected {
+            let additionalRows = actual - expected
+            message = additionalRows == 1
+                ? NSLocalizedString("One additional row was removed! Please reload the table and check the data.", comment: "lightweight content delete too many rows warning")
+                : String(format: NSLocalizedString("%llu additional rows were removed! Please reload the table and check the data.", comment: "lightweight content delete too many rows warning plural"), additionalRows)
+        } else {
+            let missingRows = expected - actual
+            message = missingRows == 1
+                ? NSLocalizedString("One row was not removed. Reload the table to be sure that the contents have not changed in the meantime.", comment: "lightweight content delete too few rows warning")
+                : String(format: NSLocalizedString("%llu rows were not removed. Reload the table to be sure that the contents have not changed in the meantime.", comment: "lightweight content delete too few rows warning plural"), missingRows)
+        }
+
+        showContentError(title: title, message: message)
+        statusLabel.stringValue = NSLocalizedString("Unexpected number of rows removed.", comment: "lightweight content unexpected delete affected rows status")
+        invalidateCurrentContentCache()
+        loadCurrentPage()
+    }
+
+    private func handleUnexpectedAffectedRowsAfterContentMutation(expected: UInt64, actual: UInt64, row: Int? = nil, columnIndex: Int? = nil, cancelsNewRow: Bool = false) {
+        let message = String(format: NSLocalizedString("Expected %1$llu row to be changed, but MySQL reported %2$llu changed rows. Reload the table to verify the current data.", comment: "lightweight content unexpected affected rows message"), expected, actual)
+        showContentError(title: NSLocalizedString("Unexpected number of rows changed!", comment: "lightweight content unexpected affected rows title"), message: message)
+
+        if let row = row, cancelsNewRow {
+            cancelNewContentRow(row)
+        } else if let row = row, let columnIndex = columnIndex {
+            reloadCell(row: row, columnIndex: columnIndex)
+        }
+
+        statusLabel.stringValue = NSLocalizedString("Unexpected number of rows affected.", comment: "lightweight content unexpected affected rows status")
         updateControls()
     }
 
@@ -3322,11 +3783,24 @@ extension SALightweightContentViewController {
 
     func commitActiveContentEditBeforeSidebarSelection() -> Bool {
         guard !isFieldEditorPresented else { return false }
-        guard tableView.editedRow >= 0 || tableView.editedColumn >= 0 else { return true }
+        guard !isLoading else { return false }
+        guard tableView.editedRow >= 0 || tableView.editedColumn >= 0 else {
+            if let pendingNewRow = rows.firstIndex(where: { $0.isNew }) {
+                return commitPendingNewContentRow(row: pendingNewRow)
+            }
+
+            return true
+        }
         guard let window = tableView.window else { return true }
 
         guard window.makeFirstResponder(tableView) else {
             return false
+        }
+
+        guard !isLoading else { return false }
+
+        if let pendingNewRow = rows.firstIndex(where: { $0.isNew }) {
+            return commitPendingNewContentRow(row: pendingNewRow)
         }
 
         return !isLoading
@@ -3452,8 +3926,15 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               let columnIdentifier = tableColumn?.identifier.rawValue,
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].values.count,
-              columnIndex < columnInfo.count,
-              canModifyRows else { return false }
+              columnIndex < columnInfo.count else { return false }
+
+        let canEditCell = rows[row].isNew ? canModifyRows : canEditExistingCells
+        guard canEditCell else { return false }
+
+        guard !columnInfo[columnIndex].isGenerated else {
+            statusLabel.stringValue = NSLocalizedString("Generated columns cannot be edited.", comment: "lightweight content generated column edit blocked status")
+            return false
+        }
 
         guard case .notLoaded = rows[row].values[columnIndex] else {
             if shouldUseFieldEditor(row: row, column: columnIndex) {
@@ -3465,7 +3946,10 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         }
 
         guard let whereClause = Self.rowIdentityWhereClause(for: rows[row].originalValues, columnInfo: columnInfo, connection: connection) else {
-            statusLabel.stringValue = NSLocalizedString("Cannot load cell without identifiable columns", comment: "lightweight content blob load no identity")
+            let message = tableObjectType == .view
+                ? NSLocalizedString("Cannot load this view cell because the backing row cannot be safely identified. Add identifying columns to the view or reload the table.", comment: "lightweight content view blob load no identity")
+                : NSLocalizedString("Cannot load cell without identifiable columns", comment: "lightweight content blob load no identity")
+            statusLabel.stringValue = message
             return false
         }
 
@@ -3481,21 +3965,15 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
               let columnIndex = Int(columnIdentifier),
               columnIndex < rows[row].values.count,
               columnIndex < columnInfo.count,
-              canModifyRows else { return }
+              !columnInfo[columnIndex].isGenerated else { return }
+
+        let canEditCell = rows[row].isNew ? canModifyRows : canEditExistingCells
+        guard canEditCell else { return }
 
         let oldRowValues = rows[row].originalValues
         let newValue = Self.editedString(from: object)
         let currentDisplayValue = displayString(for: rows[row].values[columnIndex], columnIndex: columnIndex, truncate: false)
         if newValue == currentDisplayValue {
-            if rows[row].isNew && rows[row].insertsWhenUnchanged,
-               let updatedValue = Self.sqlValue(forEditedString: newValue, columnInfo: columnInfo[columnIndex], connection: connection) {
-                saveNewContentRow(row: row, editedColumnIndex: columnIndex, updatedValue: updatedValue, connection: connection)
-                return
-            }
-
-            if rows[row].isNew {
-                cancelNewContentRow(row)
-            }
             return
         }
 
@@ -3508,7 +3986,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         }
 
         guard let whereClause = Self.rowIdentityWhereClause(for: oldRowValues, columnInfo: columnInfo, connection: connection) else {
-            statusLabel.stringValue = NSLocalizedString("Cannot edit row without identifiable columns", comment: "lightweight content edit no identity")
+            let message = tableObjectType == .view
+                ? NSLocalizedString("Cannot edit this view cell because the backing row cannot be safely identified. Add identifying columns to the view or reload the table.", comment: "lightweight content view edit no identity")
+                : NSLocalizedString("Cannot edit row without identifiable columns", comment: "lightweight content edit no identity")
+            statusLabel.stringValue = message
+            showContentError(title: NSLocalizedString("Unable to edit cell", comment: "lightweight content edit no identity title"), message: message)
             return
         }
 
@@ -3573,6 +4055,11 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
                     return
                 }
 
+                guard affectedRows == 1 else {
+                    self.handleUnexpectedAffectedRowsAfterContentMutation(expected: 1, actual: affectedRows, row: row, columnIndex: columnIndex)
+                    return
+                }
+
                 if reloadAfterEdit || (updatedValue.requiresReload && refreshedValue == nil) {
                     self.invalidateCurrentContentCache()
                     self.loadCurrentPage()
@@ -3596,6 +4083,19 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard let notificationTableView = notification.object as? NSTableView,
               notificationTableView === tableView else { return }
+
+        if !suppressPendingNewRowSelectionCommit,
+           let pendingNewRow = rows.firstIndex(where: { $0.isNew }),
+           tableView.selectedRow != pendingNewRow {
+            if tableView.editedRow >= 0 || tableView.editedColumn >= 0 {
+                _ = tableView.window?.makeFirstResponder(tableView)
+            }
+
+            if !isLoading {
+                commitPendingNewContentRow(row: pendingNewRow)
+            }
+        }
+
         updateStatus()
         updateControls()
         (view.window?.windowController as? SPWindowController)?.runLightweightBundleTrigger(SPBundleTriggerActionTableRowChanged, preferredDataTable: tableView)

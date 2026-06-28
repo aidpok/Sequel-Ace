@@ -129,6 +129,7 @@ final class SALightweightStructureViewController: NSViewController {
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
+    private var objectType: SALightweightTableObjectType = .table
     private var rows: [StructureRow] = []
     private var filteredRows: [StructureRow]?
     private var indexes: [[String: String]] = []
@@ -277,7 +278,7 @@ final class SALightweightStructureViewController: NSViewController {
         button.isHidden = true
         return button
     }()
-    private lazy var editTableDetailsButton = toolbarButton(imageName: "NSSmartBadgeTemplate", toolTip: NSLocalizedString("Edit Table Details (⌘4)", comment: "edit table details tooltip"), keyEquivalent: "4", modifierMask: .command, action: #selector(showTableDetails(_:)))
+    private lazy var editTableDetailsButton = toolbarButton(imageName: "NSSmartBadgeTemplate", toolTip: NSLocalizedString("Edit Table Details", comment: "edit table details tooltip"), action: #selector(showTableDetails(_:)))
     private lazy var viewColumnsButton: NSPopUpButton = {
         let button = NSPopUpButton(frame: .zero, pullsDown: true)
         button.bezelStyle = .regularSquare
@@ -464,17 +465,20 @@ final class SALightweightStructureViewController: NSViewController {
         return rows.map { $0.values }
     }
 
-    func loadStructure(for table: String, database: String, connection: SPMySQLConnection, useCache: Bool = true) {
+    func loadStructure(for table: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType = .table, useCache: Bool = true) {
         cacheCurrentStructureState()
 
         self.table = table
         self.database = database
         self.connection = connection
+        self.objectType = objectType
+        pendingInsertedStructureRowID = nil
+        updateStructureColumnEditability()
         applySavedColumnWidths()
         loadToken = UUID()
         let token = loadToken
 
-        if useCache, restoreCachedStructure(for: structureCacheKey(database: database, table: table)) {
+        if useCache, restoreCachedStructure(for: structureCacheKey(database: database, table: table, objectType: objectType)) {
             return
         }
 
@@ -488,12 +492,15 @@ final class SALightweightStructureViewController: NSViewController {
             guard let self = self, let connection = connection else { return }
 
             _ = connection.selectDatabase(database)
-            let tableMetadata = self.loadTableMetadata(table: table, database: database, connection: connection)
+            let canLoadColumns = objectType == .table || objectType == .view
+            let tableMetadata: (engine: String, encoding: String, collation: String) = canLoadColumns
+                ? self.loadTableMetadata(table: table, database: database, connection: connection)
+                : (engine: "", encoding: "", collation: "")
             let encodingOptions = self.loadEncodingOptions(connection: connection)
             let collationOptionsByEncoding = self.loadCollationOptions(connection: connection)
-            let foreignKeyConstraints = self.loadForeignKeyConstraints(table: table, database: database, connection: connection)
-            let fields = self.loadFields(table: table, database: database, connection: connection)
-            let indexes = self.loadIndexes(table: table, connection: connection)
+            let foreignKeyConstraints = objectType == .table ? self.loadForeignKeyConstraints(table: table, database: database, connection: connection) : []
+            let fields = canLoadColumns ? self.loadFields(table: table, database: database, connection: connection) : []
+            let indexes = objectType == .table ? self.loadIndexes(table: table, connection: connection) : []
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else { return }
@@ -784,7 +791,7 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func saveRow(at index: Int, oldRow: StructureRow) {
-        guard !isSaving, index >= 0, index < rows.count, let connection = connection else { return }
+        guard canEditStructure, !isSaving, index >= 0, index < rows.count, let connection = connection else { return }
         var row = rows[index]
         guard !row.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             if row.isNew, cancelPendingStructureInsert(rowID: row.id) {
@@ -841,7 +848,7 @@ final class SALightweightStructureViewController: NSViewController {
                 }
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
     }
@@ -902,7 +909,11 @@ final class SALightweightStructureViewController: NSViewController {
         let extraUsesAutoIncrementRules = isMySQL84AutoIncrementRuleExtraValue(extra)
         definition += (boolValue(values["null"]) && !extraUsesAutoIncrementRules) ? " NULL" : " NOT NULL"
 
-        let defaultValue = (values["default"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultValue = currentTimestampDefaultExpression(
+            from: (values["default"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            type: type,
+            length: length
+        )
         let nullValue = UserDefaults.standard.string(forKey: SPNullValue) ?? "NULL"
         if !defaultValue.isEmpty, !extraUsesAutoIncrementRules {
             if defaultValue == nullValue || defaultValue.uppercased() == "NULL" {
@@ -917,7 +928,7 @@ final class SALightweightStructureViewController: NSViewController {
         }
 
         if !extra.isEmpty, extra.uppercased() != "NONE" {
-            definition += " \(extra.uppercased())"
+            definition += " \(currentTimestampExtraExpression(from: extra, type: type, length: length).uppercased())"
         }
 
         let comment = (values["comment"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -935,6 +946,11 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func isNumericType(_ type: String) -> Bool {
         return ["BIT", "BOOL", "BOOLEAN", "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"].contains(type.uppercased())
+    }
+
+    private func typeAllowsBinaryOption(_ type: String) -> Bool {
+        let upper = type.uppercased()
+        return upper.contains("CHAR") || upper.contains("TEXT")
     }
 
     private func boolValue(_ value: String?) -> Bool {
@@ -988,6 +1004,24 @@ final class SALightweightStructureViewController: NSViewController {
             return true
         }
         return ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "NULL"].contains(trimmed.uppercased())
+    }
+
+    private func currentTimestampDefaultExpression(from value: String, type: String, length: String) -> String {
+        guard timestampPrecisionApplies(to: type), !length.isEmpty else { return value }
+        let uppercasedValue = value.uppercased()
+        guard uppercasedValue == "CURRENT_TIMESTAMP" || uppercasedValue == "CURRENT_TIMESTAMP()" else { return value }
+        return "CURRENT_TIMESTAMP(\(length))"
+    }
+
+    private func currentTimestampExtraExpression(from value: String, type: String, length: String) -> String {
+        guard timestampPrecisionApplies(to: type), !length.isEmpty else { return value }
+        let uppercasedValue = value.uppercased()
+        guard uppercasedValue == "ON UPDATE CURRENT_TIMESTAMP" || uppercasedValue == "ON UPDATE CURRENT_TIMESTAMP()" else { return value }
+        return "ON UPDATE CURRENT_TIMESTAMP(\(length))"
+    }
+
+    private func timestampPrecisionApplies(to type: String) -> Bool {
+        return ["DATETIME", "TIMESTAMP"].contains(type.uppercased())
     }
 
     private func reloadVisibleRows() {
@@ -1135,10 +1169,12 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func updateButtonState() {
         let hasStructureSelection = structureTableView.selectedRow >= 0
-        removeFieldButton.isEnabled = !isSaving && hasStructureSelection && rows.count > 1
-        duplicateFieldButton.isEnabled = !isSaving && !rows.isEmpty
-        removeIndexButton.isEnabled = !isSaving && indexesTableView.selectedRow >= 0
-        addIndexButton.isEnabled = !isSaving && !rows.isEmpty
+        let canEdit = canEditStructure
+        addFieldButton.isEnabled = !isSaving && canEdit
+        removeFieldButton.isEnabled = !isSaving && canEdit && hasStructureSelection && rows.count > 1
+        duplicateFieldButton.isEnabled = !isSaving && canEdit && !rows.isEmpty
+        removeIndexButton.isEnabled = !isSaving && canEditIndexes && indexesTableView.selectedRow >= 0
+        addIndexButton.isEnabled = !isSaving && canEditIndexes && !rows.isEmpty
     }
 
     private func isStructureTable(_ tableView: NSTableView) -> Bool {
@@ -1217,9 +1253,23 @@ final class SALightweightStructureViewController: NSViewController {
             ?? collationOptionsByEncoding[encoding]?.first
     }
 
-    private func typeDisallowsDefaultOrLength(_ type: String) -> Bool {
+    private func typeDisallowsDefault(_ type: String) -> Bool {
         let upper = type.uppercased()
-        return upper.hasSuffix("TEXT") || upper.hasSuffix("BLOB") || upper == "JSON" || isGeometryType(upper) || (isDateType(upper) && upper != "YEAR")
+        return upper.hasSuffix("TEXT") || upper.hasSuffix("BLOB") || upper == "JSON" || isGeometryType(upper)
+    }
+
+    private func typeDisallowsLength(_ type: String) -> Bool {
+        let upper = type.uppercased()
+        if upper.hasSuffix("TEXT") || upper.hasSuffix("BLOB") || upper == "JSON" || isGeometryType(upper) {
+            return true
+        }
+        if upper == "DATE" {
+            return true
+        }
+        if isDateType(upper), upper != "YEAR" {
+            return !serverSupportsFractionalSeconds()
+        }
+        return false
     }
 
     private func isDateType(_ type: String) -> Bool {
@@ -1228,6 +1278,61 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func isGeometryType(_ type: String) -> Bool {
         return ["GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"].contains(type.uppercased())
+    }
+
+    private func serverSupportsFractionalSeconds() -> Bool {
+        guard let connection = connection else { return false }
+        let major = Int(connection.serverMajorVersion())
+        let minor = Int(connection.serverMinorVersion())
+        let release = Int(connection.serverReleaseVersion())
+        return major > 5 || (major == 5 && (minor > 6 || (minor == 6 && release >= 4)))
+    }
+
+    private func isCSVTableEngine() -> Bool {
+        return tableEngine.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("CSV") == .orderedSame
+    }
+
+    private func isGeneratedColumn(_ row: StructureRow) -> Bool {
+        let normalizedExtra = (row.values["Extra"] ?? "")
+            .replacingOccurrences(of: "_", with: " ")
+            .lowercased()
+
+        guard normalizedExtra.contains("generated") else { return false }
+        return !normalizedExtra.contains("default generated")
+    }
+
+    private var canEditIndexes: Bool {
+        return canEditStructure && !isCSVTableEngine()
+    }
+
+    private func canUseStructureCell(key: String, row: StructureRow) -> Bool {
+        guard canEditStructure,
+              !isGeneratedColumn(row) else { return false }
+
+        let rowType = (row.values["type"] ?? "").uppercased()
+        switch key {
+        case "encodingName":
+            return rowType != "JSON" && isStringType(rowType)
+        case "collationName":
+            return isStringType(rowType) && !boolValue(row.values["binary"])
+        case "unsigned", "zerofill":
+            return isNumericType(rowType) && rowType != "BIT"
+        case "binary":
+            return rowType != "JSON" && typeAllowsBinaryOption(rowType)
+        case "default":
+            return !typeDisallowsDefault(rowType)
+        case "length":
+            return !typeDisallowsLength(rowType)
+        case "null":
+            return row.values["Key"] != "PRI" && !extraIsAutoIncrement(row.values["Extra"]) && !isCSVTableEngine()
+        default:
+            return true
+        }
+    }
+
+    private func canEditStructureCell(key: String, row: StructureRow) -> Bool {
+        guard structureColumns.first(where: { $0.key == key })?.editable == true else { return false }
+        return canUseStructureCell(key: key, row: row)
     }
 
     private func promptForAutoIncrementIndex(completion: @escaping (String?) -> Void) {
@@ -1269,19 +1374,22 @@ final class SALightweightStructureViewController: NSViewController {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(addField(_:)):
-            return !isSaving
+            return !isSaving && canEditStructure
         case #selector(duplicateField(_:)), #selector(removeField(_:)), #selector(showOptimizedFieldType(_:)):
             if menuItem.action == #selector(duplicateField(_:)) {
-                return !isSaving && !rows.isEmpty
+                return !isSaving && canEditStructure && !rows.isEmpty
+            }
+            if menuItem.action == #selector(removeField(_:)) {
+                return !isSaving && canEditStructure && structureTableView.selectedRow >= 0
             }
             return !isSaving && structureTableView.selectedRow >= 0
         case #selector(addIndex(_:)):
-            return !isSaving && !rows.isEmpty
+            return !isSaving && canEditIndexes && !rows.isEmpty
         case #selector(removeIndex(_:)):
-            return !isSaving && indexesTableView.selectedRow >= 0
+            return !isSaving && canEditIndexes && indexesTableView.selectedRow >= 0
         case #selector(resetAutoIncrement(_:)):
             let selectedRow = indexesTableView.selectedRow
-            return !isSaving && selectedRow >= 0 && selectedRow < indexes.count && (indexes[selectedRow]["Key_name"] ?? "") == "PRIMARY"
+            return !isSaving && canEditIndexes && selectedRow >= 0 && selectedRow < indexes.count && (indexes[selectedRow]["Key_name"] ?? "") == "PRIMARY"
         default:
             return true
         }
@@ -1441,11 +1549,12 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func addField(_ sender: Any?) {
+        guard canEditStructure else { return }
         let selectedRow = structureTableView.selectedRow
         let selectedSourceIndex = sourceIndex(forDisplayedRow: selectedRow)
         let insertIndex = selectedSourceIndex.map { $0 + 1 } ?? rows.count
         resetStructureFilteringForInsertion()
-        let previousAllowsNull = UserDefaults.standard.bool(forKey: SPNewFieldsAllowNulls)
+        let previousAllowsNull = isCSVTableEngine() ? false : UserDefaults.standard.bool(forKey: SPNewFieldsAllowNulls)
         let row = StructureRow(values: [
             "name": "",
             "type": "INT",
@@ -1473,6 +1582,7 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func duplicateField(_ sender: Any?) {
+        guard canEditStructure else { return }
         let selectedRow = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow : displayRows().count - 1
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow) else { return }
         resetStructureFilteringForInsertion()
@@ -1492,6 +1602,7 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func removeField(_ sender: Any?) {
+        guard canEditStructure else { return }
         let selectedRow = structureTableView.selectedRow
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), rows.count > 1, let connection = connection else { return }
         let row = rows[sourceIndex]
@@ -1541,7 +1652,7 @@ private extension SALightweightStructureViewController {
 
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
     }
@@ -1549,10 +1660,11 @@ private extension SALightweightStructureViewController {
     @objc func reloadTable(_ sender: Any?) {
         guard let connection = connection else { return }
         invalidateCurrentStructureCache()
-        loadStructure(for: table, database: database, connection: connection, useCache: false)
+        loadStructure(for: table, database: database, connection: connection, objectType: objectType, useCache: false)
     }
 
     @objc func resetAutoIncrement(_ sender: Any?) {
+        guard canEditIndexes else { return }
         guard let connection = connection else { return }
 
         let alert = NSAlert()
@@ -1678,8 +1790,19 @@ private extension SALightweightStructureViewController {
         return rowCount > nullCount
     }
 
-    private func structureCacheKey(database: String? = nil, table: String? = nil) -> String {
-        return "\(database ?? self.database)\u{0}\(table ?? self.table)"
+    private var canEditStructure: Bool {
+        return objectType == .table
+    }
+
+    private func structureCacheKey(database: String? = nil, table: String? = nil, objectType: SALightweightTableObjectType? = nil) -> String {
+        return "\(database ?? self.database)\u{0}\(table ?? self.table)\u{0}\((objectType ?? self.objectType).rawValue)"
+    }
+
+    private func updateStructureColumnEditability() {
+        for tableColumn in structureTableView.tableColumns {
+            guard let structureColumn = structureColumns.first(where: { $0.key == tableColumn.identifier.rawValue }) else { continue }
+            tableColumn.isEditable = canEditStructure && structureColumn.editable
+        }
     }
 
     private func restoreCachedStructure(for key: String) -> Bool {
@@ -1761,6 +1884,7 @@ private extension SALightweightStructureViewController {
     }
 
     @objc func addIndex(_ sender: Any?) {
+        guard canEditIndexes else { return }
         let selectedRow = structureTableView.selectedRow >= 0 ? structureTableView.selectedRow : 0
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), let connection = connection else { return }
         let primaryKeyExists = indexes.contains { ($0["Key_name"] ?? "") == "PRIMARY" }
@@ -1820,12 +1944,13 @@ private extension SALightweightStructureViewController {
 
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
     }
 
     @objc func removeIndex(_ sender: Any?) {
+        guard canEditIndexes else { return }
         let selectedRow = indexesTableView.selectedRow
         guard selectedRow >= 0, selectedRow < indexes.count, let connection = connection else { return }
         let indexName = indexes[selectedRow]["Key_name"] ?? ""
@@ -1863,7 +1988,7 @@ private extension SALightweightStructureViewController {
 
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
     }
@@ -1908,7 +2033,7 @@ private extension SALightweightStructureViewController {
                 }
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
     }
@@ -2279,8 +2404,12 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
     }
 
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
-        guard isStructureTable(tableView), let key = tableColumn?.identifier.rawValue, let sourceIndex = sourceIndex(forDisplayedRow: row) else { return }
+        guard canEditStructure, isStructureTable(tableView), let key = tableColumn?.identifier.rawValue, let sourceIndex = sourceIndex(forDisplayedRow: row) else { return }
         let oldRow = rows[sourceIndex]
+        guard canEditStructureCell(key: key, row: oldRow) else {
+            reloadVisibleRow(withID: oldRow.id)
+            return
+        }
         var newValue = ""
 
         if structureColumns.first(where: { $0.key == key })?.isBoolean == true {
@@ -2317,8 +2446,10 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
                 pendingAutoIncrementIndex = nil
                 showInvalidAutoIncrementAlert(for: uppercasedType)
             }
-            if typeDisallowsDefaultOrLength(uppercasedType) {
+            if typeDisallowsDefault(uppercasedType) {
                 rows[sourceIndex].values["default"] = ""
+            }
+            if typeDisallowsLength(uppercasedType) {
                 rows[sourceIndex].values["length"] = ""
             }
         } else {
@@ -2363,13 +2494,15 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
-        guard isStructureTable(tableView), !isSaving, let key = tableColumn?.identifier.rawValue else { return false }
-        if key == "collationName", let sourceIndex = sourceIndex(forDisplayedRow: row) {
+        guard canEditStructure, isStructureTable(tableView), !isSaving, let key = tableColumn?.identifier.rawValue else { return false }
+        guard let sourceIndex = sourceIndex(forDisplayedRow: row),
+              canEditStructureCell(key: key, row: rows[sourceIndex]) else { return false }
+        if key == "collationName" {
             updateCollationCell(for: rows[sourceIndex].values["encodingName"] ?? "")
-        } else if key == "Extra", let sourceIndex = sourceIndex(forDisplayedRow: row) {
+        } else if key == "Extra" {
             updateExtraCell(for: rows[sourceIndex])
         }
-        return structureColumns.first(where: { $0.key == key })?.editable == true
+        return true
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -2466,25 +2599,7 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
               let sourceIndex = sourceIndex(forDisplayedRow: row),
               let cell = cell as? NSCell else { return }
 
-        let rowType = (rows[sourceIndex].values["type"] ?? "").uppercased()
-        switch key {
-        case "encodingName":
-            cell.isEnabled = rowType != "JSON" && isStringType(rowType)
-        case "collationName":
-            cell.isEnabled = isStringType(rowType) && !boolValue(rows[sourceIndex].values["binary"])
-        case "unsigned", "zerofill":
-            cell.isEnabled = isNumericType(rowType) && rowType != "BIT"
-        case "binary":
-            cell.isEnabled = rowType != "JSON" && isStringType(rowType)
-        case "default":
-            cell.isEnabled = !typeDisallowsDefaultOrLength(rowType)
-        case "length":
-            cell.isEnabled = !typeDisallowsDefaultOrLength(rowType)
-        case "null":
-            cell.isEnabled = rows[sourceIndex].values["Key"] != "PRI" && !extraIsAutoIncrement(rows[sourceIndex].values["Extra"])
-        default:
-            cell.isEnabled = true
-        }
+        cell.isEnabled = canUseStructureCell(key: key, row: rows[sourceIndex])
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -2522,7 +2637,8 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
     }
 
     func tableView(_ tableView: NSTableView, writeRowsWith rowIndexes: IndexSet, to pasteboard: NSPasteboard) -> Bool {
-        guard isStructureTable(tableView),
+        guard canEditStructure,
+              isStructureTable(tableView),
               structureFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               structureSortKey == nil,
               let row = rowIndexes.first,
@@ -2533,7 +2649,8 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
     }
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard isStructureTable(tableView),
+        guard canEditStructure,
+              isStructureTable(tableView),
               dropOperation == .above,
               row >= 0,
               !isSaving,
@@ -2543,7 +2660,8 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row destinationRow: Int, dropOperation: NSTableView.DropOperation) -> Bool {
-        guard isStructureTable(tableView),
+        guard canEditStructure,
+              isStructureTable(tableView),
               let connection = connection,
               let sourceIDString = info.draggingPasteboard.string(forType: NSPasteboard.PasteboardType("SequelAceLightweightStructureRow")),
               let sourceID = UUID(uuidString: sourceIDString),
@@ -2579,7 +2697,7 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
 
                 self.invalidateCurrentStructureCache()
                 self.tableStructureDidChange?()
-                self.loadStructure(for: self.table, database: self.database, connection: connection, useCache: false)
+                self.loadStructure(for: self.table, database: self.database, connection: connection, objectType: self.objectType, useCache: false)
             }
         }
 

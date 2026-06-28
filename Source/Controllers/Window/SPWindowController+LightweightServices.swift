@@ -612,6 +612,10 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
 
         if command == "ReloadContentTableWithWHEREClause" {
             if let whereClause = readAndRemoveLightweightSchemeInput(processID: callbackID), !whereClause.isEmpty {
+                guard selectedLightweightTableSupportsContent() else {
+                    NSSound.beep()
+                    return true
+                }
                 viewContent()
                 lightweightContentController.applyAdvancedFilter(whereClause: whereClause, distinct: false)
             }
@@ -901,7 +905,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         case .content:
             lightweightContentController.copySelectedContentRowsForMenu(sender)
         case .query:
-            lightweightQueryController.copySelectedResultRowsForMenu(sender)
+            lightweightQueryController.copy(sender)
         default:
             NSSound.beep()
         }
@@ -910,6 +914,14 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
     @objc func canExportLightweightData() -> Bool {
         guard hasActiveLightweightConnection else { return false }
 
+        if hasActiveLightweightResultExportData() {
+            return true
+        }
+
+        return !lightweightTableExportItemsForMainMenu().isEmpty
+    }
+
+    @nonobjc private func hasActiveLightweightResultExportData() -> Bool {
         switch activeLightweightViewMode {
         case .content:
             return lightweightContentController.exportResultColumnCount() > 0
@@ -927,12 +939,32 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
 
         guard hasActiveLightweightConnection,
-              let activeConnection = activeConnection,
               canExportLightweightData() else {
             NSSound.beep()
             return
         }
 
+        if hasActiveLightweightResultExportData() {
+            guard let controller = configuredActiveLightweightResultExportController() else {
+                NSSound.beep()
+                return
+            }
+
+            lightweightExportController = controller
+            controller.exportData()
+            return
+        }
+
+        if let controller = configuredLightweightTableExportControllerForMainMenu() {
+            lightweightExportController = controller
+            controller.exportData()
+            return
+        }
+
+        NSSound.beep()
+    }
+
+    @nonobjc private func configuredActiveLightweightResultExportController() -> SPExportController? {
         let filteredSource = SALightweightExportSource.filteredResult
         let querySource = SALightweightExportSource.queryResult
         let source: SPExportSource = (activeLightweightViewMode == .content) ? filteredSource : querySource
@@ -946,12 +978,48 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
                                                                      contentQuery: isContentExport ? lightweightContentController.exportUsedQuery() : "",
                                                                      queryResult: queryResult,
                                                                      queryString: isQueryExport ? lightweightQueryController.exportUsedQuery() : "") else {
-            NSSound.beep()
-            return
+            return nil
         }
 
-        lightweightExportController = controller
-        controller.exportData()
+        return controller
+    }
+
+    @nonobjc private func configuredLightweightTableExportControllerForMainMenu() -> SPExportController? {
+        let selectedItems = lightweightTableExportItemsForMainMenu()
+        guard !selectedItems.isEmpty else { return nil }
+
+        let tableNames = selectedItems.filter { item in
+            let type = lightweightTableTypes[item] ?? .table
+            return type == .table || type == .view
+        }
+        let procedureNames = selectedItems.filter { lightweightTableTypes[$0] == .procedure }
+        let functionNames = selectedItems.filter { lightweightTableTypes[$0] == .function }
+
+        return configuredLightweightExportController(preferredSource: SALightweightExportSource.tableExport,
+                                                     selectedTableItems: selectedItems,
+                                                     tableNames: tableNames,
+                                                     procedureNames: procedureNames,
+                                                     functionNames: functionNames)
+    }
+
+    @nonobjc private func lightweightTableExportItemsForMainMenu() -> [String] {
+        guard selectedDatabase?.isEmpty == false else { return [] }
+
+        let selectedItems = selectedLightweightTableItems().filter { canExportLightweightTableItem($0) }
+        if !selectedItems.isEmpty {
+            return selectedItems
+        }
+
+        return lightweightTables.filter { canExportLightweightTableItem($0) }
+    }
+
+    @nonobjc private func canExportLightweightTableItem(_ item: String) -> Bool {
+        switch lightweightTableTypes[item] ?? .table {
+        case .table, .view, .procedure, .function:
+            return true
+        case .none:
+            return false
+        }
     }
 
     @nonobjc func configuredLightweightExportController(preferredSource source: SPExportSource,
@@ -1881,6 +1949,139 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         requestLightweightDatabases(forceReload: true)
     }
 
+    func refreshLightweightMetadataAfterQueryMutation(_ queries: [String]) {
+        if let document = loadedDatabaseDocument {
+            document.setDatabases()
+            document.refreshTables()
+            return
+        }
+
+        guard activeConnection != nil else { return }
+
+        let usedDatabase = lightweightDatabaseNameFromUseQueries(queries)
+        let droppedDatabases = lightweightDroppedDatabaseNames(from: queries)
+        if let removedCurrentDatabase = [usedDatabase, selectedDatabase].compactMap({ $0 }).first(where: { lightweightDatabase($0, isIn: droppedDatabases) }) {
+            clearLightweightDatabaseSelection(afterRemoving: removedCurrentDatabase)
+            refreshLightweightQueryCompletionMetadataFromCurrentState()
+            return
+        }
+
+        if !droppedDatabases.isEmpty {
+            lightweightDatabases.removeAll { lightweightDatabase($0, isIn: droppedDatabases) }
+            databaseToolbarController.reloadDatabases(lightweightDatabases, selectedDatabase: selectedDatabase)
+            databaseListNeedsLoad = true
+            requestLightweightDatabases(forceReload: true)
+            refreshLightweightQueryCompletionMetadataFromCurrentState()
+            return
+        }
+
+        lightweightStructureController.clearCachedTables()
+        lightweightContentController.clearCachedTables()
+        databaseListNeedsLoad = true
+        requestLightweightDatabases(forceReload: true)
+
+        let databaseToLoad = usedDatabase ?? selectedDatabase
+        if let usedDatabase, !usedDatabase.isEmpty {
+            selectLightweightDatabaseInToolbar(usedDatabase)
+        }
+
+        if let databaseToLoad, !databaseToLoad.isEmpty {
+            loadTables(for: databaseToLoad, preservingSelection: usedDatabase == nil)
+        } else {
+            refreshLightweightQueryCompletionMetadataFromCurrentState()
+        }
+    }
+
+    func refreshLightweightQueryCompletionMetadataFromCurrentState() {
+        let fieldNames = selectedDatabase.flatMap { database in
+            selectedTable.flatMap { table in
+                lightweightStructureController.cachedColumnMetadata(for: table, database: database)
+            }
+        }?.compactMap { $0["name"] } ?? []
+
+        lightweightQueryController.updateCompletionMetadata(database: selectedDatabase,
+                                                          table: selectedTable,
+                                                          databases: lightweightDatabases,
+                                                          tables: lightweightTables,
+                                                          tableTypes: lightweightTableTypes,
+                                                          fieldNames: fieldNames)
+    }
+
+    func lightweightDatabaseNameFromUseQueries(_ queries: [String]) -> String? {
+        for query in queries.reversed() {
+            if let database = lightweightDatabaseNameFromUseQuery(query) {
+                return database
+            }
+        }
+
+        return nil
+    }
+
+    func lightweightDatabaseNameFromUseQuery(_ query: String) -> String? {
+        let sql = lightweightSQLWithoutLeadingComments(query)
+
+        guard let match = sql.range(of: #"(?i)^USE\s+(`(?:``|[^`])+`|[^\s;]+)"#, options: .regularExpression) else { return nil }
+
+        var database = String(sql[match])
+        guard let useRange = database.range(of: #"(?i)^USE\s+"#, options: .regularExpression) else { return nil }
+        database.removeSubrange(useRange)
+
+        return lightweightDatabaseName(fromIdentifier: database)
+    }
+
+    func lightweightDroppedDatabaseNames(from queries: [String]) -> [String] {
+        return queries.compactMap { lightweightDroppedDatabaseName(from: $0) }
+    }
+
+    func lightweightDroppedDatabaseName(from query: String) -> String? {
+        let sql = lightweightSQLWithoutLeadingComments(query)
+
+        guard let match = sql.range(of: #"(?i)^DROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?(`(?:``|[^`])+`|[^\s;]+)"#, options: .regularExpression) else { return nil }
+
+        var database = String(sql[match])
+        guard let dropRange = database.range(of: #"(?i)^DROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?"#, options: .regularExpression) else { return nil }
+        database.removeSubrange(dropRange)
+
+        return lightweightDatabaseName(fromIdentifier: database)
+    }
+
+    func lightweightSQLWithoutLeadingComments(_ query: String) -> String {
+        var sql = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        while !sql.isEmpty {
+            if sql.hasPrefix("--") || sql.hasPrefix("#") {
+                guard let newline = sql.firstIndex(of: "\n") else { return "" }
+                sql = String(sql[sql.index(after: newline)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+
+            if sql.hasPrefix("/*") {
+                guard let end = sql.range(of: "*/") else { return "" }
+                sql = String(sql[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+
+            break
+        }
+
+        return sql
+    }
+
+    func lightweightDatabaseName(fromIdentifier identifier: String) -> String {
+        var database = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if database.hasPrefix("`"), database.hasSuffix("`"), database.count >= 2 {
+            database.removeFirst()
+            database.removeLast()
+            return database.replacingOccurrences(of: "``", with: "`")
+        }
+
+        return database.trimmingCharacters(in: CharacterSet(charactersIn: ";"))
+    }
+
+    func lightweightDatabase(_ database: String, isIn databases: [String]) -> Bool {
+        return databases.contains { $0.caseInsensitiveCompare(database) == .orderedSame }
+    }
+
     @objc func canRefreshActiveLightweightDetail() -> Bool {
         guard activeConnection != nil,
               loadedDatabaseDocument == nil,
@@ -1976,6 +2177,10 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         if activeConnection != nil, loadedDatabaseDocument == nil {
             guard let selectedTable = selectedTable else { return }
 
+            guard selectedLightweightTableSupportsContent() else {
+                showLightweightStatus(for: selectedTable)
+                return
+            }
             showLightweightContent(for: selectedTable)
             return
         }
@@ -2095,6 +2300,10 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
 
     @objc func focusLightweightContentFilter() {
         guard activeConnection != nil, loadedDatabaseDocument == nil, let selectedTable = selectedTable else { return }
+        guard selectedLightweightTableSupportsContent() else {
+            NSSound.beep()
+            return
+        }
 
         if activeLightweightViewMode != .content {
             showLightweightContent(for: selectedTable)
@@ -2109,6 +2318,10 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
 
         guard activeConnection != nil, let selectedTable = selectedTable else { return }
+        guard selectedLightweightTableSupportsContent() else {
+            NSSound.beep()
+            return
+        }
 
         if activeLightweightViewMode != .content {
             showLightweightContent(for: selectedTable)
@@ -2165,6 +2378,191 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         guard activeConnection != nil, loadedDatabaseDocument == nil else { return }
 
         window?.makeFirstResponder(tableFilterField)
+    }
+
+    @nonobjc private func canHandleLightweightMenuSelector(requiresDatabase: Bool = false, requiresTable: Bool = false) -> Bool {
+        guard hasActiveLightweightConnection else { return false }
+        if requiresDatabase, !hasSelectedLightweightDatabase { return false }
+        if requiresTable, !hasSelectedLightweightTable { return false }
+        return true
+    }
+
+    @nonobjc func lightweightObjectTypeSupportsContent(_ objectType: SALightweightTableObjectType) -> Bool {
+        return objectType == .table || objectType == .view
+    }
+
+    @nonobjc func selectedLightweightTableSupportsContent() -> Bool {
+        guard let selectedTable = selectedTable else { return false }
+        return lightweightObjectTypeSupportsContent(lightweightTableTypes[selectedTable] ?? .table)
+    }
+
+    @objc(import:) func importMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        importLightweightSQLFile(sender)
+    }
+
+    @objc(importFromClipboard:) func importFromClipboardMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        importLightweightSQLFromClipboard(sender)
+    }
+
+    @objc(export:) func exportMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        exportData()
+    }
+
+    @objc(printDocument:) func printDocumentMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        if activeLightweightViewMode == .query {
+            lightweightQueryController.printDocument(sender)
+            return
+        }
+        printLightweightDocument(sender)
+    }
+
+    @objc(copy:) func copyMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        copyActiveLightweightSelection(sender)
+    }
+
+    @objc(saveConnectionSheet:) func saveConnectionSheetMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        saveLightweightConnectionSheet(sender)
+    }
+
+    @objc(addConnectionToFavorites:) func addConnectionToFavoritesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        addLightweightConnectionToFavorites()
+    }
+
+    @objc(showGotoDatabase:) func showGotoDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        showLegacyGotoDatabase()
+    }
+
+    @objc(addDatabase:) func addDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        addLightweightDatabase(sender)
+    }
+
+    @objc(removeDatabase:) func removeDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        removeLightweightDatabase(sender)
+    }
+
+    @objc(copyDatabase:) func copyDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        copyLightweightDatabase(sender)
+    }
+
+    @objc(renameDatabase:) func renameDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        renameLightweightDatabase(sender)
+    }
+
+    @objc(alterDatabase:) func alterDatabaseMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        alterLightweightDatabase(sender)
+    }
+
+    @objc(refreshTables:) func refreshTablesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        refreshLightweightTables()
+    }
+
+    @objc(flushPrivileges:) func flushPrivilegesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        flushLightweightPrivileges(sender)
+    }
+
+    @objc(setDatabases:) func setDatabasesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        refreshLightweightDatabases()
+    }
+
+    @objc(showUserManager:) func showUserManagerMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        showUserManager()
+    }
+
+    @objc(chooseEncoding:) func chooseEncodingMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        chooseLightweightEncoding(sender ?? self)
+    }
+
+    @objc(openDatabaseInNewTab:) func openDatabaseInNewTabMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresDatabase: true) else { return }
+        openLightweightDatabaseInNewTab(sender)
+    }
+
+    @objc(showServerVariables:) func showServerVariablesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        showLightweightServerVariables(sender)
+    }
+
+    @objc(showServerProcesses:) func showServerProcessesMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        showLightweightServerProcesses(sender)
+    }
+
+    @objc(shutdownServer:) func shutdownServerMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        shutdownLightweightServer(sender)
+    }
+
+    @objc(toggleNavigator:) func toggleNavigatorMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        toggleLightweightNavigator()
+    }
+
+    @objc(viewStructure:) func viewStructureMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        viewStructure()
+    }
+
+    @objc(viewContent:) func viewContentMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        viewContent()
+    }
+
+    @objc(viewQuery:) func viewQueryMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        viewQuery()
+    }
+
+    @objc(viewStatus:) func viewStatusMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        viewStatus()
+    }
+
+    @objc(viewRelations:) func viewRelationsMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        viewRelations()
+    }
+
+    @objc(viewTriggers:) func viewTriggersMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        viewTriggers()
+    }
+
+    @objc(showMySQLHelp:) func showMySQLHelpMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        showLightweightMySQLHelp()
+    }
+
+    @objc(focusOnTableContentFilter:) func focusOnTableContentFilterMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        focusLightweightContentFilter()
+    }
+
+    @objc(showFilterTable:) func showFilterTableMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector(requiresTable: true) else { return }
+        showLightweightFilterTable()
+    }
+
+    @objc(makeTableListFilterHaveFocus:) func makeTableListFilterHaveFocusMenuBridge(_ sender: Any?) {
+        guard canHandleLightweightMenuSelector() else { return }
+        focusLightweightTableFilter()
     }
 
     @objc func copyLightweightCreateTableSyntax(_ sender: Any?) {
@@ -2439,7 +2837,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
         guard let row = result.getRowAsDictionary() as? [String: Any],
-              let syntax = lightweightCreateSyntax(from: row) else {
+              let syntax = lightweightCreateSyntax(from: row, objectType: objectType) else {
             if showErrors {
                 let message: String
                 if activeConnection.isConnected(), activeConnection.lastErrorMessage()?.isEmpty == false {
@@ -2489,20 +2887,44 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         }
     }
 
-    @nonobjc func lightweightCreateSyntax(from row: [String: Any]) -> String? {
+    @nonobjc func lightweightCreateSyntax(from row: [String: Any], objectType: SALightweightTableObjectType) -> String? {
         for key in ["Create Table", "Create View", "Create Procedure", "Create Function"] {
             if let syntax = row[key] as? String, !syntax.isEmpty {
-                return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+                return lightweightCreateSyntaxString(syntax, objectType: objectType)
             }
         }
 
         for (key, value) in row where key.lowercased().contains("create") {
             if let syntax = value as? String, !syntax.isEmpty {
-                return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+                return lightweightCreateSyntaxString(syntax, objectType: objectType)
             }
         }
 
         return nil
+    }
+
+    @nonobjc func lightweightCreateSyntaxString(_ syntax: String, objectType: SALightweightTableObjectType) -> String {
+        switch objectType {
+        case .procedure, .function:
+            return lightweightRoutineCreateSyntaxString(syntax)
+        case .none, .table, .view:
+            return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+        }
+    }
+
+    @nonobjc func lightweightRoutineCreateSyntaxString(_ syntax: String) -> String {
+        let trimmedSyntax = syntax.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedSyntax.range(of: #"(?im)^\s*DELIMITER\b"#, options: .regularExpression) == nil else { return trimmedSyntax }
+
+        var statement = trimmedSyntax
+        while statement.hasSuffix(";") {
+            statement.removeLast()
+            statement = statement.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard statement.contains(";") else { return "\(statement);" }
+
+        return "DELIMITER ;;\n\(statement);;\nDELIMITER ;"
     }
 
     enum LightweightTableMaintenanceAction {

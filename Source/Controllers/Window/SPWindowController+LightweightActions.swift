@@ -19,6 +19,13 @@ private struct SALightweightDatabaseCopyObject {
     let type: SALightweightDatabaseCopyObjectType
 }
 
+private struct SALightweightRenameStatement {
+    let sourceDatabase: String
+    let sourceName: String
+    let targetDatabase: String
+    let targetName: String
+}
+
 extension SPWindowController {
     @objc func addLightweightTable(_ sender: Any?) {
         guard let selectedDatabase = selectedDatabase else { return }
@@ -64,8 +71,7 @@ extension SPWindowController {
     }
 
     @objc func renameLightweightTable(_ sender: Any?) {
-        guard let selectedDatabase = selectedDatabase,
-              selectedLightweightTableCount == 1,
+        guard selectedLightweightTableCount == 1,
               let selectedTable = selectedTable else { return }
 
         guard let row = lightweightSidebarRowIndex(for: selectedTable) else {
@@ -160,8 +166,6 @@ extension SPWindowController {
             NSSound.beep()
             return
         }
-        let tableToRestore = primarySelectedLightweightTable()
-
         let selectedObjects = selectedItems.compactMap { item -> (name: String, type: SALightweightTableObjectType, dropKeyword: String)? in
             let type = lightweightTableTypes[item] ?? .table
             guard let dropKeyword = type.sqlDropKeyword else { return nil }
@@ -656,19 +660,23 @@ extension SPWindowController {
     }
 
     func promptForLightweightDuplicateTable(sourceName: String, tableType: SALightweightTableObjectType, defaultValue: String) -> SALightweightLegacySheetResult? {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 192),
+        let supportsTargetDatabase = tableType == .table
+        let windowHeight: CGFloat = supportsTargetDatabase ? 192 : 154
+        let topOffset: CGFloat = supportsTargetDatabase ? 0 : -38
+        let objectTitle = lightweightSidebarActionObjectTitle(for: tableType)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: windowHeight),
                               styleMask: [.titled, .resizable],
                               backing: .buffered,
                               defer: false)
-        window.title = NSLocalizedString("Duplicate Table", comment: "duplicate table sheet title")
-        window.minSize = NSSize(width: 260, height: 127)
-        window.maxSize = NSSize(width: 260, height: 192)
+        window.title = String(format: NSLocalizedString("Duplicate %@", comment: "duplicate object sheet title"), objectTitle)
+        window.minSize = NSSize(width: 260, height: windowHeight)
+        window.maxSize = NSSize(width: 260, height: windowHeight)
 
         let controller = SALightweightLegacySheetController(window: window)
         let contentView = NSView(frame: window.contentView?.bounds ?? .zero)
         window.contentView = contentView
 
-        let titleField = legacyLabel(NSLocalizedString("Duplicate Table", comment: "duplicate table sheet title"), frame: NSRect(x: 18, y: 167, width: 224, height: 19), alignment: .center)
+        let titleField = legacyLabel(window.title, frame: NSRect(x: 18, y: 167 + topOffset, width: 224, height: 19), alignment: .center)
         let databaseLabel = legacyLabel(NSLocalizedString("Database:", comment: "database label"), frame: NSRect(x: 16, y: 145, width: 226, height: 14), alignment: .left)
         let databaseButton = legacyPopup(frame: NSRect(x: 16, y: 113, width: 228, height: 25),
                                          choices: lightweightDatabases.map { SALightweightEncodingChoice(title: $0, name: $0) },
@@ -682,14 +690,21 @@ extension SPWindowController {
         duplicateContent.font = .messageFont(ofSize: 11)
         duplicateContent.state = (tableType == .table && UserDefaults.standard.bool(forKey: SPCopyContentOnTableCopy)) ? .on : .off
         duplicateContent.isEnabled = tableType == .table
+        duplicateContent.isHidden = tableType != .table
         let cancelButton = legacyButton(title: NSLocalizedString("Cancel", comment: "cancel button"), frame: NSRect(x: 61, y: 13, width: 91, height: 28), keyEquivalent: "\u{1b}")
         let duplicateButton = legacyButton(title: NSLocalizedString("Duplicate", comment: "duplicate table button"), frame: NSRect(x: 150, y: 13, width: 97, height: 28), keyEquivalent: "\r")
 
-        [titleField, databaseLabel, databaseButton, messageField, nameField, duplicateContent, cancelButton, duplicateButton].forEach(contentView.addSubview)
+        [titleField, messageField, nameField, duplicateContent, cancelButton, duplicateButton].forEach(contentView.addSubview)
+        if supportsTargetDatabase {
+            contentView.addSubview(databaseLabel)
+            contentView.addSubview(databaseButton)
+        }
 
         controller.nameField = nameField
         controller.okButton = duplicateButton
-        controller.targetDatabaseButton = databaseButton
+        if supportsTargetDatabase {
+            controller.targetDatabaseButton = databaseButton
+        }
         controller.duplicateContentButton = duplicateContent
         nameField.delegate = controller
         nameField.target = controller
@@ -1379,6 +1394,7 @@ extension SPWindowController {
 
     func runLightweightDatabaseMutation(status: String, statements: [String], completion: @escaping (Bool) -> Void) {
         guard let activeConnection = activeConnection else { return }
+        let statements = expandedLightweightDatabaseMutationStatements(statements)
 
         showLightweightPlaceholder(status)
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
@@ -1402,6 +1418,62 @@ extension SPWindowController {
                 completion(true)
             }
         }
+    }
+
+    private func expandedLightweightDatabaseMutationStatements(_ statements: [String]) -> [String] {
+        return statements.flatMap { statement -> [String] in
+            lightweightCaseOnlyRenameStatements(for: statement) ?? [statement]
+        }
+    }
+
+    private func lightweightCaseOnlyRenameStatements(for statement: String) -> [String]? {
+        guard let rename = lightweightRenameStatement(from: statement),
+              rename.sourceDatabase.caseInsensitiveCompare(rename.targetDatabase) == .orderedSame,
+              rename.sourceName != rename.targetName,
+              rename.sourceName.caseInsensitiveCompare(rename.targetName) == .orderedSame else {
+            return nil
+        }
+
+        let existingNames = lightweightTables + [rename.sourceName, rename.targetName]
+        let tempName = lightweightTemporaryRenameName(avoiding: existingNames)
+        let database = Self.backtickQuoted(rename.sourceDatabase)
+        return [
+            "RENAME TABLE \(database).\(Self.backtickQuoted(rename.sourceName)) TO \(database).\(Self.backtickQuoted(tempName))",
+            "RENAME TABLE \(database).\(Self.backtickQuoted(tempName)) TO \(database).\(Self.backtickQuoted(rename.targetName))"
+        ]
+    }
+
+    private func lightweightRenameStatement(from statement: String) -> SALightweightRenameStatement? {
+        let pattern = #"(?i)^\s*RENAME\s+TABLE\s+(`(?:``|[^`])+`)\.(`(?:``|[^`])+`)\s+TO\s+(`(?:``|[^`])+`)\.(`(?:``|[^`])+`)\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+
+        let nsString = statement as NSString
+        let match = regex.firstMatch(in: statement, range: NSRange(location: 0, length: nsString.length))
+        guard let match = match, match.numberOfRanges == 5 else { return nil }
+
+        return SALightweightRenameStatement(sourceDatabase: lightweightUnquotedIdentifier(nsString.substring(with: match.range(at: 1))),
+                                            sourceName: lightweightUnquotedIdentifier(nsString.substring(with: match.range(at: 2))),
+                                            targetDatabase: lightweightUnquotedIdentifier(nsString.substring(with: match.range(at: 3))),
+                                            targetName: lightweightUnquotedIdentifier(nsString.substring(with: match.range(at: 4))))
+    }
+
+    private func lightweightUnquotedIdentifier(_ identifier: String) -> String {
+        guard identifier.hasPrefix("`"), identifier.hasSuffix("`"), identifier.count >= 2 else { return identifier }
+
+        let unquoted = identifier.dropFirst().dropLast()
+        return String(unquoted).replacingOccurrences(of: "``", with: "`")
+    }
+
+    private func lightweightTemporaryRenameName(avoiding existingNames: [String]) -> String {
+        for _ in 0..<20 {
+            let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
+            let candidate = "_sequel_ace_tmp_\(suffix)"
+            if !existingNames.contains(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
+                return candidate
+            }
+        }
+
+        return "_sequel_ace_tmp_\(UUID().uuidString.prefix(8))"
     }
 
     func runLightweightDatabaseRenameMutation(from sourceDatabase: String, to targetDatabase: String, status: String, completion: @escaping (Bool) -> Void) {
@@ -1670,7 +1742,13 @@ extension SPWindowController {
         }
     }
 
-    func lightweightCreateTableCopyStatement(table: String, sourceDatabase: String, targetDatabase: String, connection: SPMySQLConnection) -> String? {
+    func lightweightCreateTableCopyStatement(table: String,
+                                             sourceDatabase: String,
+                                             targetDatabase: String,
+                                             connection: SPMySQLConnection,
+                                             targetTable: String? = nil,
+                                             stripForeignKeyConstraintNames: Bool = false,
+                                             stripAutoIncrement: Bool = false) -> String? {
         guard let result = connection.queryString("SHOW CREATE TABLE \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))") else {
             return nil
         }
@@ -1679,11 +1757,21 @@ extension SPWindowController {
         guard let row = result.getRowAsArray(), row.count > 1 else { return nil }
         var createStatement = Self.displayString(for: row[1])
         let unqualifiedTable = Self.backtickQuoted(table)
-        let qualifiedTable = "\(Self.backtickQuoted(targetDatabase)).\(unqualifiedTable)"
+        let qualifiedTable = "\(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetTable ?? table))"
         for prefix in ["CREATE TABLE ", "CREATE TEMPORARY TABLE "] {
             let needle = "\(prefix)\(unqualifiedTable)"
             if let range = createStatement.range(of: needle, options: [.caseInsensitive]) {
                 createStatement.replaceSubrange(range, with: "\(prefix)\(qualifiedTable)")
+                if stripForeignKeyConstraintNames {
+                    createStatement = createStatement.replacingOccurrences(of: #"CONSTRAINT\s+`(?:``|[^`])+`\s+"#,
+                                                                           with: "",
+                                                                           options: .regularExpression)
+                }
+                if stripAutoIncrement {
+                    createStatement = createStatement.replacingOccurrences(of: #"\sAUTO_INCREMENT=\d+"#,
+                                                                           with: "",
+                                                                           options: .regularExpression)
+                }
                 return createStatement
             }
         }
@@ -1881,8 +1969,7 @@ extension SPWindowController {
         }
 
         runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Altering %@...", comment: "Altering database task string"), database),
-                                       statement: statement) { [weak self] success in
-            guard let self = self else { return }
+                                       statement: statement) { success in
             guard success else {
                 completion(false)
                 return
@@ -1907,16 +1994,30 @@ extension SPWindowController {
             _ = activeConnection.selectDatabase(sourceDatabase)
             var statements: [String] = []
             if type == .view {
-                if let result = activeConnection.queryString("SHOW CREATE VIEW \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))"),
-                   let row = result.getRowAsArray(),
-                   row.count > 1,
-                   let createView = row[1] as? String {
-                    statements = [createView.replacingOccurrences(of: Self.backtickQuoted(sourceName), with: Self.backtickQuoted(targetName), options: [], range: createView.range(of: Self.backtickQuoted(sourceName)))]
+                if let createView = self.lightweightShowCreateStatement(keyword: "VIEW",
+                                                                        object: sourceName,
+                                                                        database: sourceDatabase,
+                                                                        connection: activeConnection),
+                   let statement = self.lightweightRetargetCreateStatement(createView,
+                                                                           keyword: "VIEW",
+                                                                           sourceName: sourceName,
+                                                                           targetName: targetName,
+                                                                           sourceDatabase: sourceDatabase,
+                                                                           targetDatabase: targetDatabase) {
+                    statements = [statement]
                 }
             } else {
-                statements = ["CREATE TABLE \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName)) LIKE \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))"]
-                if copyContent {
-                    statements.append("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))")
+                if let createTable = self.lightweightCreateTableCopyStatement(table: sourceName,
+                                                                              sourceDatabase: sourceDatabase,
+                                                                              targetDatabase: targetDatabase,
+                                                                              connection: activeConnection,
+                                                                              targetTable: targetName,
+                                                                              stripForeignKeyConstraintNames: true,
+                                                                              stripAutoIncrement: !copyContent) {
+                    statements = [createTable]
+                    if copyContent {
+                        statements.append("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))")
+                    }
                 }
             }
 

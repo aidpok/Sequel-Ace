@@ -307,6 +307,7 @@ final class SALightweightQueryViewController: NSViewController {
     }
     var queryExecutionWillBegin: (() -> Void)?
     var queryExecutionDidEnd: (() -> Void)?
+    var queryExecutionDidChangeMetadata: (([String]) -> Void)?
     var tableDocumentInstance: Any { favoriteDocumentProxy }
     var tablesListInstance: Any { completionTablesListProxy }
     var completionProvider: Any { completionTablesListProxy }
@@ -795,12 +796,12 @@ final class SALightweightQueryViewController: NSViewController {
         self.connection = connection
         self.database = database ?? ""
         self.table = table
-        completionTablesListProxy.update(database: database,
-                                         table: table,
-                                         databases: databases,
-                                         tables: tables,
-                                         tableTypes: tableTypes,
-                                         fieldNames: fieldNames)
+        updateCompletionMetadata(database: database,
+                                 table: table,
+                                 databases: databases,
+                                 tables: tables,
+                                 tableTypes: tableTypes,
+                                 fieldNames: fieldNames)
 
         ensureDocumentURLForLegacyQueryConsumers()
 
@@ -816,6 +817,20 @@ final class SALightweightQueryViewController: NSViewController {
         updateCurrentQueryRange()
         rebuildMenus()
         updateControls()
+    }
+
+    func updateCompletionMetadata(database: String?,
+                                  table: String?,
+                                  databases: [String],
+                                  tables: [String],
+                                  tableTypes: [String: SALightweightTableObjectType],
+                                  fieldNames: [String]) {
+        completionTablesListProxy.update(database: database,
+                                         table: table,
+                                         databases: databases,
+                                         tables: tables,
+                                         tableTypes: tableTypes,
+                                         fieldNames: fieldNames)
     }
 
     func setSQLFile(url: URL?, encoding: String.Encoding?) {
@@ -2177,6 +2192,7 @@ private extension SALightweightQueryViewController {
                                    ? NSLocalizedString("Stop queries", comment: "Stop queries string")
                                    : NSLocalizedString("Stop query", comment: "Stop query string"))
         updateControls()
+        postLightweightQueryWillBePerformedNotification()
         queryExecutionWillBegin?()
         let queryExecutionDidEnd = queryExecutionDidEnd
 
@@ -2207,6 +2223,8 @@ private extension SALightweightQueryViewController {
             var firstErrorQueryNumber: Int?
             var suppressErrorSheet = false
             var didPublishRows = false
+            var didPerformSuccessfulQuery = false
+            var metadataChangingQueries: [String] = []
             var finalResult = QueryResult(columnDefinitions: [], rows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", resultQuery: "", lastErrorID: 0, queriesRun: 0, truncated: false)
 
             for (index, query) in runnableQueries.enumerated() {
@@ -2315,6 +2333,11 @@ private extension SALightweightQueryViewController {
                         break
                     }
                     continue
+                }
+
+                didPerformSuccessfulQuery = true
+                if self.queryMayChangeLightweightMetadata(query) {
+                    metadataChangingQueries.append(query)
                 }
 
                 let definitions = result.fieldDefinitions() as? [NSDictionary] ?? []
@@ -2455,6 +2478,8 @@ private extension SALightweightQueryViewController {
                     self.updateControls()
                     self.restorePendingResultGridViewState()
                     self.pendingSortFailureRestore = nil
+                    self.publishQueryCompletionSideEffects(didPerformSuccessfulQuery: didPerformSuccessfulQuery,
+                                                           metadataChangingQueries: metadataChangingQueries)
                     return
                 }
 
@@ -2493,6 +2518,8 @@ private extension SALightweightQueryViewController {
                 self.restorePendingResultGridViewState()
                 self.pendingSortFailureRestore = nil
                 self.isApplyingQuerySort = false
+                self.publishQueryCompletionSideEffects(didPerformSuccessfulQuery: didPerformSuccessfulQuery,
+                                                       metadataChangingQueries: metadataChangingQueries)
             }
         }
     }
@@ -2824,14 +2851,19 @@ private extension SALightweightQueryViewController {
         let range = queryTextRange(forQueryNumber: queryNumber)
         guard range.length > 0 else { return }
 
-        if errorID == 1064,
-           let lineNumber = syntaxErrorLineNumber(from: errorText) {
-            let queryStartLine = queryTextView.getLineNumber(forCharacterIndex: UInt(range.location))
-            queryTextView.selectLineNumber(queryStartLine + UInt(max(0, lineNumber - 1)), ignoreLeadingNewLines: true)
-            return
-        }
+        if errorID == 1064 {
+            if let nearRange = syntaxErrorNearRange(from: errorText, queryRange: range) {
+                queryTextView.setSelectedRange(nearRange)
+                queryTextView.scrollRangeToVisible(nearRange)
+                return
+            }
 
-        if let nearRange = syntaxErrorNearRange(from: errorText, queryRange: range) {
+            if let lineNumber = syntaxErrorLineNumber(from: errorText) {
+                let queryStartLine = queryTextView.getLineNumber(forCharacterIndex: UInt(range.location))
+                queryTextView.selectLineNumber(queryStartLine + UInt(max(0, lineNumber - 1)), ignoreLeadingNewLines: true)
+                return
+            }
+        } else if let nearRange = syntaxErrorNearRange(from: errorText, queryRange: range) {
             queryTextView.setSelectedRange(nearRange)
             queryTextView.scrollRangeToVisible(nearRange)
             return
@@ -2868,6 +2900,71 @@ private extension SALightweightQueryViewController {
         guard localRange.location != NSNotFound, localRange.length > 0 else { return nil }
 
         return NSRange(location: boundedRange.location + localRange.location, length: localRange.length)
+    }
+
+    func notifyLightweightMetadataChanged(after queries: [String]) {
+        if queryExecutionDidChangeMetadata == nil,
+           let windowController = view.window?.windowController as? SPWindowController {
+            queryExecutionDidChangeMetadata = { [weak windowController] queries in
+                windowController?.refreshLightweightMetadataAfterQueryMutation(queries)
+            }
+        }
+
+        queryExecutionDidChangeMetadata?(queries)
+    }
+
+    func postLightweightQueryWillBePerformedNotification() {
+        NotificationCenter.default.post(name: Notification.Name("SMySQLQueryWillBePerformed"),
+                                        object: tableDocumentInstance)
+    }
+
+    func postLightweightQueryHasBeenPerformedNotification() {
+        NotificationCenter.default.post(name: Notification.Name("SMySQLQueryHasBeenPerformed"),
+                                        object: tableDocumentInstance)
+    }
+
+    func publishQueryCompletionSideEffects(didPerformSuccessfulQuery: Bool, metadataChangingQueries: [String]) {
+        postLightweightQueryHasBeenPerformedNotification()
+
+        if didPerformSuccessfulQuery, !metadataChangingQueries.isEmpty {
+            notifyLightweightMetadataChanged(after: metadataChangingQueries)
+        }
+    }
+
+    func queryMayChangeLightweightMetadata(_ query: String) -> Bool {
+        guard let keyword = firstExecutableSQLKeyword(in: query) else { return false }
+
+        switch keyword {
+        case "CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE", "USE":
+            return true
+        default:
+            return false
+        }
+    }
+
+    func firstExecutableSQLKeyword(in query: String) -> String? {
+        var sql = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        while !sql.isEmpty {
+            if sql.hasPrefix("--") || sql.hasPrefix("#") {
+                if let newline = sql.firstIndex(of: "\n") {
+                    sql = String(sql[sql.index(after: newline)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    continue
+                }
+                return nil
+            }
+
+            if sql.hasPrefix("/*") {
+                guard let end = sql.range(of: "*/") else { return nil }
+                sql = String(sql[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+
+            break
+        }
+
+        guard let range = sql.range(of: #"^[A-Za-z]+"#, options: .regularExpression) else { return nil }
+        return String(sql[range]).uppercased()
     }
 
     func queriesContainDestructiveSQL(_ queries: [String]) -> Bool {
@@ -3439,7 +3536,7 @@ private extension SALightweightQueryViewController {
                                       target: nil,
                                       action: nil)
         globalCheckbox.frame = NSRect(x: 0, y: 0, width: 260, height: 18)
-        globalCheckbox.state = .on
+        globalCheckbox.state = isUntitledQueryDocument ? .on : .off
         globalCheckbox.isEnabled = !isUntitledQueryDocument
 
         let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 50))
@@ -3810,14 +3907,23 @@ private extension SALightweightQueryViewController {
                 : String(format: NSLocalizedString("%@; %llu rows affected, taking %@", comment: "lightweight query affected rows status"), statusTitle, result.affectedRows, time))
         } else {
             let suffix = result.truncated
-                ? String(format: NSLocalizedString("; showing first %ld rows — copy/export use loaded rows; Run ▾ Load All Rows for full result", comment: "lightweight query truncated rows suffix"), maxDisplayedRows)
+                ? String(format: NSLocalizedString("; showing first %@ displayed rows — copy/export/print use loaded rows; Run ▾ Load All Rows for full result", comment: "lightweight query truncated rows suffix"), displayLimitRowCountString())
                 : ""
             setStatusText(String(format: NSLocalizedString("%@; %ld rows loaded%@, first row available after %@", comment: "lightweight query rows loaded status"), statusTitle, result.rows.count, suffix, time))
         }
     }
 
+    func displayLimitRowCountString() -> String {
+        return NumberFormatter.decimalStyleFormatter.string(from: NSNumber(value: maxDisplayedRows)) ?? "\(maxDisplayedRows)"
+    }
+
     func displayLimitInformationMessage() -> String {
-        return String(format: NSLocalizedString("Only the first %ld rows are loaded in the result grid. Copy, drag, bundle, and export actions use the loaded rows only. Choose Run ▾ Load All Rows for Last Result to fetch every row for this query.", comment: "lightweight query display limit information message"), maxDisplayedRows)
+        return String(format: NSLocalizedString("Only the first %@ displayed rows are loaded in the result grid. Copy, drag, print, bundle, and export actions use the loaded rows only. Choose Run ▾ Load All Rows for Last Result to fetch every row for this query.", comment: "lightweight query display limit information message"), displayLimitRowCountString())
+    }
+
+    func loadedRowsOnlyDisclosure() -> String? {
+        guard lastResultWasTruncated else { return nil }
+        return displayLimitInformationMessage()
     }
 
     func canRunCurrentQueryWithoutDisplayLimit() -> Bool {
@@ -3935,6 +4041,7 @@ private extension SALightweightQueryViewController {
         runButton.isEnabled = hasConnection
         actionButton.isEnabled = !isRunning
         exportButton.isEnabled = !isRunning && !tableView.tableColumns.isEmpty
+        exportButton.toolTip = loadedRowsOnlyDisclosure()
         favoritesButton.isEnabled = !isRunning
         historyButton.isEnabled = !isRunning
         queryTextView.isEditable = !isRunning
@@ -4869,6 +4976,72 @@ extension SALightweightQueryViewController {
         return !sqlInsertColumnIndexes(skipAutoIncrement: skipAutoIncrement).isEmpty
     }
 
+    func canExportCurrentQueryResult() -> Bool {
+        return !isRunning && exportResultColumnCount() > 0
+    }
+
+    func canPrintCurrentQueryResult() -> Bool {
+        return !isRunning && exportResultColumnCount() > 0 && exportResultRowCount() > 0
+    }
+
+    func canCopyQueryEditorSelection() -> Bool {
+        guard let textView = view.window?.firstResponder as? NSTextView,
+              textView === queryTextView || (textView as NSView).isDescendant(of: queryTextView) else {
+            return false
+        }
+
+        return textView.selectedRange().length > 0
+    }
+
+    func configureCopyResultMenuItem(_ menuItem: NSMenuItem) {
+        let baseTitle: String
+        switch menuItem.tag {
+        case SALightweightResultGridCopyWithColumnsTag:
+            baseTitle = NSLocalizedString("Copy With Column Names", comment: "query copy rows with column names menu item")
+        case SALightweightResultGridCopyAsSQLTag:
+            baseTitle = NSLocalizedString("Copy as SQL INSERT", comment: "query copy rows as sql insert menu item")
+        case SALightweightResultGridCopyAsSQLNoAutoIncTag:
+            baseTitle = NSLocalizedString("Copy as SQL INSERT (no auto_inc)", comment: "query copy rows as sql insert without auto increment menu item")
+        default:
+            baseTitle = NSLocalizedString("Copy", comment: "query copy rows menu item")
+        }
+
+        if lastResultWasTruncated {
+            menuItem.title = String(format: NSLocalizedString("%@ (Loaded Rows Only)", comment: "query copy loaded rows only menu item suffix"), baseTitle)
+            menuItem.toolTip = loadedRowsOnlyDisclosure()
+        } else {
+            menuItem.title = baseTitle
+            menuItem.toolTip = nil
+        }
+    }
+
+    func configureExportResultMenuItem(_ menuItem: NSMenuItem, action: Selector) {
+        let exportsXML = action == #selector(exportQueryResultAsXML(_:))
+        let baseTitle: String
+        if menuItem.tag == 1 || menuItem.tag == 2 {
+            baseTitle = exportsXML
+                ? NSLocalizedString("As XML file...", comment: "export result as xml menu item")
+                : NSLocalizedString("As CSV file...", comment: "export result as csv menu item")
+        } else {
+            baseTitle = exportsXML
+                ? NSLocalizedString("Export Result as XML...", comment: "query export result as xml context menu item")
+                : NSLocalizedString("Export Result as CSV...", comment: "query export result as csv context menu item")
+        }
+
+        if lastResultWasTruncated {
+            let loadedTitle = menuItem.tag == 1 || menuItem.tag == 2
+                ? String(format: NSLocalizedString("%@ (Loaded Rows Only)", comment: "query export loaded rows only submenu suffix"), baseTitle)
+                : (exportsXML
+                    ? NSLocalizedString("Export Loaded Rows as XML...", comment: "query export loaded rows as xml context menu item")
+                    : NSLocalizedString("Export Loaded Rows as CSV...", comment: "query export loaded rows as csv context menu item"))
+            menuItem.title = loadedTitle
+            menuItem.toolTip = loadedRowsOnlyDisclosure()
+        } else {
+            menuItem.title = baseTitle
+            menuItem.toolTip = nil
+        }
+    }
+
     @objc func copySelectedResultRowsForMenu(_ sender: Any?) {
         let copiesAsSQL = (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLTag
             || (sender as? NSMenuItem)?.tag == SALightweightResultGridCopyAsSQLNoAutoIncTag
@@ -4878,6 +5051,36 @@ extension SALightweightQueryViewController {
         } else {
             copySelectedResultRows(sender)
         }
+    }
+
+    @objc(copy:)
+    func copy(_ sender: Any?) {
+        if canCopySelectedResultRows(sender) {
+            copySelectedResultRowsForMenu(sender)
+            return
+        }
+
+        if let textView = view.window?.firstResponder as? NSTextView,
+           textView === queryTextView || (textView as NSView).isDescendant(of: queryTextView),
+           textView.selectedRange().length > 0 {
+            textView.copy(sender)
+            return
+        }
+
+        NSSound.beep()
+    }
+
+    @objc(printDocument:)
+    func printDocument(_ sender: Any?) {
+        guard canPrintCurrentQueryResult(),
+              let windowController = view.window?.windowController as? SPWindowController else {
+            (view.window?.windowController as? SPWindowController)?.printLightweightDocument(sender)
+            return
+        }
+
+        let target = SALightweightPrintTarget(sourceView: tableView,
+                                              title: NSLocalizedString("Query Result", comment: "lightweight query result print job title"))
+        windowController.runLightweightPrintOperation(for: target)
     }
 
     func exportResultRowCount() -> Int {
@@ -5114,13 +5317,31 @@ extension SALightweightQueryViewController: NSMenuItemValidation {
 
         switch action {
         case #selector(copySelectedResultRows(_:)):
+            configureCopyResultMenuItem(menuItem)
             return canCopySelectedResultRows(menuItem)
 
         case #selector(copySelectedResultRowsAsSQL(_:)):
+            configureCopyResultMenuItem(menuItem)
             return canCopySelectedResultRows(menuItem)
 
+        case #selector(copy(_:)):
+            let canCopyResultRows = canCopySelectedResultRows(menuItem)
+            if canCopyResultRows {
+                configureCopyResultMenuItem(menuItem)
+            } else {
+                menuItem.title = NSLocalizedString("Copy", comment: "query copy menu item")
+                menuItem.toolTip = nil
+            }
+            return canCopyResultRows || canCopyQueryEditorSelection()
+
         case #selector(exportQueryResultAsCSV(_:)), #selector(exportQueryResultAsXML(_:)):
-            return !isRunning && exportResultColumnCount() > 0
+            configureExportResultMenuItem(menuItem, action: action)
+            return canExportCurrentQueryResult()
+
+        case #selector(printDocument(_:)):
+            menuItem.toolTip = loadedRowsOnlyDisclosure()
+            return canPrintCurrentQueryResult()
+                || (!isRunning && !queryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
         case #selector(runPrimaryQuery(_:)), #selector(runSecondaryQuery(_:)):
             return !isRunning && connection != nil

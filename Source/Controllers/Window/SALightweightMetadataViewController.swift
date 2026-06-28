@@ -897,6 +897,7 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
+    private var objectType: SALightweightTableObjectType = .table
     private var triggerSheetController: SALightweightTriggerSheetController?
 
     private let tableController = SALightweightMetadataTableViewController(columns: [
@@ -956,29 +957,38 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
         connection = nil
         database = ""
         table = ""
+        objectType = .table
         titleLabel.stringValue = ""
         tableController.showPlaceholder(message)
         updateButtonState()
     }
 
-    func loadTriggers(for table: String, database: String, connection: SPMySQLConnection) {
+    func loadTriggers(for table: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType = .table) {
         self.table = table
         self.database = database
         self.connection = connection
+        self.objectType = objectType
         titleLabel.stringValue = String(format: NSLocalizedString("Triggers for table: %@", comment: "triggers for table label"), table)
         updateButtonState()
+
+        guard canEditTriggers else {
+            tableController.showPlaceholder(NSLocalizedString("Triggers are only supported for base tables. Views, procedures, and functions cannot have table triggers.", comment: "triggers unsupported non-table placeholder"))
+            return
+        }
+
         tableController.load {
             SALightweightMetadataReadService.triggers(for: table, database: database, connection: connection)
         }
     }
 
     @objc private func addTrigger(_ sender: Any) {
+        guard canEditTriggers else { return }
         openTriggerSheet(editing: nil)
     }
 
     @objc private func refreshTriggers(_ sender: Any) {
         guard let connection = connection, !table.isEmpty, !database.isEmpty else { return }
-        loadTriggers(for: table, database: database, connection: connection)
+        loadTriggers(for: table, database: database, connection: connection, objectType: objectType)
     }
 
     func refreshActiveTriggersDetail() {
@@ -986,6 +996,7 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     }
 
     @objc private func removeTrigger(_ sender: Any) {
+        guard canEditTriggers else { return }
         let selectedRows = tableController.selectedRows
         guard !selectedRows.isEmpty, let connection = connection, !database.isEmpty else { return }
 
@@ -1016,9 +1027,9 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(editSelectedTrigger(_:)):
-            return tableController.selectedRows.count == 1
+            return canEditTriggers && tableController.selectedRows.count == 1
         case #selector(removeTrigger(_:)):
-            return tableController.canRemoveSelection()
+            return canEditTriggers && tableController.canRemoveSelection()
         default:
             return true
         }
@@ -1026,9 +1037,10 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
 
     private func updateButtonState() {
         let hasTable = connection != nil && !table.isEmpty && !database.isEmpty
-        addButton.isEnabled = hasTable
+        let canEdit = hasTable && canEditTriggers
+        addButton.isEnabled = canEdit
         refreshButton.isEnabled = hasTable
-        removeButton.isEnabled = hasTable && tableController.canRemoveSelection()
+        removeButton.isEnabled = canEdit && tableController.canRemoveSelection()
     }
 
     private func configureContextMenu() {
@@ -1050,7 +1062,12 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
         tableController.setContextMenu(menu)
     }
 
+    private var canEditTriggers: Bool {
+        return objectType == .table
+    }
+
     @objc private func editSelectedTrigger(_ sender: Any) {
+        guard canEditTriggers else { return }
         guard let selectedRow = tableController.selectedRows.first,
               let triggerName = selectedRow["TriggerName"],
               !triggerName.isEmpty else { return }
@@ -1059,12 +1076,13 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     }
 
     private func editTrigger(at row: Int) {
+        guard canEditTriggers else { return }
         guard let trigger = tableController.row(at: row) else { return }
         openTriggerSheet(editing: trigger)
     }
 
     private func openTriggerSheet(editing trigger: [String: String]?) {
-        guard connection != nil, !database.isEmpty, !table.isEmpty else { return }
+        guard canEditTriggers, connection != nil, !database.isEmpty, !table.isEmpty else { return }
 
         let sheetController = SALightweightTriggerSheetController(trigger: trigger)
         sheetController.onConfirm = { [weak self] value in
@@ -1087,6 +1105,7 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
     }
 
     private func saveTrigger(_ trigger: SALightweightTriggerValue, replacing originalTrigger: [String: String]?, connection: SPMySQLConnection) -> Bool {
+        guard canEditTriggers else { return false }
         _ = connection.selectDatabase(database)
 
         if let originalName = originalTrigger?["TriggerName"], !originalName.isEmpty {

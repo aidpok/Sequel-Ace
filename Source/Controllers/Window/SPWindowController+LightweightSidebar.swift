@@ -871,11 +871,12 @@ extension SPWindowController {
             NSLocalizedString("loading...", comment: "table info loading row")
         ]
         lightweightTableInfoView.reloadData()
+        let objectType = lightweightTableTypes[table] ?? .table
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
             guard let self = self, let activeConnection = activeConnection else { return }
 
-            let rows = SALightweightTableInfoLoader.sidebarRows(for: table, database: selectedDatabase, connection: activeConnection)
+            let rows = SALightweightTableInfoLoader.sidebarRows(for: table, database: selectedDatabase, connection: activeConnection, selectedObjectType: objectType)
 
             DispatchQueue.main.async {
                 guard self.lightweightTableInfoLoadToken == token, self.selectedTable == table else { return }
@@ -907,11 +908,19 @@ extension SPWindowController {
             self?.viewStatus()
         }
         guard detailChanged else { return }
-        lightweightStructureController.loadStructure(for: table, database: selectedDatabase, connection: activeConnection)
+        lightweightStructureController.loadStructure(for: table,
+                                                     database: selectedDatabase,
+                                                     connection: activeConnection,
+                                                     objectType: lightweightTableTypes[table] ?? .table)
     }
 
     func showLightweightContent(for table: String) {
         guard let activeConnection = activeConnection, let selectedDatabase = selectedDatabase else { return }
+        let objectType = lightweightTableTypes[table] ?? .table
+        guard lightweightObjectTypeSupportsContent(objectType) else {
+            showLightweightStatus(for: table)
+            return
+        }
 
         setActiveLightweightViewMode(.content)
         databaseToolbarController.selectViewMode(.content)
@@ -977,7 +986,10 @@ extension SPWindowController {
         }
 
         guard detailChanged else { return }
-        lightweightTableInfoController.loadTableInfo(for: table, database: selectedDatabase, connection: activeConnection)
+        lightweightTableInfoController.loadTableInfo(for: table,
+                                                     database: selectedDatabase,
+                                                     connection: activeConnection,
+                                                     objectType: lightweightTableTypes[table] ?? .table)
     }
 
     func showLightweightRelations(for table: String?) {
@@ -1009,6 +1021,9 @@ extension SPWindowController {
         }
 
         guard detailChanged else { return }
-        lightweightTriggersController.loadTriggers(for: table, database: selectedDatabase, connection: activeConnection)
+        lightweightTriggersController.loadTriggers(for: table,
+                                                   database: selectedDatabase,
+                                                   connection: activeConnection,
+                                                   objectType: lightweightTableTypes[table] ?? .table)
     }
 }

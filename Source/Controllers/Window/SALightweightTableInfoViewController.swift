@@ -228,8 +228,12 @@ final class SALightweightTableInfoSidebarView: NSView {
 }
 
 enum SALightweightTableInfoLoader {
-    static func sidebarRows(for table: String, database: String, connection: SPMySQLConnection) -> [String] {
-        guard var tableStatus = tableStatusValues(for: table, database: database, connection: connection) else {
+    static func sidebarRows(for table: String, database: String, connection: SPMySQLConnection, selectedObjectType: SALightweightTableObjectType? = nil) -> [String] {
+        if let selectedObjectType = selectedObjectType, selectedObjectType == .procedure || selectedObjectType == .function {
+            return routineSidebarRows(for: table, database: database, connection: connection, objectType: selectedObjectType)
+        }
+
+        guard let tableStatus = tableStatusValues(for: table, database: database, connection: connection) else {
             return [
                 NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane"),
                 NSLocalizedString("error occurred", comment: "error occurred")
@@ -273,8 +277,12 @@ enum SALightweightTableInfoLoader {
         return rows
     }
 
-    static func tableInfo(for table: String, database: String, connection: SPMySQLConnection, includeCreateSyntax: Bool = true) -> SALightweightTableInfoSnapshot {
-        guard var tableStatus = tableStatusValues(for: table, database: database, connection: connection) else {
+    static func tableInfo(for table: String, database: String, connection: SPMySQLConnection, selectedObjectType: SALightweightTableObjectType? = nil, includeCreateSyntax: Bool = true) -> SALightweightTableInfoSnapshot {
+        if let selectedObjectType = selectedObjectType, selectedObjectType == .procedure || selectedObjectType == .function {
+            return routineInfo(for: table, database: database, connection: connection, objectType: selectedObjectType, includeCreateSyntax: includeCreateSyntax)
+        }
+
+        guard let tableStatus = tableStatusValues(for: table, database: database, connection: connection) else {
             return SALightweightTableInfoSnapshot(rows: [
                 SALightweightTableInfoRow(NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane"), isGroup: true),
                 SALightweightTableInfoRow(NSLocalizedString("error occurred", comment: "error occurred"))
@@ -379,6 +387,71 @@ enum SALightweightTableInfoLoader {
         addCompactStringRow(key: "CHARACTER_SET_CLIENT", label: NSLocalizedString("character set client", comment: "character set client: %@"), status: viewStatus, rows: &rows)
         addCompactStringRow(key: "COLLATION_CONNECTION", label: NSLocalizedString("collation connection", comment: "collation connection: %@"), status: viewStatus, rows: &rows)
         return rows
+    }
+
+    private static func routineInfo(for routine: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType, includeCreateSyntax: Bool) -> SALightweightTableInfoSnapshot {
+        let infoType = tableInfoObjectType(for: objectType) ?? .procedure
+        var rows = [SALightweightTableInfoRow(infoType.headerTitle, isGroup: true)]
+        let routineStatus = routineStatusValues(for: routine, database: database, connection: connection, objectType: objectType)
+
+        if let routineStatus = routineStatus {
+            addDateRow(key: "CREATED", label: NSLocalizedString("created", comment: "Table Info Section : time+date routine was created at"), status: routineStatus, rows: &rows)
+            addDateRow(key: "LAST_ALTERED", label: NSLocalizedString("modified", comment: "Table Info Section : time+date routine was modified at"), status: routineStatus, rows: &rows)
+            addStringRow(key: "DEFINER", label: NSLocalizedString("definer", comment: "definer: %@"), status: routineStatus, rows: &rows)
+            addStringRow(key: "SECURITY_TYPE", label: NSLocalizedString("execution privilege", comment: "execution privilege: %@"), status: routineStatus, rows: &rows)
+            addStringRow(key: "DTD_IDENTIFIER", label: NSLocalizedString("returns", comment: "routine return type"), status: routineStatus, rows: &rows)
+            addStringRow(key: "SQL_MODE", label: NSLocalizedString("sql mode", comment: "routine sql mode"), status: routineStatus, rows: &rows)
+            addStringRow(key: "CHARACTER_SET_CLIENT", label: NSLocalizedString("character set client", comment: "character set client: %@"), status: routineStatus, rows: &rows)
+            addStringRow(key: "COLLATION_CONNECTION", label: NSLocalizedString("collation connection", comment: "collation connection: %@"), status: routineStatus, rows: &rows)
+            addStringRow(key: "DATABASE_COLLATION", label: NSLocalizedString("database collation", comment: "routine database collation"), status: routineStatus, rows: &rows)
+        } else {
+            rows.append(SALightweightTableInfoRow(NSLocalizedString("Routine metadata unavailable.", comment: "routine table info unavailable message")))
+        }
+
+        let createSyntax = includeCreateSyntax ? routineCreateSyntax(for: routine, database: database, connection: connection, objectType: objectType) : nil
+        return SALightweightTableInfoSnapshot(rows: rows,
+                                              createSyntax: createSyntax,
+                                              objectType: infoType,
+                                              values: routineStatus.map { formValues(from: $0) } ?? [:],
+                                              engineOptions: [],
+                                              encodingOptions: [],
+                                              collationOptions: [],
+                                              selectedEncodingName: nil,
+                                              canEdit: false,
+                                              hasAutoIncrement: false)
+    }
+
+    private static func routineSidebarRows(for routine: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType) -> [String] {
+        let infoType = tableInfoObjectType(for: objectType) ?? .procedure
+        var rows = [infoType.headerTitle]
+        guard let routineStatus = routineStatusValues(for: routine, database: database, connection: connection, objectType: objectType) else {
+            rows.append(NSLocalizedString("Routine metadata unavailable.", comment: "routine table info unavailable message"))
+            return rows
+        }
+
+        addCompactDateRow(key: "CREATED", label: NSLocalizedString("created", comment: "Table Info Section : time+date routine was created at"), status: routineStatus, rows: &rows)
+        addCompactDateRow(key: "LAST_ALTERED", label: NSLocalizedString("modified", comment: "Table Info Section : time+date routine was modified at"), status: routineStatus, rows: &rows)
+        addCompactStringRow(key: "DEFINER", label: NSLocalizedString("definer", comment: "definer: %@"), status: routineStatus, rows: &rows)
+        addCompactStringRow(key: "SECURITY_TYPE", label: NSLocalizedString("execution privilege", comment: "execution privilege: %@"), status: routineStatus, rows: &rows)
+        addCompactStringRow(key: "DTD_IDENTIFIER", label: NSLocalizedString("returns", comment: "routine return type"), status: routineStatus, rows: &rows)
+        return rows
+    }
+
+    private static func routineStatusValues(for routine: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType) -> [String: Any]? {
+        guard let routineType = routineTypeKeyword(for: objectType) else { return nil }
+
+        let query = """
+            SELECT ROUTINE_TYPE, DEFINER, SECURITY_TYPE, DTD_IDENTIFIER, CREATED, LAST_ALTERED, SQL_MODE, \
+                   CHARACTER_SET_CLIENT, COLLATION_CONNECTION, DATABASE_COLLATION \
+            FROM information_schema.ROUTINES \
+            WHERE ROUTINE_SCHEMA = \(sqlString(database, connection: connection)) \
+              AND ROUTINE_NAME = \(sqlString(routine, connection: connection)) \
+              AND ROUTINE_TYPE = \(sqlString(routineType, connection: connection))
+            """
+        guard let result = connection.queryString(query) else { return nil }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        return result.getRowAsDictionary() as? [String: Any]
     }
 
     private static func addDateRow(key: String, label: String, status: [String: Any], rows: inout [SALightweightTableInfoRow]) {
@@ -616,6 +689,72 @@ enum SALightweightTableInfoLoader {
         return nil
     }
 
+    private static func routineCreateSyntax(for routine: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType) -> String? {
+        guard let routineType = routineTypeKeyword(for: objectType) else { return nil }
+
+        let query = "SHOW CREATE \(routineType) \(backtickQuoted(database)).\(backtickQuoted(routine))"
+        guard let result = connection.queryString(query) else { return nil }
+
+        result.defaultRowReturnType = SPMySQLResultRowAsDictionary
+        guard let row = result.getRowAsDictionary() as? [String: Any] else { return nil }
+
+        let syntaxKey = "Create \(routineType.capitalized)"
+        if let syntax = displayString(row[syntaxKey]) {
+            return routineCreateSyntaxString(syntax)
+        }
+
+        for (key, value) in row where key.lowercased().contains("create") {
+            if let syntax = displayString(value) {
+                return routineCreateSyntaxString(syntax)
+            }
+        }
+
+        return nil
+    }
+
+    private static func routineCreateSyntaxString(_ syntax: String) -> String {
+        let trimmedSyntax = syntax.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedSyntax.range(of: #"(?im)^\s*DELIMITER\b"#, options: .regularExpression) == nil else { return trimmedSyntax }
+
+        var statement = trimmedSyntax
+        while statement.hasSuffix(";") {
+            statement.removeLast()
+            statement = statement.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard statement.contains(";") else { return "\(statement);" }
+
+        return "DELIMITER ;;\n\(statement);;\nDELIMITER ;"
+    }
+
+    private static func tableInfoObjectType(for selectedObjectType: SALightweightTableObjectType?) -> SALightweightTableInfoObjectType? {
+        guard let selectedObjectType = selectedObjectType else { return nil }
+
+        switch selectedObjectType {
+        case .table:
+            return .table
+        case .view:
+            return .view
+        case .procedure:
+            return .procedure
+        case .function:
+            return .function
+        case .none:
+            return nil
+        }
+    }
+
+    private static func routineTypeKeyword(for objectType: SALightweightTableObjectType) -> String? {
+        switch objectType {
+        case .procedure:
+            return "PROCEDURE"
+        case .function:
+            return "FUNCTION"
+        case .none, .table, .view:
+            return nil
+        }
+    }
+
     private static func integerString(_ value: Any?) -> String? {
         guard let integer = integerValue(value) else { return nil }
         return NumberFormatter.decimalStyleFormatter.string(from: NSNumber(value: integer))
@@ -660,6 +799,8 @@ enum SALightweightTableInfoLoader {
 enum SALightweightTableInfoObjectType {
     case table
     case view
+    case procedure
+    case function
 
     var headerTitle: String {
         switch self {
@@ -667,6 +808,10 @@ enum SALightweightTableInfoObjectType {
             return NSLocalizedString("TABLE INFORMATION", comment: "header for table info pane")
         case .view:
             return NSLocalizedString("VIEW INFORMATION", comment: "header for view info pane")
+        case .procedure:
+            return NSLocalizedString("PROCEDURE INFORMATION", comment: "header for procedure info pane")
+        case .function:
+            return NSLocalizedString("FUNCTION INFORMATION", comment: "header for function info pane")
         }
     }
 }
@@ -679,6 +824,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
     private var preferenceObserver: SALightweightPreferenceObserver?
     private var table = ""
     private var database = ""
+    private var objectType: SALightweightTableObjectType = .table
     private weak var connection: SPMySQLConnection?
     private var currentSnapshot: SALightweightTableInfoSnapshot?
     private var isApplyingSnapshot = false
@@ -918,12 +1064,13 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         }
     }
 
-    func loadTableInfo(for table: String, database: String, connection: SPMySQLConnection) {
+    func loadTableInfo(for table: String, database: String, connection: SPMySQLConnection, objectType: SALightweightTableObjectType = .table) {
         loadToken = UUID()
         let token = loadToken
         self.table = table
         self.database = database
         self.connection = connection
+        self.objectType = objectType
 
         placeholderView.removeFromSuperviewWithoutNeedingDisplay()
         formView.isHidden = false
@@ -939,7 +1086,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            let snapshot = SALightweightTableInfoLoader.tableInfo(for: table, database: database, connection: connection)
+            let snapshot = SALightweightTableInfoLoader.tableInfo(for: table, database: database, connection: connection, selectedObjectType: objectType)
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else { return }
@@ -1019,6 +1166,14 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
         if snapshot.objectType == .view {
             populate(typePopUpButton, with: ["View"], selectedTitle: "View")
+            encodingPopUpButton.isEnabled = false
+            collationPopUpButton.isEnabled = false
+        } else if snapshot.objectType == .procedure {
+            populate(typePopUpButton, with: ["Procedure"], selectedTitle: "Procedure")
+            encodingPopUpButton.isEnabled = false
+            collationPopUpButton.isEnabled = false
+        } else if snapshot.objectType == .function {
+            populate(typePopUpButton, with: ["Function"], selectedTitle: "Function")
             encodingPopUpButton.isEnabled = false
             collationPopUpButton.isEnabled = false
         }
@@ -1272,7 +1427,7 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
 
     private func reloadCurrentTableInfo() {
         guard let connection = connection, !table.isEmpty, !database.isEmpty else { return }
-        loadTableInfo(for: table, database: database, connection: connection)
+        loadTableInfo(for: table, database: database, connection: connection, objectType: objectType)
     }
 
     private func formattedIntegerIsZero(_ value: String?) -> Bool {
