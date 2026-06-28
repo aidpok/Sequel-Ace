@@ -36,6 +36,7 @@
 #import "SPCopyTable.h"
 #import "SPWindow.h"
 #include <objc/objc-runtime.h>
+#include <stdlib.h>
 #import "SPCustomQuery.h"
 #import "SPTableContent.h"
 #import "SPJSONFormatter.h"
@@ -50,6 +51,9 @@ typedef enum {
 	HexSegment,
 	JsonSegment,
 } FieldEditorSegment;
+
+@interface SPFieldEditorController ()
+@end
 
 @implementation SPFieldEditorController
 
@@ -177,6 +181,8 @@ typedef enum {
 			}
 		}
 
+		[self setupPHPSerializedEditorMenuItemInMenu:menu];
+
 		qlTypes = @{SPQuickLookTypes : qlTypesItems};
 
 		fieldType = @"";
@@ -229,6 +235,7 @@ typedef enum {
 	_isEditable     = isEditable;
 	contextInfo     = theContextInfo;
 	callerInstance  = sender;
+	[self resetPHPSerializedEditorState];
 	_isGeometry     = ([[fieldType uppercaseString] isEqualToString:@"GEOMETRY"]) ? YES : NO;
 	_isJSON         = ([[fieldType uppercaseString] isEqualToString:SPMySQLJsonType]);
 	NSString *label = [self buildLabelForField:fieldName];
@@ -450,6 +457,9 @@ typedef enum {
 				// Set focus
 				[usedSheet makeFirstResponder:image == nil || _isGeometry ? editTextView : editImage];
 			}
+
+			[self refreshPHPSerializedEditorAvailability];
+			[self performSelector:@selector(openPHPSerializedEditorIfCurrentTextIsStructured) withObject:nil afterDelay:0.15];
 
 			if (deferTextLoading && _isEditable) [editSheetOkButton setEnabled:YES];
 			editSheetWillBeInitialized = NO;
@@ -1420,6 +1430,7 @@ typedef enum {
 
 		// set edit data to text
 		sheetEditData = [NSString stringWithString:[editTextView string]];
+		[self refreshPHPSerializedEditorAvailability];
 	}
 }
 
