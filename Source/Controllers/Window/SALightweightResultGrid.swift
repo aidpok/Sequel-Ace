@@ -931,7 +931,16 @@ enum SALightweightResultGrid {
     }
 
     static func csvEscaped(_ value: String) -> String {
-        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+        let safeValue = csvFormulaSafeValue(value)
+        return "\"\(safeValue.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    static func csvFormulaSafeValue(_ value: String) -> String {
+        guard let first = value.first, "=+-@\t\r".contains(first) else {
+            return value
+        }
+
+        return "'\(value)"
     }
 
     static func xmlEscaped(_ value: String) -> String {

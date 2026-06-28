@@ -618,6 +618,15 @@ enum SALightweightTableInfoLoader {
     }
 
     static func collationOptions(for encoding: String, connection: SPMySQLConnection) -> [String] {
+        var collations = collationOptionsFromShowCollation(for: encoding, connection: connection)
+        if collations.isEmpty, let alias = utf8Alias(for: encoding) {
+            collations = collationOptionsFromShowCollation(for: alias, connection: connection)
+        }
+
+        return collations
+    }
+
+    private static func collationOptionsFromShowCollation(for encoding: String, connection: SPMySQLConnection) -> [String] {
         guard let result = connection.queryString("SHOW COLLATION WHERE Charset = \(sqlString(encoding, connection: connection))") else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -628,7 +637,8 @@ enum SALightweightTableInfoLoader {
             collations.append(collation)
         }
 
-        return collations
+        return Array(NSOrderedSet(array: collations).compactMap { $0 as? String })
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private static func tableStatusValues(for table: String, database: String, connection: SPMySQLConnection) -> [String: Any]? {
@@ -768,7 +778,19 @@ enum SALightweightTableInfoLoader {
     private static func displayString(_ value: Any?) -> String? {
         guard let value = value, !(value is NSNull) else { return nil }
 
-        let stringValue = String(describing: value)
+        let stringValue: String
+        if let data = value as? Data {
+            stringValue = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1)
+                ?? ""
+        } else if let data = value as? NSData {
+            stringValue = String(data: data as Data, encoding: .utf8)
+                ?? String(data: data as Data, encoding: .isoLatin1)
+                ?? ""
+        } else {
+            stringValue = String(describing: value)
+        }
+
         return stringValue.isEmpty ? nil : stringValue
     }
 
@@ -781,6 +803,17 @@ enum SALightweightTableInfoLoader {
         }
 
         return collation.components(separatedBy: "_").first ?? collation
+    }
+
+    private static func utf8Alias(for encoding: String) -> String? {
+        switch encoding.lowercased() {
+        case "utf8":
+            return "utf8mb3"
+        case "utf8mb3":
+            return "utf8"
+        default:
+            return nil
+        }
     }
 
     private static func sqlString(_ value: String, connection: SPMySQLConnection) -> String {
