@@ -60,6 +60,12 @@ struct SALightweightTableInfoEncodingOption {
     let name: String
 }
 
+private enum SALightweightTableInfoRowCountQueryLevel: Int {
+    case never = 0
+    case ifCheap = 1
+    case always = 2
+}
+
 final class SALightweightTableInfoSidebarView: NSView {
     var rows: [String] = [] {
         didSet {
@@ -579,8 +585,46 @@ enum SALightweightTableInfoLoader {
             tableStatus["Engine"] = type
         }
 
-        tableStatus["RowsCountAccurate"] = displayString(tableStatus["Engine"]) == "MyISAM" ? "y" : "n"
+        let engine = (displayString(tableStatus["Engine"]) ?? "").lowercased()
+        if engine == "myisam" {
+            tableStatus["RowsCountAccurate"] = "y"
+        } else if shouldFetchAccurateRowCount(for: tableStatus),
+                  let accurateRowCount = accurateRowCount(for: table, database: database, connection: connection) {
+            tableStatus["Rows"] = "\(accurateRowCount)"
+            tableStatus["RowsCountAccurate"] = "y"
+        } else {
+            tableStatus["RowsCountAccurate"] = "n"
+        }
+
         return tableStatus
+    }
+
+    private static func accurateRowCount(for table: String, database: String, connection: SPMySQLConnection) -> Int? {
+        let query = "SELECT COUNT(1) FROM \(backtickQuoted(database)).\(backtickQuoted(table))"
+        guard let result = connection.queryString(query),
+              let row = result.getRowAsArray(),
+              let value = row.first else { return nil }
+
+        guard let count = Int(displayString(value) ?? "") else { return nil }
+        return count
+    }
+
+    private static func shouldFetchAccurateRowCount(for tableStatus: [String: Any]) -> Bool {
+        let defaults = UserDefaults.standard
+        let level = SALightweightTableInfoRowCountQueryLevel(rawValue: defaults.integer(forKey: SPTableRowCountQueryLevel)) ?? .always
+
+        switch level {
+        case .never:
+            return false
+        case .always:
+            return true
+        case .ifCheap:
+            let cheapBoundary = defaults.object(forKey: SPTableRowCountCheapSizeBoundary) as? Int ?? 5_242_880
+            guard let dataLength = Int(displayString(tableStatus["Data_length"]) ?? "") else {
+                return false
+            }
+            return dataLength < cheapBoundary
+        }
     }
 
     private static func objectType(for table: String, database: String, status: [String: Any], connection: SPMySQLConnection) -> SALightweightTableInfoObjectType {

@@ -118,6 +118,12 @@ final class SALightweightContentViewController: NSViewController {
         case unknown
     }
 
+    private enum RowCountQueryLevel: Int {
+        case never = 0
+        case ifCheap = 1
+        case always = 2
+    }
+
     private weak var connection: SPMySQLConnection?
     private var database = ""
     private var table = ""
@@ -955,8 +961,18 @@ private extension SALightweightContentViewController {
                 }
 
                 self.appendContentRows(pendingRows, autosizeColumns: self.rows.count < self.initialRowLoadPublishSize)
-                self.totalRowCount = rowCount?.count ?? (limitResults ? nil : self.rows.count)
                 self.hasNextPage = hasNextPage
+                let reconciledRowCount = self.reconciledRowCount(
+                    rowCount,
+                    displayedRowCount: self.rows.count,
+                    pageSize: pageSize,
+                    offset: offset,
+                    limitResults: limitResults,
+                    isFiltered: whereClause != nil,
+                    hasNextPage: hasNextPage
+                )
+                self.totalRowCount = reconciledRowCount?.count
+                self.totalRowCountIsEstimate = reconciledRowCount?.isEstimate ?? false
                 self.finalizeContentLoad()
             }
         }
@@ -1037,6 +1053,7 @@ private extension SALightweightContentViewController {
         isLoadingSortPreservingColumns = false
         if totalRowCount == nil, !limitResults {
             totalRowCount = rows.count
+            totalRowCountIsEstimate = false
         }
 
         isLoading = false
@@ -1097,12 +1114,23 @@ private extension SALightweightContentViewController {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
-            if let row = result.getRowAsDictionary() as? [String: Any],
-               let count = Int(Self.displayString(for: row["Rows"])) {
-                return (count, true)
+            if let row = result.getRowAsDictionary() as? [String: Any] {
+                if shouldFetchAccurateRowCount(for: row),
+                   let accurateCount = accurateRowCount(whereClause: nil, connection: connection) {
+                    return (accurateCount, false)
+                }
+
+                if let count = Int(Self.displayString(for: row["Rows"])) {
+                    let engine = Self.displayString(for: row["Engine"]).lowercased()
+                    return (count, engine != "myisam")
+                }
             }
         }
 
+        return accurateRowCount(whereClause: whereClause, connection: connection).map { ($0, false) }
+    }
+
+    private func accurateRowCount(whereClause: String?, connection: SPMySQLConnection) -> Int? {
         var query = "SELECT COUNT(1) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
 
         if let whereClause = whereClause {
@@ -1114,7 +1142,69 @@ private extension SALightweightContentViewController {
               let value = row.first else { return nil }
 
         guard let count = Int(Self.displayString(for: value)) else { return nil }
-        return (count, false)
+        return count
+    }
+
+    private func shouldFetchAccurateRowCount(for tableStatus: [String: Any]) -> Bool {
+        let engine = Self.displayString(for: tableStatus["Engine"]).lowercased()
+        if engine == "myisam" {
+            return false
+        }
+
+        let defaults = UserDefaults.standard
+        let level = RowCountQueryLevel(rawValue: defaults.integer(forKey: SPTableRowCountQueryLevel)) ?? .always
+
+        switch level {
+        case .never:
+            return false
+        case .always:
+            return true
+        case .ifCheap:
+            let cheapBoundary = defaults.object(forKey: SPTableRowCountCheapSizeBoundary) as? Int ?? 5_242_880
+            guard let dataLength = Int(Self.displayString(for: tableStatus["Data_length"])) else {
+                return false
+            }
+            return dataLength < cheapBoundary
+        }
+    }
+
+    private func reconciledRowCount(_ rowCount: (count: Int, isEstimate: Bool)?,
+                                    displayedRowCount: Int,
+                                    pageSize: Int,
+                                    offset: Int,
+                                    limitResults: Bool,
+                                    isFiltered: Bool,
+                                    hasNextPage: Bool) -> (count: Int, isEstimate: Bool)? {
+        if !limitResults {
+            return (displayedRowCount, false)
+        }
+
+        let foundMaxRows = offset + displayedRowCount
+
+        guard var reconciledRowCount = rowCount else {
+            if hasNextPage {
+                return (foundMaxRows + 1, true)
+            }
+
+            return (foundMaxRows, false)
+        }
+
+        if foundMaxRows > reconciledRowCount.count {
+            if hasNextPage {
+                reconciledRowCount.count = foundMaxRows + 1
+                reconciledRowCount.isEstimate = true
+            } else {
+                reconciledRowCount.count = foundMaxRows
+                reconciledRowCount.isEstimate = false
+            }
+        } else if !isFiltered && !hasNextPage && displayedRowCount < pageSize {
+            reconciledRowCount.count = foundMaxRows
+            reconciledRowCount.isEstimate = false
+        } else if !isFiltered && !hasNextPage && displayedRowCount == pageSize && foundMaxRows == reconciledRowCount.count {
+            reconciledRowCount.isEstimate = false
+        }
+
+        return reconciledRowCount
     }
 
     private func loadColumnInfo(connection: SPMySQLConnection) -> [ColumnInfo] {
