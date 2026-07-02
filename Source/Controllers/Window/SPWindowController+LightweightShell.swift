@@ -344,7 +344,50 @@ extension SPWindowController {
                                         file: file,
                                         function: function,
                                         line: line)
+
+        if lightweightDBViewFallbackIsBlocked {
+            NSLog("[SA UI Diagnostics] DBView fallback blocked: %@", reason)
+            showBlockedDBViewFallbackAlert(reason: reason)
+            preconditionFailure("DBView fallback blocked: \(reason)")
+        }
+
         return installLegacyDatabaseDocumentIfNeeded(selectingDatabase: database, item: item)
+    }
+
+    private var lightweightDBViewFallbackIsBlocked: Bool {
+        #if SA_LIGHTWEIGHT_NO_DBVIEW
+        return true
+        #else
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["SA_LIGHTWEIGHT_NO_DBVIEW"] ?? environment["SALightweightDisableDBViewFallback"] {
+            let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedValue == "1" || normalizedValue == "true" || normalizedValue == "yes" {
+                return true
+            }
+        }
+
+        return UserDefaults.standard.bool(forKey: "SALightweightDisableDBViewFallback")
+        #endif
+    }
+
+    private func showBlockedDBViewFallbackAlert(reason: String) {
+        let presentAlert = { [weak self] in
+            guard let self = self else { return }
+            let alert = NSAlert()
+            alert.window.animationBehavior = .none
+            alert.alertStyle = .critical
+            alert.messageText = NSLocalizedString("Legacy database view fallback blocked", comment: "no DBView fallback gate title")
+            alert.informativeText = String(format: NSLocalizedString("The lightweight no-DBView gate blocked a request to load the legacy database view.\n\nReason: %@", comment: "no DBView fallback gate message"), reason)
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+
+            alert.runModalCenteredInKeyWindow()
+        }
+
+        if Thread.isMainThread {
+            presentAlert()
+        } else {
+            DispatchQueue.main.sync(execute: presentAlert)
+        }
     }
 
     @discardableResult

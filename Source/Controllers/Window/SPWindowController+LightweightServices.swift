@@ -1108,16 +1108,6 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
             return
         }
 
-        switch lightweightImportRouteChoice() {
-        case .lightweight:
-            break
-        case .legacy:
-            startLegacyFileImportFlow()
-            return
-        case .cancel:
-            return
-        }
-
         presentLightweightImportOpenPanel(initialURL: nil)
     }
 

@@ -505,12 +505,6 @@ extension SPWindowController {
         case stop
     }
 
-    enum LightweightImportRouteChoice {
-        case lightweight
-        case legacy
-        case cancel
-    }
-
     enum LightweightImportFileKind {
         case sql
         case csv
@@ -539,25 +533,6 @@ extension SPWindowController {
                              message: NSLocalizedString("Select a database in the active lightweight connection before importing.", comment: "lightweight import unavailable message"))
     }
 
-    func lightweightImportRouteChoice() -> LightweightImportRouteChoice {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = NSLocalizedString("Import", comment: "import title")
-        alert.informativeText = NSLocalizedString("Lightweight import handles SQL, CSV, and TSV files without loading the full database view. Use the full database view only for legacy import options that are not supported here.", comment: "lightweight import route choice message")
-        alert.addButton(withTitle: NSLocalizedString("Choose Lightweight Import File", comment: "lightweight import choose file button"))
-        alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
-
-        switch runLightweightModalAlert(alert) {
-        case .alertFirstButtonReturn:
-            return .lightweight
-        case .alertSecondButtonReturn:
-            return .legacy
-        default:
-            return .cancel
-        }
-    }
-
     static func lightweightImportFileKind(for url: URL) -> LightweightImportFileKind? {
         if isLightweightSQLImportFileURL(url) {
             return .sql
@@ -578,15 +553,11 @@ extension SPWindowController {
         guard importKind ?? lightweightImportFileKind(for: url) != nil else {
             NSSound.beep()
             showLightweightError(title: NSLocalizedString("Import Unsupported", comment: "lightweight import unsupported file title"),
-                                 message: NSLocalizedString("This file was not imported. Lightweight import supports .sql, .sql.gz, .sql.bz2, .csv, .csv.gz, .csv.bz2, .tsv, .tsv.gz, and .tsv.bz2 files. Run Import again and choose the full database view only if this file needs the legacy importer.", comment: "lightweight import unsupported file message"))
+                                 message: NSLocalizedString("This file was not imported. Lightweight import supports .sql, .sql.gz, .sql.bz2, .csv, .csv.gz, .csv.bz2, .tsv, .tsv.gz, and .tsv.bz2 files.", comment: "lightweight import unsupported file message"))
             return false
         }
 
         return true
-    }
-
-    func startLegacyFileImportFlow(reason: String = "User chose full database import flow from lightweight import router") {
-        performExplicitLegacyFallback(reason: reason, selectingDatabase: selectedDatabase, item: selectedTable).importFile()
     }
 
     func confirmLightweightSQLImport(sourceName: String) -> Bool {
@@ -946,15 +917,11 @@ extension SPWindowController {
             details.append(rowErrors.prefix(20).joined(separator: "\n"))
         }
 
-        details.append(NSLocalizedString("Choose the full database view only if you want to continue there.", comment: "lightweight CSV explicit fallback message"))
+        details.append(NSLocalizedString("Review the details, adjust the file or import settings, and try again.", comment: "lightweight CSV terminal failure message"))
 
         alert.informativeText = details.joined(separator: "\n\n")
         alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
-        alert.addButton(withTitle: NSLocalizedString("Use Full Database View", comment: "lightweight import full database view button"))
-
-        if runLightweightModalAlert(alert) == .alertSecondButtonReturn {
-            startLegacyFileImportFlow(reason: "User chose full database import flow after lightweight CSV import failure")
-        }
+        _ = runLightweightModalAlert(alert)
     }
 
     func showLightweightCSVImportCompletedWithErrors(sourceName: String, rowsImported: Int, errors: [String]) {
@@ -1176,10 +1143,9 @@ extension SPWindowController {
     }
 
     func lightweightSQLQueries(in text: String) -> [String] {
-        // Bounded lightweight imports intentionally pre-split SQL. Unlike the legacy
-        // streaming importer, this cannot adjust parser noBackslashEscapes after
-        // mid-file SQL_MODE changes; the confirmation alert routes those dumps to
-        // the full database view.
+        // Bounded in-memory lightweight imports intentionally pre-split SQL.
+        // Unlike the streaming file importer, this cannot adjust parser
+        // noBackslashEscapes after mid-file SQL_MODE changes.
         let parser = SPSQLParser(string: text)
         parser.setDelimiterSupport(true)
         guard let rawQueries = parser.splitString(byCharacter: Character(";").utf16.first!) as? [String] else { return [] }

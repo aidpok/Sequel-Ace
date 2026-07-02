@@ -146,15 +146,19 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
 - (SALightweightConnectionFileOpenResult)openLightweightConnectionFileAtPath:(NSString *)filePath windowController:(SPWindowController *)windowController savedInBundle:(BOOL)savedInBundle;
 - (BOOL)applyLightweightStateDictionary:(NSDictionary *)state toWindowController:(SPWindowController *)windowController;
 - (BOOL)lightweightStateDictionaryRequestsAutoConnect:(NSDictionary *)state;
+- (BOOL)applyLightweightDefaultFavoriteToWindowController:(SPWindowController *)windowController autoConnect:(BOOL)autoConnect;
 - (BOOL)applyLightweightDefaultAutoconnectToWindowController:(SPWindowController *)windowController;
 - (SPTreeNode *)lightweightFavoriteNodeForFavoriteID:(NSInteger)favoriteID;
 - (SALightweightConnectionFileOpenResult)lightweightUnsupportedConnectionFileOpenResultWithReason:(NSString *)reason;
+- (BOOL)lightweightUnsupportedReasonRequiresLegacyDBViewFallback:(NSString *)reason;
+- (BOOL)lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback;
+- (void)showLightweightUnsupportedStateWarningWithContext:(NSString *)context reason:(NSString *)reason;
+- (void)showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:(NSString *)context;
 - (NSString *)lightweightConnectionFileFallbackReasonWithPrefix:(NSString *)prefix;
 - (BOOL)lightweightConnectionFileRequiresLegacyPreferences:(NSDictionary *)spf data:(NSDictionary *)data connection:(NSDictionary *)connection autoConnect:(BOOL)autoConnect reason:(NSString **)reason;
 - (NSDictionary *)lightweightConnectionDocumentContextFromSPF:(NSDictionary *)spf data:(NSDictionary *)data;
 - (NSDictionary *)lightweightSessionSnapshotFromLegacySession:(NSDictionary *)session connection:(NSDictionary *)connection;
 - (BOOL)lightweightConnectionDataIncludesQuery:(NSDictionary *)data lightweightSession:(NSDictionary *)lightweightSession;
-- (BOOL)lightweightLegacySessionQueriesObjectIsSupported:(id)queriesObject;
 - (NSString *)lightweightQueryStringFromLegacySessionQueriesObject:(id)queriesObject;
 - (NSString *)lightweightStringValueForObject:(id)object;
 - (NSDictionary *)lightweightQuerySnapshotFromLegacyQueryText:(NSString *)queryText legacyQuery:(NSDictionary *)legacyQuery session:(NSDictionary *)session connection:(NSDictionary *)connection;
@@ -673,7 +677,12 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
         if (spfDict && !startEmptySession) {
             appliedLaunchStateLightweight = [self applyLightweightStateDictionary:spfDict toWindowController:newWindowController];
             if (!appliedLaunchStateLightweight) {
-                [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Startup SPF restore required legacy database view"]] setState:spfDict];
+                if ([self lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback]) {
+                    [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Startup SPF restore required legacy database view"]] setState:spfDict];
+                } else {
+                    [self showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:NSLocalizedString(@"The saved startup connection state could not be restored in the lightweight connection view.", @"startup lightweight state restore failure")];
+                    return;
+                }
             }
         }
 
@@ -695,7 +704,11 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
                 }
             }
 
-            [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"Startup default autoconnect required legacy database view"] connect];
+            if ([self applyLightweightDefaultFavoriteToWindowController:newWindowController autoConnect:NO]) {
+                SPLog(@"Opened startup default favorite in lightweight connection form after lightweight autoconnect failed");
+            } else {
+                SPLog(@"Unable to apply startup default autoconnect in lightweight connection form; leaving the lightweight connection form open");
+            }
         }
     }
 
@@ -765,7 +778,13 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
                 return;
             }
 
-            [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"External SPF restore required legacy database view"]] setState:spfStructure];
+            if ([self lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback]) {
+                [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"External SPF restore required legacy database view"]] setState:spfStructure];
+                return;
+            }
+
+            [self showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:NSLocalizedString(@"The external connection state could not be opened in the lightweight connection view.", @"external lightweight state restore failure")];
+            [windowController close];
         }
     }
 }
@@ -1186,7 +1205,13 @@ typedef NS_ENUM(NSUInteger, SALightweightConnectionFileOpenResult) {
             return;
         }
 
-        [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Duplicate tab state required legacy database view"]] setState:userInfo];
+        if ([self lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback]) {
+            [[newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Duplicate tab state required legacy database view"]] setState:userInfo];
+            return;
+        }
+
+        [self showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:NSLocalizedString(@"The tab could not be duplicated in the lightweight connection view.", @"duplicate lightweight state failure")];
+        [newWindowController close];
     }
 }
 
@@ -1956,8 +1981,13 @@ validateMenuItemDone:
             [windowController close];
             break;
         case SALightweightConnectionFileOpenUnsupported:
-            [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Open connection file required legacy database view"]] setStateFromConnectionFile:filePath];
-            [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+            if ([self lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback]) {
+                [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"Open connection file required legacy database view"]] setStateFromConnectionFile:filePath];
+                [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:filePath]];
+            } else {
+                [self showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:NSLocalizedString(@"The connection file could not be opened in the lightweight connection view.", @"connection file lightweight open failure")];
+                [windowController close];
+            }
             break;
     }
 }
@@ -2054,7 +2084,10 @@ validateMenuItemDone:
     }
 
     id lightweightSession = [data objectForKey:@"lightweightSession"];
-    if (lightweightSession && ![lightweightSession isKindOfClass:[NSDictionary class]]) return [self lightweightUnsupportedConnectionFileOpenResultWithReason:@"invalid lightweight session format"];
+    if (lightweightSession && ![lightweightSession isKindOfClass:[NSDictionary class]]) {
+        SPLog(@"Ignoring invalid lightweight session payload in connection file");
+        lightweightSession = nil;
+    }
     if (!lightweightSession && [[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) {
         lightweightSession = [self lightweightSessionSnapshotFromLegacySession:[data objectForKey:@"session"] connection:connection];
     }
@@ -2073,8 +2106,10 @@ validateMenuItemDone:
         BOOL restored = [windowController restoreLightweightConnectionStateDictionary:@{@"connection": connection, @"lightweightSession": lightweightSession}];
         if (restored) {
             [windowController setLightweightConnectionFileURL:[NSURL fileURLWithPath:filePath] savedInBundle:savedInBundle];
+            return SALightweightConnectionFileOpenSucceeded;
         }
-        return restored ? SALightweightConnectionFileOpenSucceeded : [self lightweightUnsupportedConnectionFileOpenResultWithReason:@"restore lightweight autoconnect session failed"];
+        SPLog(@"Unable to restore lightweight autoconnect session from connection file; opening connection without restored session");
+        lightweightSession = nil;
     }
 
     if (![windowController applyLightweightConnectionDictionary:connection autoConnect:autoConnect]) return [self lightweightUnsupportedConnectionFileOpenResultWithReason:@"apply lightweight connection dictionary failed"];
@@ -2091,6 +2126,39 @@ validateMenuItemDone:
 {
     self.lightweightConnectionFileUnsupportedReason = [reason length] ? reason : @"unsupported lightweight connection file shape";
     return SALightweightConnectionFileOpenUnsupported;
+}
+
+- (BOOL)lightweightUnsupportedReasonRequiresLegacyDBViewFallback:(NSString *)reason
+{
+    if (![reason length]) return NO;
+    return [reason isEqualToString:@"unresolved legacy password keychain reference"] ||
+        [reason isEqualToString:@"unresolved legacy SSH password keychain reference"];
+}
+
+- (BOOL)lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback
+{
+    return [self lightweightUnsupportedReasonRequiresLegacyDBViewFallback:self.lightweightConnectionFileUnsupportedReason];
+}
+
+- (void)showLightweightUnsupportedStateWarningWithContext:(NSString *)context reason:(NSString *)reason
+{
+    NSString *message = context ? context : NSLocalizedString(@"The connection state could not be opened in the lightweight connection view.", @"generic lightweight state open failure");
+    if ([reason length]) {
+        message = [NSString stringWithFormat:@"%@\n\n%@: %@", message, NSLocalizedString(@"Reason", @"reason label"), reason];
+    }
+
+    SPLog(@"Lightweight connection state not opened: %@", [reason length] ? reason : @"unknown reason");
+    NSBeep();
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Connection Not Opened", @"lightweight unsupported state title")
+                                 message:message
+                                callback:nil];
+}
+
+- (void)showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:(NSString *)context
+{
+    NSString *reason = self.lightweightConnectionFileUnsupportedReason;
+    self.lightweightConnectionFileUnsupportedReason = nil;
+    [self showLightweightUnsupportedStateWarningWithContext:context reason:reason];
 }
 
 - (NSString *)lightweightConnectionFileFallbackReasonWithPrefix:(NSString *)prefix
@@ -2137,8 +2205,8 @@ validateMenuItemDone:
 
     id lightweightSession = [data objectForKey:@"lightweightSession"];
     if (lightweightSession && ![lightweightSession isKindOfClass:[NSDictionary class]]) {
-        self.lightweightConnectionFileUnsupportedReason = @"invalid lightweight session format";
-        return NO;
+        SPLog(@"Ignoring invalid lightweight session payload in restored state");
+        lightweightSession = nil;
     }
     if (!lightweightSession && [[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) {
         lightweightSession = [self lightweightSessionSnapshotFromLegacySession:[data objectForKey:@"session"] connection:connection];
@@ -2146,8 +2214,9 @@ validateMenuItemDone:
 
     if (lightweightSession && autoConnect && [windowController respondsToSelector:@selector(restoreLightweightConnectionStateDictionary:)]) {
         BOOL restored = [windowController restoreLightweightConnectionStateDictionary:@{@"connection": connection, @"lightweightSession": lightweightSession}];
-        if (!restored) self.lightweightConnectionFileUnsupportedReason = @"restore lightweight autoconnect session failed";
-        return restored;
+        if (restored) return YES;
+        SPLog(@"Unable to restore lightweight autoconnect session from saved state; opening connection without restored session");
+        lightweightSession = nil;
     }
 
     if (![windowController applyLightweightConnectionDictionary:connection autoConnect:autoConnect]) {
@@ -2173,6 +2242,11 @@ validateMenuItemDone:
 
 - (BOOL)applyLightweightDefaultAutoconnectToWindowController:(SPWindowController *)windowController
 {
+    return [self applyLightweightDefaultFavoriteToWindowController:windowController autoConnect:YES];
+}
+
+- (BOOL)applyLightweightDefaultFavoriteToWindowController:(SPWindowController *)windowController autoConnect:(BOOL)autoConnect
+{
     if (!windowController) return NO;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -2183,7 +2257,7 @@ validateMenuItemDone:
     NSDictionary *favorite = [favoriteNode dictionaryRepresentation];
     if (![favorite isKindOfClass:[NSDictionary class]]) return NO;
 
-    return [windowController applyLightweightFavoriteDictionary:favorite autoConnect:YES];
+    return [windowController applyLightweightFavoriteDictionary:favorite autoConnect:autoConnect];
 }
 
 - (SPTreeNode *)lightweightFavoriteNodeForFavoriteID:(NSInteger)favoriteID
@@ -2283,52 +2357,8 @@ validateMenuItemDone:
 }
 
 - (BOOL)lightweightConnectionFileRequiresLegacyPreferences:(NSDictionary *)spf data:(NSDictionary *)data connection:(NSDictionary *)connection autoConnect:(BOOL)autoConnect reason:(NSString **)reason {
-    if ([spf objectForKey:SPQueryFavorites] && ![[spf objectForKey:SPQueryFavorites] isKindOfClass:[NSArray class]]) {
-        if (reason) *reason = @"unsupported query favorites format";
-        return YES;
-    }
-    if ([spf objectForKey:SPContentFilters] && ![[spf objectForKey:SPContentFilters] isKindOfClass:[NSDictionary class]]) {
-        if (reason) *reason = @"unsupported content filters format";
-        return YES;
-    }
-    if ([spf objectForKey:SPQueryHistory]) {
-        if (![[spf objectForKey:SPQueryHistory] isKindOfClass:[NSArray class]]) {
-            if (reason) *reason = @"unsupported query history format";
-            return YES;
-        }
-        for (id queryHistoryItem in [spf objectForKey:SPQueryHistory]) {
-            if (![queryHistoryItem isKindOfClass:[NSString class]]) {
-                if (reason) *reason = @"unsupported query history item format";
-                return YES;
-            }
-        }
-    }
-    if ([data objectForKey:SPQueryFavorites] && ![[data objectForKey:SPQueryFavorites] isKindOfClass:[NSArray class]]) {
-        if (reason) *reason = @"unsupported query favorites format";
-        return YES;
-    }
-    if ([data objectForKey:SPContentFilters] && ![[data objectForKey:SPContentFilters] isKindOfClass:[NSDictionary class]]) {
-        if (reason) *reason = @"unsupported content filters format";
-        return YES;
-    }
-    if ([data objectForKey:SPQueryHistory]) {
-        if (![[data objectForKey:SPQueryHistory] isKindOfClass:[NSArray class]]) {
-            if (reason) *reason = @"unsupported query history format";
-            return YES;
-        }
-        for (id queryHistoryItem in [data objectForKey:SPQueryHistory]) {
-            if (![queryHistoryItem isKindOfClass:[NSString class]]) {
-                if (reason) *reason = @"unsupported query history item format";
-                return YES;
-            }
-        }
-    }
     if ([data objectForKey:@"session"] && ![[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]]) {
         if (reason) *reason = @"unsupported legacy session format";
-        return YES;
-    }
-    if ([[data objectForKey:@"session"] isKindOfClass:[NSDictionary class]] && ![self lightweightLegacySessionQueriesObjectIsSupported:[[data objectForKey:@"session"] objectForKey:@"queries"]]) {
-        if (reason) *reason = @"unsupported legacy session query format";
         return YES;
     }
 
@@ -2356,21 +2386,63 @@ validateMenuItemDone:
     NSMutableDictionary *contextInfo = [NSMutableDictionary dictionary];
 
     NSArray *queryFavorites = [spf objectForKey:SPQueryFavorites];
-    if (![queryFavorites isKindOfClass:[NSArray class]]) queryFavorites = [data objectForKey:SPQueryFavorites];
+    if (queryFavorites && ![queryFavorites isKindOfClass:[NSArray class]]) {
+        SPLog(@"Ignoring malformed lightweight SPF query favorites preference");
+        queryFavorites = nil;
+    }
+    if (![queryFavorites isKindOfClass:[NSArray class]]) {
+        queryFavorites = [data objectForKey:SPQueryFavorites];
+        if (queryFavorites && ![queryFavorites isKindOfClass:[NSArray class]]) {
+            SPLog(@"Ignoring malformed lightweight SPF data query favorites preference");
+            queryFavorites = nil;
+        }
+    }
     if ([queryFavorites isKindOfClass:[NSArray class]]) {
         [contextInfo setObject:queryFavorites forKey:SPQueryFavorites];
     }
 
     NSDictionary *contentFilters = [spf objectForKey:SPContentFilters];
-    if (![contentFilters isKindOfClass:[NSDictionary class]]) contentFilters = [data objectForKey:SPContentFilters];
+    if (contentFilters && ![contentFilters isKindOfClass:[NSDictionary class]]) {
+        SPLog(@"Ignoring malformed lightweight SPF content filters preference");
+        contentFilters = nil;
+    }
+    if (![contentFilters isKindOfClass:[NSDictionary class]]) {
+        contentFilters = [data objectForKey:SPContentFilters];
+        if (contentFilters && ![contentFilters isKindOfClass:[NSDictionary class]]) {
+            SPLog(@"Ignoring malformed lightweight SPF data content filters preference");
+            contentFilters = nil;
+        }
+    }
     if ([contentFilters isKindOfClass:[NSDictionary class]]) {
         [contextInfo setObject:contentFilters forKey:SPContentFilters];
     }
 
     NSArray *queryHistory = [spf objectForKey:SPQueryHistory];
-    if (![queryHistory isKindOfClass:[NSArray class]]) queryHistory = [data objectForKey:SPQueryHistory];
+    if (queryHistory && ![queryHistory isKindOfClass:[NSArray class]]) {
+        SPLog(@"Ignoring malformed lightweight SPF query history preference");
+        queryHistory = nil;
+    }
+    if (![queryHistory isKindOfClass:[NSArray class]]) {
+        queryHistory = [data objectForKey:SPQueryHistory];
+        if (queryHistory && ![queryHistory isKindOfClass:[NSArray class]]) {
+            SPLog(@"Ignoring malformed lightweight SPF data query history preference");
+            queryHistory = nil;
+        }
+    }
     if ([queryHistory isKindOfClass:[NSArray class]]) {
-        [contextInfo setObject:queryHistory forKey:SPQueryHistory];
+        NSMutableArray *validQueryHistory = [NSMutableArray arrayWithCapacity:[queryHistory count]];
+        NSUInteger droppedQueryHistoryItems = 0;
+        for (id queryHistoryItem in queryHistory) {
+            if ([queryHistoryItem isKindOfClass:[NSString class]]) {
+                [validQueryHistory addObject:queryHistoryItem];
+            } else {
+                droppedQueryHistoryItems++;
+            }
+        }
+        if (droppedQueryHistoryItems > 0) {
+            SPLog(@"Dropped %lu malformed lightweight SPF query history item(s)", (unsigned long)droppedQueryHistoryItems);
+        }
+        [contextInfo setObject:validQueryHistory forKey:SPQueryHistory];
     }
 
     return contextInfo;
@@ -2391,12 +2463,6 @@ validateMenuItemDone:
     }
 
     return NO;
-}
-
-- (BOOL)lightweightLegacySessionQueriesObjectIsSupported:(id)queriesObject
-{
-    if (!queriesObject) return YES;
-    return [self lightweightQuerySnapshotsFromLegacySessionQueriesObject:queriesObject session:nil connection:nil] != nil;
 }
 
 - (NSString *)lightweightQueryStringFromLegacySessionQueriesObject:(id)queriesObject
@@ -2452,13 +2518,20 @@ validateMenuItemDone:
 
     if ([queriesObject isKindOfClass:[NSString class]] || [queriesObject isKindOfClass:[NSData class]]) {
         NSString *queryText = [self lightweightQueryStringFromLegacySessionQueriesObject:queriesObject];
-        if ([queriesObject isKindOfClass:[NSData class]] && [(NSData *)queriesObject length] && !queryText) return nil;
+        if ([queriesObject isKindOfClass:[NSData class]] && [(NSData *)queriesObject length] && !queryText) {
+            SPLog(@"Dropped unsupported legacy session query payload");
+            return @[];
+        }
         return [queryText length] ? @[[self lightweightQuerySnapshotFromLegacyQueryText:queryText legacyQuery:nil session:session connection:connection]] : @[];
     }
 
-    if (![queriesObject isKindOfClass:[NSArray class]]) return nil;
+    if (![queriesObject isKindOfClass:[NSArray class]]) {
+        SPLog(@"Dropped unsupported legacy session queries container");
+        return @[];
+    }
 
     NSMutableArray *queries = [NSMutableArray array];
+    NSUInteger droppedQueries = 0;
     for (id queryObject in (NSArray *)queriesObject) {
         NSDictionary *legacyQuery = [queryObject isKindOfClass:[NSDictionary class]] ? queryObject : nil;
         id textObject = legacyQuery ? ([legacyQuery objectForKey:@"text"] ?: [legacyQuery objectForKey:@"query"] ?: [legacyQuery objectForKey:@"queries"]) : queryObject;
@@ -2466,11 +2539,15 @@ validateMenuItemDone:
         if (![queryText length]) {
             if ([textObject isKindOfClass:[NSString class]] && ![(NSString *)textObject length]) continue;
             if ([textObject isKindOfClass:[NSData class]] && ![(NSData *)textObject length]) continue;
-            return nil;
+            droppedQueries++;
+            continue;
         }
 
         NSDictionary *query = [self lightweightQuerySnapshotFromLegacyQueryText:queryText legacyQuery:legacyQuery session:session connection:connection];
         if (query) [queries addObject:query];
+    }
+    if (droppedQueries > 0) {
+        SPLog(@"Dropped %lu unsupported legacy session query payload(s)", (unsigned long)droppedQueries);
     }
 
     return queries;
@@ -2675,7 +2752,12 @@ validateMenuItemDone:
 
                 if ([[tab objectForKey:@"isLightweight"] boolValue]) {
                     if (![newWindowController restoreLightweightConnectionStateDictionary:[tab objectForKey:@"lightweightState"]]) {
-                        break;
+                        SPLog(@"Skipping invalid lightweight tab while opening session bundle");
+                        if (window == newWindowController.window) {
+                            window = nil;
+                        }
+                        [newWindowController close];
+                        continue;
                     }
                     window = newWindowController.window;
                 } else {
@@ -2695,13 +2777,26 @@ validateMenuItemDone:
                     if ([fileManager fileExistsAtPath:fileName]) {
                         SALightweightConnectionFileOpenResult openResult = [self openLightweightConnectionFileAtPath:fileName windowController:newWindowController savedInBundle:isBundleFile];
                         if (openResult == SALightweightConnectionFileOpenHandledFailure) {
-                            break;
+                            if (window == newWindowController.window) {
+                                window = nil;
+                            }
+                            [newWindowController close];
+                            continue;
                         }
                         if (openResult == SALightweightConnectionFileOpenUnsupported) {
-                            SPDatabaseDocument *document = [newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"SPFS bundle connection file required legacy database view"]];
-                            [document setIsSavedInBundle:isBundleFile];
-                            if (![document setStateFromConnectionFile:fileName]) {
-                                break;
+                            if ([self lightweightCurrentUnsupportedReasonRequiresLegacyDBViewFallback]) {
+                                SPDatabaseDocument *document = [newWindowController legacyDatabaseDocumentForExplicitFallbackWithReason:[self lightweightConnectionFileFallbackReasonWithPrefix:@"SPFS bundle connection file required legacy database view"]];
+                                [document setIsSavedInBundle:isBundleFile];
+                                if (![document setStateFromConnectionFile:fileName]) {
+                                    break;
+                                }
+                            } else {
+                                [self showLightweightUnsupportedStateWarningAndConsumeReasonWithContext:NSLocalizedString(@"A connection in the session bundle could not be opened in the lightweight connection view.", @"session bundle lightweight tab open failure")];
+                                if (window == newWindowController.window) {
+                                    window = nil;
+                                }
+                                [newWindowController close];
+                                continue;
                             }
                         }
                         window = newWindowController.window;
@@ -2804,7 +2899,17 @@ validateMenuItemDone:
         return;
     }
 
-    [[windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"URL scheme connection required legacy database view"] setState:@{@"connection":details,@"auto_connect": @(connect)} fromFile:NO];
+    if (connect && [windowController applyLightweightConnectionDictionary:details autoConnect:NO]) {
+        SPLog(@"Opened mysql URL scheme connection in lightweight connection form without autoconnect after lightweight autoconnect failed");
+        return;
+    }
+
+    SPLog(@"Unable to open mysql URL scheme connection in lightweight connection form");
+    [windowController close];
+    NSBeep();
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"sequelace URL Scheme Error", @"sequelace url Scheme Error")
+                                 message:NSLocalizedString(@"The mysql URL could not be opened in the lightweight connection form.", @"mysql url lightweight open failure message")
+                                callback:nil];
 }
 
 - (void)handleEventWithURL:(NSURL*)url
@@ -2886,11 +2991,17 @@ validateMenuItemDone:
                     return;
                 }
 
-                SPDatabaseDocument *document = [windowController legacyDatabaseDocumentForExplicitFallbackWithReason:@"LaunchFavorite URL scheme required legacy database view"];
-                SPConnectionController *connectionController = document.connectionController;
-                SPFavoritesOutlineView *favoritesOutlineView = connectionController.favoritesOutlineView;
-                [favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:[favoritesOutlineView rowForItem:targetFavoriteNode]] byExtendingSelection:NO];
-                [connectionController initiateConnection:connectionController];
+                if ([windowController applyLightweightFavoriteDictionary:targetFavoriteNode.dictionaryRepresentation autoConnect:NO]) {
+                    SPLog(@"Opened LaunchFavorite URL scheme target in lightweight connection form without autoconnect after lightweight autoconnect failed");
+                    return;
+                }
+
+                SPLog(@"Unable to open LaunchFavorite URL scheme target in lightweight connection form");
+                [windowController close];
+                NSBeep();
+                [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"LaunchFavorite URL Scheme Error", @"LaunchFavorite URL Scheme Error")
+                                             message:NSLocalizedString(@"The favorite could not be opened in the lightweight connection form.", @"LaunchFavorite lightweight open failure message")
+                                            callback:nil];
                 return;
             }
         }

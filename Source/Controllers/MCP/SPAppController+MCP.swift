@@ -217,9 +217,12 @@ extension SPAppController: SPMCPDataSource {
             let wcs = self.tabManager.windowControllers
             var doc: SPDatabaseDocument?
             if !connID.isEmpty {
-                for wc in wcs where mcpDocumentID(wc.databaseDocument) == connID {
-                    doc = wc.databaseDocument
-                    break
+                for wc in wcs {
+                    guard let loadedDocument = wc.loadedDatabaseDocumentIfAvailable() else { continue }
+                    if mcpDocumentID(loadedDocument) == connID {
+                        doc = loadedDocument
+                        break
+                    }
                 }
             } else {
                 doc = self.frontDocument()
@@ -228,7 +231,7 @@ extension SPAppController: SPMCPDataSource {
                 if !(doc != nil && doc!.isProcessing == false && (doc!.getConnection()?.isConnected() ?? false)) {
                     doc = nil
                     for wc in wcs {
-                        let d = wc.databaseDocument
+                        guard let d = wc.loadedDatabaseDocumentIfAvailable() else { continue }
                         if !d.isProcessing, let c = d.getConnection(), c.isConnected() { doc = d; break }
                     }
                 }
@@ -260,7 +263,7 @@ extension SPAppController: SPMCPDataSource {
         let collect = {
             let front = self.frontDocument()
             for wc in self.tabManager.windowControllers {
-                let doc = wc.databaseDocument
+                guard let doc = wc.loadedDatabaseDocumentIfAvailable() else { continue }
                 let c = doc.isProcessing ? nil : doc.getConnection()
                 guard let conn = c, conn.isConnected() else { continue }
                 var info: [String: Any] = [:]

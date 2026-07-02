@@ -312,7 +312,7 @@ extension SPWindowController {
     }
 
     func lightweightConnectionInfo(from connection: NSDictionary) -> SAConnectionInfoObjC? {
-        guard let typeString = connection[SALightweightConnectionDictionaryKey.type] as? String else { return nil }
+        let typeString = Self.stringValue(connection[SALightweightConnectionDictionaryKey.type])
 
         let info = SAConnectionInfoObjC()
         info.type = Self.connectionType(for: typeString)
