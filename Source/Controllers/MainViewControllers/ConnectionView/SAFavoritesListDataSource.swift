@@ -148,8 +148,8 @@ private let kSPQuickConnectImageWhite = "quick-connect-icon-white.pdf"
     @objc func restoreOutlineViewState(_ node: SPTreeNode, in outlineView: NSOutlineView) {
         guard node.isGroup else { return }
 
-        for child in node.children ?? [] {
-            guard let childNode = child as? SPTreeNode, childNode.isGroup else { continue }
+        for childNode in node.children ?? [] {
+            guard childNode.isGroup else { continue }
 
             // Top-level groups (parent is the synthetic root) live in the source-list
             // section and have no disclosure triangle; they must always be expanded

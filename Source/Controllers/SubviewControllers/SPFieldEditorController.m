@@ -32,6 +32,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPTooltip.h"
 #import "SPGeometryDataView.h"
+#import "SPImageView.h"
 #import "SPWindow.h"
 #import "SPConstants.h"
 #include <objc/objc-runtime.h>

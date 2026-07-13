@@ -31,6 +31,7 @@
 #import <Quartz/Quartz.h> // QuickLookUI
 
 @class SABaseFormatter;
+@class SPImageView;
 
 //This is an informal protocol
 @protocol _QLPreviewPanelController
@@ -65,7 +66,7 @@
 	IBOutlet id editSheetProgressBar;
 	IBOutlet id editSheetSegmentControl;
 	IBOutlet id editSheetQuickLookButton;
-	IBOutlet id editImage;
+	IBOutlet SPImageView *editImage;
 	IBOutlet id editTextView;
 	IBOutlet id hexTextView;
 	IBOutlet id jsonTextView;

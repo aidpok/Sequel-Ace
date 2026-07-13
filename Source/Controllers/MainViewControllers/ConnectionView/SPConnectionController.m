@@ -493,7 +493,7 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
     // for increased security.
     if (connectionKeychainItemName && !isTestingConnection) {
         if ([[keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount] isEqualToString:[self password]]) {
-            [self setPassword:@"SequelAceSecretPassword"];
+            [self setPassword:[SAConnectionInfoObjC keychainPasswordPlaceholder]];
 
             [[standardPasswordField undoManager] removeAllActionsWithTarget:standardPasswordField];
             [[socketPasswordField undoManager] removeAllActionsWithTarget:socketPasswordField];
@@ -503,7 +503,7 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
 
     if (connectionSSHKeychainItemName && !isTestingConnection) {
         if ([[keychain getPasswordForName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount] isEqualToString:[self sshPassword]]) {
-            [self setSshPassword:@"SequelAceSecretPassword"];
+            [self setSshPassword:[SAConnectionInfoObjC keychainPasswordPlaceholder]];
             [[sshSSHPasswordField undoManager] removeAllActionsWithTarget:sshSSHPasswordField];
         }
     }
@@ -524,14 +524,20 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
         }
     }
 
-    // Resolve passwords (handles keychain marker and AWS IAM token)
-    NSString *resolvedPassword = [self _resolvedMySQLPassword];
-    if (!resolvedPassword) return; // AWS IAM error already shown
+    // Preserve the legacy Keychain handoff: an unchanged saved password stays
+    // unset on SPMySQLConnection and is requested from its delegate at connect time.
+    SAConnectionInfoObjC *info = [self _buildConnectionInfo];
+    BOOL deferMySQLPasswordToDelegate = [SAConnectionInfoObjC shouldDeferMySQLPasswordToDelegateForInfo:info
+                                                                                                   password:[self password] ?: @""
+                                                                                         delegateAvailable:self.connectionService.mySQLDelegate != nil];
+
+    // Resolve explicit passwords and generated credentials before entering the service.
+    NSString *resolvedPassword = deferMySQLPasswordToDelegate ? nil : [self _resolvedMySQLPassword];
+    if (!resolvedPassword && !deferMySQLPasswordToDelegate) return; // AWS IAM error already shown
 
     NSString *resolvedSSHPassword = [self _resolvedSSHPassword];
 
-    // Build connection info and preferences
-    SAConnectionInfoObjC *info = [self _buildConnectionInfo];
+    // Build connection preferences
     SAConnectionPreferences *preferences = [SAConnectionPreferences fromUserDefaults];
 
     // Update progress text
@@ -1321,16 +1327,16 @@ sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValu
 {
     [AWSIAMAuthManager refreshAWSRegionsIfNeededWithCompletion:^(NSArray<NSString *> *regions) {
         if (!regions || !regions.count) return;
-        if ([awsAvailableRegionValues isEqualToArray:regions]) return;
+        if ([self->awsAvailableRegionValues isEqualToArray:regions]) return;
 
         NSString *currentRegion = [[self awsRegion] copy];
 
         [self willChangeValueForKey:@"awsAvailableRegions"];
-        awsAvailableRegionValues = [regions copy];
+        self->awsAvailableRegionValues = [regions copy];
         [self didChangeValueForKey:@"awsAvailableRegions"];
 
-        if (awsRegionComboBox) {
-            [awsRegionComboBox reloadData];
+        if (self->awsRegionComboBox) {
+            [self->awsRegionComboBox reloadData];
         }
 
         if ([currentRegion length]) {
@@ -3578,7 +3584,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 
     // Keychain marker: if password matches the marker, fetch from keychain
-    if (connectionKeychainItemName && (![[self password] length] || [[self password] isEqualToString:@"SequelAceSecretPassword"])) {
+    if (connectionKeychainItemName && (![[self password] length] || [[self password] isEqualToString:[SAConnectionInfoObjC keychainPasswordPlaceholder]])) {
         NSString *keychainPassword = [keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount];
         return keychainPassword ?: @"";
     }
@@ -3593,7 +3599,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (NSString *)_resolvedSSHPassword
 {
-    if (connectionSSHKeychainItemName && [[self sshPassword] isEqualToString:@"SequelAceSecretPassword"]) {
+    if (connectionSSHKeychainItemName && [[self sshPassword] isEqualToString:[SAConnectionInfoObjC keychainPasswordPlaceholder]]) {
         return @""; // Tunnel will use keychain names from SAConnectionInfoObjC
     }
     return [self sshPassword] ?: @"";
