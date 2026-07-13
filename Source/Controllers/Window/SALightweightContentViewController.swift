@@ -31,6 +31,11 @@ import AppKit
 
 final class SALightweightContentViewController: NSViewController {
 
+    enum AdvancedFilterSource {
+        case panel
+        case urlScheme
+    }
+
     fileprivate struct ColumnInfo {
         let name: String
         let type: String
@@ -52,22 +57,79 @@ final class SALightweightContentViewController: NSViewController {
         var isNew = false
     }
 
-    private struct ContentCacheEntry {
-        let columns: [String]
-        let columnInfo: [ColumnInfo]
-        let rows: [ContentRow]
+    private enum AppliedFilterSource {
+        case none
+        case rule(serialized: NSDictionary, whereClause: String, caseSensitive: Bool)
+        case advanced(whereClause: String, distinct: Bool)
+        case urlScheme(whereClause: String)
+
+        var whereClause: String? {
+            switch self {
+            case .none:
+                return nil
+            case .rule(_, let whereClause, _), .advanced(let whereClause, _), .urlScheme(let whereClause):
+                return whereClause.isEmpty ? nil : whereClause
+            }
+        }
+
+        var isDistinct: Bool {
+            if case .advanced(_, let distinct) = self {
+                return distinct
+            }
+            return false
+        }
+    }
+
+    private struct AppliedQueryState {
+        let tableKey: SALightweightSessionState.TableKey
+        let database: String
+        let table: String
+        let filterSource: AppliedFilterSource
+        let sortColumn: String?
+        let sortAscending: Bool
         let pageIndex: Int
         let pageSize: Int
         let limitResults: Bool
+        let schemaIdentity: [String]
+    }
+
+    private struct ValidatedQueryState {
+        var applied: AppliedQueryState
+        let clearsRuleFilter: Bool
+        let clearsAdvancedFilter: Bool
+    }
+
+    private struct ContentLoadResult {
+        let fieldNames: [String]
+        let columnInfo: [ColumnInfo]
+        let loadedRowCount: Int
+        let hasNextPage: Bool
+        let error: String?
+    }
+
+    private struct ContentDisplaySnapshot {
+        let columns: [String]
+        let columnInfo: [ColumnInfo]
+        let rows: [ContentRow]?
+        let filteredColumns: [Int]
         let tableObjectType: TableObjectType
         let totalRowCount: Int?
         let totalRowCountIsEstimate: Bool
         let hasNextPage: Bool
-        let sortColumn: String?
-        let sortAscending: Bool
-        let isRuleFilterActive: Bool
-        let serializedRuleFilter: NSDictionary?
-        let columnFilter: String?
+        let appliedQueryState: AppliedQueryState?
+        let selectedRows: IndexSet
+        let scrollOrigin: NSPoint
+    }
+
+    private struct ContentCacheEntry {
+        let columns: [String]
+        let columnInfo: [ColumnInfo]
+        let rows: [ContentRow]
+        let appliedQueryState: AppliedQueryState
+        let tableObjectType: TableObjectType
+        let totalRowCount: Int?
+        let totalRowCountIsEstimate: Bool
+        let hasNextPage: Bool
     }
 
     private enum MutationReloadPolicy {
@@ -146,7 +208,6 @@ final class SALightweightContentViewController: NSViewController {
     private var totalRowCountIsEstimate = false
     private var hasNextPage = false
     private var isLoading = false
-    private var isLoadingSortPreservingColumns = false
     private var suppressPendingNewRowSelectionCommit = false
     private var sortColumn: String?
     private var sortAscending = true
@@ -156,8 +217,12 @@ final class SALightweightContentViewController: NSViewController {
     private var displayedColumnSignature: [String] = []
     private var isRuleFilterVisible = UserDefaults.standard.bool(forKey: SPRuleFilterEditorLastVisibilityChoice)
     private var isRuleFilterActive = false
+    private var ruleFilterCaseSensitive = false
     private var advancedFilterWhereClause: String?
     private var isAdvancedFilterDistinct = false
+    private weak var advancedFilterWindow: NSWindow?
+    private var advancedFilterRequiresVisibleWindow = false
+    private var appliedQueryState: AppliedQueryState?
     private var columnFilterTerms: [String]?
     private var tableObjectType: TableObjectType = .unknown
     private var ruleFilterColumnsKey = ""
@@ -171,9 +236,12 @@ final class SALightweightContentViewController: NSViewController {
     private var contentCache: [SALightweightSessionState.TableKey: ContentCacheEntry] = [:]
     private var contentCacheOrder: [SALightweightSessionState.TableKey] = []
     private var columnInfoCache: [SALightweightSessionState.TableKey: [ColumnInfo]] = [:]
+    private var isCurrentContentCacheInvalidated = false
+    private var requiresFreshColumnInfoForNextLoad = false
     private let maximumContentCacheEntries = 6
     private let initialRowLoadPublishSize = 200
     private let remainingRowLoadPublishSize = 1_000
+    private let maximumRollbackRowCount = 5_000
     private let bundleBlobHandlingInclude = 2
     private let bundleBlobHandlingFileReference = 3
     private let bundleBlobHandlingImageFileReference = 4
@@ -372,6 +440,9 @@ final class SALightweightContentViewController: NSViewController {
     }
 
     func clearCachedTables() {
+        loadToken = UUID()
+        isCurrentContentCacheInvalidated = true
+        requiresFreshColumnInfoForNextLoad = true
         contentCache.removeAll()
         contentCacheOrder.removeAll()
         columnInfoCache.removeAll()
@@ -637,8 +708,20 @@ final class SALightweightContentViewController: NSViewController {
         ruleFilterColumnsKey = ""
         filterRules = []
         if tableChanged {
-            advancedFilterWhereClause = nil
-            isAdvancedFilterDistinct = false
+            clearAdvancedFilter()
+            appliedQueryState = nil
+            ruleFilterCaseSensitive = false
+            requiresFreshColumnInfoForNextLoad = true
+            columns = []
+            columnInfo = []
+            rows = []
+            filteredColumns = []
+            totalRowCount = nil
+            totalRowCountIsEstimate = false
+            hasNextPage = false
+            displayCache.invalidateAll()
+            columnWidthCache.invalidateAll()
+            rebuildColumns()
         }
         restoreColumnFilter(restoredContentState?.columnFilter)
 
@@ -662,14 +745,35 @@ final class SALightweightContentViewController: NSViewController {
         } as NSArray
     }
 
-    func applyAdvancedFilter(whereClause: String?, distinct: Bool) {
+    func applyAdvancedFilter(whereClause: String?, distinct: Bool, source: AdvancedFilterSource) {
         let trimmedFilter = whereClause?.trimmingCharacters(in: .whitespacesAndNewlines)
-        advancedFilterWhereClause = trimmedFilter?.isEmpty == false ? trimmedFilter : nil
-        isAdvancedFilterDistinct = distinct
+        clearAdvancedFilter()
+        if let trimmedFilter, !trimmedFilter.isEmpty {
+            advancedFilterWhereClause = trimmedFilter
+            isAdvancedFilterDistinct = distinct
+            switch source {
+            case .panel:
+                advancedFilterWindow = (view.window?.windowController as? SPWindowController)?.lightweightFilterTableController.window
+                advancedFilterRequiresVisibleWindow = true
+            case .urlScheme:
+                advancedFilterWindow = nil
+                advancedFilterRequiresVisibleWindow = false
+            }
+            if let advancedFilterWindow {
+                NotificationCenter.default.addObserver(self, selector: #selector(advancedFilterWindowWillClose(_:)), name: NSWindow.willCloseNotification, object: advancedFilterWindow)
+            }
+        }
         isRuleFilterActive = false
         pageIndex = 0
         invalidateCurrentContentCache()
         loadCurrentPage()
+    }
+
+    @objc func advancedFilterWindowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === advancedFilterWindow else { return }
+
+        clearAdvancedFilter()
+        invalidateCurrentContentCache()
     }
 
     func setContentFilterDocumentURL(_ documentURL: URL?) {
@@ -849,7 +953,7 @@ private extension SALightweightContentViewController.ContentValue {
 
 private extension SALightweightContentViewController {
     func loadCurrentPage(preservingColumns: Bool = false) {
-        guard connection != nil else { return }
+        guard let connection = connection, let tableKey = currentTableKey else { return }
 
         cancelActiveContentEditBeforeReload()
 
@@ -857,136 +961,108 @@ private extension SALightweightContentViewController {
         let token = loadToken
         let pageSize = self.pageSize
         let limitResults = self.limitResults
-        let offset = limitResults ? pageIndex * pageSize : 0
-        let filter = ruleFilterStringForCurrentState(showError: true)
-        guard !filter.failed else { return }
-        let tableKey = currentTableKey
-        let cachedColumnInfo = tableKey.flatMap { columnInfoCache[$0] }
+        let database = self.database
+        let table = self.table
+        let cachedColumnInfo = requiresFreshColumnInfoForNextLoad ? nil : columnInfoCache[tableKey]
+        let rollbackRows = limitResults || rows.count <= maximumRollbackRowCount ? rows : nil
+        let displaySnapshot = ContentDisplaySnapshot(
+            columns: columns,
+            columnInfo: columnInfo,
+            rows: rollbackRows,
+            filteredColumns: filteredColumns,
+            tableObjectType: tableObjectType,
+            totalRowCount: totalRowCount,
+            totalRowCountIsEstimate: totalRowCountIsEstimate,
+            hasNextPage: hasNextPage,
+            appliedQueryState: appliedQueryState,
+            selectedRows: tableView.selectedRowIndexes,
+            scrollOrigin: tableView.enclosingScrollView?.contentView.bounds.origin ?? .zero
+        )
 
         invalidateCurrentContentCache()
-        loadCurrentPage(whereClause: filter.whereClause, token: token, pageSize: pageSize, offset: offset, limitResults: limitResults, tableKey: tableKey, cachedColumnInfo: cachedColumnInfo, preservingColumns: preservingColumns)
-    }
-
-    private func loadCurrentPage(whereClause: String?, token: UUID, pageSize: Int, offset: Int, limitResults: Bool, tableKey: SALightweightSessionState.TableKey?, cachedColumnInfo: [ColumnInfo]?, preservingColumns: Bool) {
-        guard let connection = connection else { return }
-
         isLoading = true
-        isLoadingSortPreservingColumns = preservingColumns
-        rows = []
-        displayCache.invalidateAll()
-        if !preservingColumns {
-            columns = []
-            columnInfo = []
-            columnWidthCache.invalidateAll()
-            filteredColumns = []
-            tableObjectType = .unknown
-            rebuildColumns()
-        } else {
-            tableView.noteNumberOfRowsChanged()
-            applySortDescriptorsFromCurrentState()
-        }
-        totalRowCount = nil
-        totalRowCountIsEstimate = false
-        hasNextPage = false
         statusLabel.stringValue = NSLocalizedString("Loading rows...", comment: "lightweight content loading rows")
         updateControls()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
-            guard let self = self, let connection = connection else { return }
-
-            _ = connection.selectDatabase(self.database)
-            let tableObjectType = self.loadTableObjectType(connection: connection)
-            let columnInfo = cachedColumnInfo ?? self.loadColumnInfo(connection: connection)
-            if cachedColumnInfo == nil, let tableKey = tableKey, !columnInfo.isEmpty {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.loadToken == token else { return }
-                    self.columnInfoCache[tableKey] = columnInfo
+            guard let self else { return }
+            guard let connection else {
+                DispatchQueue.main.async {
+                    guard self.loadToken == token else { return }
+                    self.isLoading = false
+                    self.restoreContentDisplay(displaySnapshot, displayWasReplaced: false)
+                    self.updateControls()
                 }
+                return
             }
-            let shouldLoadFirstBatch = limitResults && pageSize > self.initialRowLoadPublishSize
-            let firstLimit = shouldLoadFirstBatch ? self.initialRowLoadPublishSize : pageSize + 1
-            let firstQuery = self.contentQuery(offset: offset, limit: firstLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
-            let result = connection.streamingQueryString(firstQuery)
-            result?.defaultRowReturnType = SPMySQLResultRowAsArray
 
-            let fieldNames = result?.fieldNames() as? [String] ?? []
-            let orderedColumnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
-            var pendingRows: [ContentRow] = []
-            var loadedRowCount = 0
-            var hasNextPage = false
+            _ = connection.selectDatabase(database)
+            let tableObjectType = self.loadTableObjectType(database: database, table: table, connection: connection)
+            let freshColumnInfo = cachedColumnInfo ?? self.loadColumnInfo(database: database, table: table, connection: connection)
+            guard !freshColumnInfo.isEmpty else {
+                let error = connection.lastErrorMessage()
+                DispatchQueue.main.async {
+                    guard self.loadToken == token else { return }
+                    self.isLoading = false
+                    self.restoreContentDisplay(displaySnapshot, displayWasReplaced: false)
+                    self.statusLabel.stringValue = error?.isEmpty == false
+                        ? error!
+                        : NSLocalizedString("The table columns could not be loaded.", comment: "lightweight content column load failure")
+                    self.updateControls()
+                }
+                return
+            }
+            var validatedState: ValidatedQueryState?
+            DispatchQueue.main.sync {
+                guard self.loadToken == token else { return }
+                validatedState = self.validatedQueryState(tableKey: tableKey, database: database, table: table, freshColumnInfo: freshColumnInfo, pageSize: pageSize, limitResults: limitResults)
+            }
 
-            self.publishInitialContentLoad(
+            guard var validatedState else {
+                DispatchQueue.main.async {
+                    guard self.loadToken == token else { return }
+                    self.isLoading = false
+                    self.restoreContentDisplay(displaySnapshot, displayWasReplaced: false)
+                    self.updateControls()
+                }
+                return
+            }
+
+            var loadResult = self.executeContentLoad(
+                state: validatedState.applied,
+                columnInfo: freshColumnInfo,
+                connection: connection,
                 token: token,
-                fieldNames: fieldNames,
-                columnInfo: orderedColumnInfo,
                 tableObjectType: tableObjectType,
-                rowCount: nil,
-                limitResults: limitResults,
                 preservingColumns: preservingColumns
             )
-
-            while let row = result?.getRowAsArray() {
-                loadedRowCount += 1
-                if limitResults, loadedRowCount > pageSize {
-                    hasNextPage = true
-                    continue
-                }
-
-                let values = row.enumerated().map { index, value -> ContentValue in
-                    if index < columnInfo.count, columnInfo[index].loadBlobAsNeeded {
-                        return .notLoaded
+            var rowCount: (count: Int, isEstimate: Bool)?
+            if loadResult.error == nil, limitResults {
+                if validatedState.applied.pageIndex == 0 {
+                    rowCount = self.rowCount(state: validatedState.applied, connection: connection)
+                } else if loadResult.loadedRowCount == 0 {
+                    let authoritativeRowCount = self.accurateRowCount(state: validatedState.applied, connection: connection)
+                    let fallbackPageIndex: Int
+                    if let authoritativeRowCount {
+                        rowCount = (authoritativeRowCount, false)
+                        fallbackPageIndex = max(0, (max(1, authoritativeRowCount) - 1) / pageSize)
+                    } else {
+                        fallbackPageIndex = 0
                     }
 
-                    return Self.contentValue(for: value)
-                }
-                pendingRows.append(ContentRow(values: values, originalValues: values))
-
-                if pendingRows.count >= self.initialRowLoadPublishSize {
-                    self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                    pendingRows.removeAll(keepingCapacity: true)
+                    if validatedState.applied.pageIndex != fallbackPageIndex {
+                        validatedState.applied = self.queryState(validatedState.applied, pageIndex: fallbackPageIndex)
+                        loadResult = self.executeContentLoad(
+                            state: validatedState.applied,
+                            columnInfo: freshColumnInfo,
+                            connection: connection,
+                            token: token,
+                            tableObjectType: tableObjectType,
+                            preservingColumns: preservingColumns
+                        )
+                    }
                 }
             }
-
-            if !pendingRows.isEmpty {
-                self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                pendingRows.removeAll(keepingCapacity: true)
-            }
-
-            var error = connection.queryErrored() ? connection.lastErrorMessage() : nil
-
-            if error == nil, shouldLoadFirstBatch, loadedRowCount >= firstLimit {
-                let remainingLimit = pageSize - loadedRowCount + 1
-                let remainingOffset = offset + loadedRowCount
-                let remainingQuery = self.contentQuery(offset: remainingOffset, limit: remainingLimit, whereClause: whereClause, columnInfo: columnInfo, limitResults: limitResults)
-                let remainingResult = connection.streamingQueryString(remainingQuery)
-                remainingResult?.defaultRowReturnType = SPMySQLResultRowAsArray
-
-                while let row = remainingResult?.getRowAsArray() {
-                    loadedRowCount += 1
-                    if loadedRowCount > pageSize {
-                        hasNextPage = true
-                        continue
-                    }
-
-                    let values = row.enumerated().map { index, value -> ContentValue in
-                        if index < columnInfo.count, columnInfo[index].loadBlobAsNeeded {
-                            return .notLoaded
-                        }
-
-                        return Self.contentValue(for: value)
-                    }
-                    pendingRows.append(ContentRow(values: values, originalValues: values))
-
-                    if pendingRows.count >= self.remainingRowLoadPublishSize {
-                        self.publishContentRows(pendingRows, token: token, final: false, hasNextPage: false)
-                        pendingRows.removeAll(keepingCapacity: true)
-                    }
-                }
-
-                error = connection.queryErrored() ? connection.lastErrorMessage() : nil
-            }
-
-            let rowCount = limitResults ? self.rowCount(whereClause: whereClause, connection: connection) : nil
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else {
@@ -994,56 +1070,148 @@ private extension SALightweightContentViewController {
                 }
 
                 self.isLoading = false
-
-                if let error = error, !error.isEmpty {
-                    self.isLoadingSortPreservingColumns = false
-                    self.columns = []
-                    self.columnInfo = []
-                    self.rows = []
-                    self.displayCache.invalidateAll()
-                    self.columnWidthCache.invalidateAll()
-                    self.filteredColumns = []
-                    self.totalRowCount = nil
-                    self.totalRowCountIsEstimate = false
-                    self.hasNextPage = false
-                    self.rebuildColumns()
+                if let error = loadResult.error, !error.isEmpty {
+                    self.restoreContentDisplay(displaySnapshot, displayWasReplaced: true)
                     self.statusLabel.stringValue = error
                     self.updateControls()
                     return
                 }
 
-                self.appendContentRows(pendingRows, autosizeColumns: self.rows.count < self.initialRowLoadPublishSize)
-                self.hasNextPage = hasNextPage
+                self.appliedQueryState = validatedState.applied
+                self.pageIndex = validatedState.applied.pageIndex
+                self.sortColumn = validatedState.applied.sortColumn
+                self.sortAscending = validatedState.applied.sortAscending
+                if validatedState.clearsRuleFilter {
+                    self.isRuleFilterActive = false
+                }
+                if validatedState.clearsAdvancedFilter {
+                    self.clearAdvancedFilter()
+                }
+
+                let canPreserveColumns = preservingColumns && self.columns == loadResult.fieldNames
+                self.columns = loadResult.fieldNames
+                self.columnInfo = loadResult.columnInfo
+                self.displayCache.invalidateAll()
+                self.columnWidthCache.invalidateAll()
+                self.filteredColumns = []
+                self.tableObjectType = tableObjectType
+                self.hasNextPage = loadResult.hasNextPage
+                let offset = limitResults ? validatedState.applied.pageIndex * pageSize : 0
                 let reconciledRowCount = self.reconciledRowCount(
                     rowCount,
-                    displayedRowCount: self.rows.count,
+                    displayedRowCount: loadResult.loadedRowCount,
                     pageSize: pageSize,
                     offset: offset,
                     limitResults: limitResults,
-                    isFiltered: whereClause != nil,
-                    hasNextPage: hasNextPage
+                    isFiltered: validatedState.applied.filterSource.whereClause != nil,
+                    hasNextPage: loadResult.hasNextPage
                 )
                 self.totalRowCount = reconciledRowCount?.count
                 self.totalRowCountIsEstimate = reconciledRowCount?.isEstimate ?? false
+                self.columnInfoCache[tableKey] = freshColumnInfo
+                self.requiresFreshColumnInfoForNextLoad = false
+                self.ruleFilterColumnsKey = ""
+                self.configureRuleFilterColumnsIfNeeded()
+                self.applyColumnFilter()
+                if canPreserveColumns {
+                    self.tableView.noteNumberOfRowsChanged()
+                } else {
+                    self.rebuildColumns()
+                }
+                self.applySortDescriptorsFromCurrentState()
+                self.storeCurrentRuleFilterState()
+                self.sessionStateDidChange?()
                 self.finalizeContentLoad()
             }
         }
+    }
+
+    private func queryState(_ state: AppliedQueryState, pageIndex: Int) -> AppliedQueryState {
+        return AppliedQueryState(
+            tableKey: state.tableKey,
+            database: state.database,
+            table: state.table,
+            filterSource: state.filterSource,
+            sortColumn: state.sortColumn,
+            sortAscending: state.sortAscending,
+            pageIndex: pageIndex,
+            pageSize: state.pageSize,
+            limitResults: state.limitResults,
+            schemaIdentity: state.schemaIdentity
+        )
+    }
+
+    private func executeContentLoad(state: AppliedQueryState,
+                                    columnInfo: [ColumnInfo],
+                                    connection: SPMySQLConnection,
+                                    token: UUID,
+                                    tableObjectType: TableObjectType,
+                                    preservingColumns: Bool) -> ContentLoadResult {
+        let offset = state.limitResults ? state.pageIndex * state.pageSize : 0
+        let limit = state.limitResults ? state.pageSize + 1 : state.pageSize
+        let query = contentQuery(offset: offset, limit: limit, columnInfo: columnInfo, state: state)
+        let result = connection.streamingQueryString(query)
+        result?.defaultRowReturnType = SPMySQLResultRowAsArray
+
+        let fieldNames = result?.fieldNames() as? [String] ?? []
+        let orderedColumnInfo = Self.orderedColumnInfo(columnInfo, fieldNames: fieldNames)
+        var pendingRows: [ContentRow] = []
+        var loadedRowCount = 0
+        var hasNextPage = false
+
+        publishInitialContentLoad(
+            token: token,
+            fieldNames: fieldNames,
+            columnInfo: orderedColumnInfo,
+            tableObjectType: tableObjectType,
+            preservingColumns: preservingColumns
+        )
+
+        while let row = result?.getRowAsArray() {
+            if state.limitResults, loadedRowCount >= state.pageSize {
+                hasNextPage = true
+                continue
+            }
+
+            let values = row.enumerated().map { index, value -> ContentValue in
+                if index < orderedColumnInfo.count, orderedColumnInfo[index].loadBlobAsNeeded {
+                    return .notLoaded
+                }
+                return Self.contentValue(for: value)
+            }
+            let contentRow = ContentRow(values: values, originalValues: values)
+            loadedRowCount += 1
+            pendingRows.append(contentRow)
+
+            let publishSize = loadedRowCount <= initialRowLoadPublishSize ? initialRowLoadPublishSize : remainingRowLoadPublishSize
+            if pendingRows.count >= publishSize {
+                publishContentRows(pendingRows, token: token)
+                pendingRows.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !pendingRows.isEmpty {
+            publishContentRows(pendingRows, token: token)
+        }
+
+        return ContentLoadResult(
+            fieldNames: fieldNames,
+            columnInfo: orderedColumnInfo,
+            loadedRowCount: loadedRowCount,
+            hasNextPage: hasNextPage,
+            error: connection.queryErrored() ? connection.lastErrorMessage() : nil
+        )
     }
 
     private func publishInitialContentLoad(token: UUID,
                                            fieldNames: [String],
                                            columnInfo: [ColumnInfo],
                                            tableObjectType: TableObjectType,
-                                           rowCount: (count: Int, isEstimate: Bool)?,
-                                           limitResults: Bool,
                                            preservingColumns: Bool) {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            guard self.loadToken == token else {
-                return
-            }
+            guard let self, self.loadToken == token else { return }
 
-            let canPreserveColumns = preservingColumns && fieldNames == self.columns
+            let canPreserveColumns = preservingColumns && self.columns == fieldNames
             self.columns = fieldNames
             self.columnInfo = columnInfo
             self.rows = []
@@ -1051,10 +1219,12 @@ private extension SALightweightContentViewController {
             if !canPreserveColumns {
                 self.columnWidthCache.invalidateAll()
             }
+            self.filteredColumns = []
             self.tableObjectType = tableObjectType
-            self.totalRowCount = rowCount?.count
-            self.totalRowCountIsEstimate = limitResults ? (rowCount?.isEstimate ?? false) : false
+            self.totalRowCount = nil
+            self.totalRowCountIsEstimate = false
             self.hasNextPage = false
+            self.ruleFilterColumnsKey = ""
             self.configureRuleFilterColumnsIfNeeded()
             self.applyColumnFilter()
             if canPreserveColumns {
@@ -1068,41 +1238,96 @@ private extension SALightweightContentViewController {
         }
     }
 
-    private func publishContentRows(_ rows: [ContentRow], token: UUID, final: Bool, hasNextPage: Bool) {
+    private func publishContentRows(_ rows: [ContentRow], token: UUID) {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            guard self.loadToken == token else {
-                return
-            }
-
-            self.appendContentRows(rows, autosizeColumns: self.rows.isEmpty && !self.isLoadingSortPreservingColumns)
-
-            if final {
-                self.hasNextPage = hasNextPage
-                self.finalizeContentLoad()
-            }
+            guard let self, self.loadToken == token else { return }
+            self.rows.append(contentsOf: rows)
+            self.tableView.noteNumberOfRowsChanged()
+            self.updateStatus()
         }
     }
 
-    private func appendContentRows(_ newRows: [ContentRow], autosizeColumns shouldAutosizeColumns: Bool) {
-        let benchmarkStart = CFAbsoluteTimeGetCurrent()
-        defer {
-            SALightweightResultGrid.logPerformance("Content append rows", start: benchmarkStart, details: "newRows=\(newRows.count) totalRows=\(rows.count) columns=\(filteredColumns.count)", minimumMilliseconds: 4)
+    private func restoreContentDisplay(_ snapshot: ContentDisplaySnapshot, displayWasReplaced: Bool) {
+        columns = snapshot.columns
+        columnInfo = snapshot.columnInfo
+        filteredColumns = snapshot.filteredColumns
+        tableObjectType = snapshot.tableObjectType
+
+        if let appliedState = snapshot.appliedQueryState,
+           (snapshot.rows != nil || !displayWasReplaced) {
+            if let rollbackRows = snapshot.rows {
+                rows = rollbackRows
+            }
+            totalRowCount = snapshot.totalRowCount
+            totalRowCountIsEstimate = snapshot.totalRowCountIsEstimate
+            hasNextPage = snapshot.hasNextPage
+            appliedQueryState = appliedState
+            pageIndex = appliedState.pageIndex
+            sortColumn = appliedState.sortColumn
+            sortAscending = appliedState.sortAscending
+            clearAdvancedFilter()
+
+            switch appliedState.filterSource {
+            case .rule(let serialized, _, let caseSensitive):
+                isRuleFilterActive = true
+                ruleFilterCaseSensitive = caseSensitive
+                filterRules = (serialized as? [AnyHashable: Any]).map { filterRules(from: $0) } ?? []
+            case .advanced(let whereClause, let distinct):
+                isRuleFilterActive = false
+                ruleFilterCaseSensitive = false
+                filterRules = []
+                advancedFilterWhereClause = whereClause
+                isAdvancedFilterDistinct = distinct
+                advancedFilterWindow = (view.window?.windowController as? SPWindowController)?.lightweightFilterTableController.window
+                advancedFilterRequiresVisibleWindow = true
+                if let advancedFilterWindow {
+                    NotificationCenter.default.addObserver(self, selector: #selector(advancedFilterWindowWillClose(_:)), name: NSWindow.willCloseNotification, object: advancedFilterWindow)
+                }
+            case .urlScheme(let whereClause):
+                isRuleFilterActive = false
+                ruleFilterCaseSensitive = false
+                filterRules = []
+                advancedFilterWhereClause = whereClause
+                advancedFilterRequiresVisibleWindow = false
+            case .none:
+                isRuleFilterActive = false
+                ruleFilterCaseSensitive = false
+                filterRules = []
+            }
+        } else {
+            rows = []
+            totalRowCount = nil
+            totalRowCountIsEstimate = false
+            hasNextPage = false
+            appliedQueryState = nil
+            pageIndex = 0
+            sortColumn = nil
+            sortAscending = true
+            isRuleFilterActive = false
+            ruleFilterCaseSensitive = false
+            filterRules = []
+            clearAdvancedFilter()
         }
-
-        guard !newRows.isEmpty else { return }
-
-        rows.append(contentsOf: newRows)
+        ruleFilterColumnsKey = ""
+        displayCache.invalidateAll()
+        columnWidthCache.invalidateAll()
+        rebuildFilterRows()
+        updateRuleFilterVisibility(animated: false)
+        rebuildColumns()
+        applySortDescriptorsFromCurrentState()
         tableView.noteNumberOfRowsChanged()
-        updateStatus()
-
-        if shouldAutosizeColumns {
-            scheduleVisibleColumnAutosize(delay: 0.01)
+        if rows.isEmpty {
+            tableView.deselectAll(nil)
+        } else {
+            tableView.selectRowIndexes(IndexSet(snapshot.selectedRows.filter { $0 < rows.count }), byExtendingSelection: false)
+        }
+        tableView.enclosingScrollView?.contentView.scroll(to: snapshot.scrollOrigin)
+        if let scrollView = tableView.enclosingScrollView {
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
     private func finalizeContentLoad() {
-        isLoadingSortPreservingColumns = false
         if totalRowCount == nil, !limitResults {
             totalRowCount = rows.count
             totalRowCountIsEstimate = false
@@ -1111,11 +1336,12 @@ private extension SALightweightContentViewController {
         isLoading = false
         updateStatus()
         updateControls()
+        isCurrentContentCacheInvalidated = false
         cacheCurrentContentState()
         prewarmFieldEditor()
     }
 
-    private func contentQuery(offset: Int, limit: Int, whereClause: String?, columnInfo: [ColumnInfo], limitResults: Bool) -> String {
+    private func contentQuery(offset: Int, limit: Int, columnInfo: [ColumnInfo], state: AppliedQueryState) -> String {
         let fields = columnInfo.isEmpty ? "*" : columnInfo.map { column -> String in
             if column.loadBlobAsNeeded {
                 return "NULL AS \(Self.backtickQuoted(column.name))"
@@ -1124,23 +1350,23 @@ private extension SALightweightContentViewController {
             return Self.backtickQuoted(column.name)
         }.joined(separator: ", ")
 
-        var query = "SELECT \(isAdvancedFilterDistinct ? "DISTINCT " : "")\(fields) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        var query = "SELECT \(state.filterSource.isDistinct ? "DISTINCT " : "")\(fields) FROM \(Self.backtickQuoted(state.database)).\(Self.backtickQuoted(state.table))"
 
-        if let whereClause = whereClause {
+        if let whereClause = state.filterSource.whereClause {
             query += " WHERE \(whereClause)"
         }
 
-        if let sortColumn = sortColumn {
-            query += " ORDER BY \(Self.backtickQuoted(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
+        if let sortColumn = state.sortColumn {
+            query += " ORDER BY \(Self.backtickQuoted(sortColumn)) \(state.sortAscending ? "ASC" : "DESC")"
         }
 
-        if limitResults {
+        if state.limitResults {
             query += " LIMIT \(offset),\(limit)"
         }
         return query
     }
 
-    private func loadTableObjectType(connection: SPMySQLConnection) -> TableObjectType {
+    private func loadTableObjectType(database: String, table: String, connection: SPMySQLConnection) -> TableObjectType {
         guard let quotedTable = connection.escapeAndQuoteString(table) else { return .unknown }
 
         let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database)) LIKE \(quotedTable)")
@@ -1159,16 +1385,16 @@ private extension SALightweightContentViewController {
         return tableType.isEmpty ? .unknown : .table
     }
 
-    private func rowCount(whereClause: String?, connection: SPMySQLConnection) -> (count: Int, isEstimate: Bool)? {
-        if whereClause == nil,
-           let tableName = connection.escapeAndQuoteString(table),
-           let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) LIKE \(tableName)") {
+    private func rowCount(state: AppliedQueryState, connection: SPMySQLConnection) -> (count: Int, isEstimate: Bool)? {
+        if state.filterSource.whereClause == nil,
+           let tableName = connection.escapeAndQuoteString(state.table),
+           let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(state.database)) LIKE \(tableName)") {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
             if let row = result.getRowAsDictionary() as? [String: Any] {
                 if shouldFetchAccurateRowCount(for: row),
-                   let accurateCount = accurateRowCount(whereClause: nil, connection: connection) {
+                   let accurateCount = accurateRowCount(state: state, connection: connection) {
                     return (accurateCount, false)
                 }
 
@@ -1179,13 +1405,13 @@ private extension SALightweightContentViewController {
             }
         }
 
-        return accurateRowCount(whereClause: whereClause, connection: connection).map { ($0, false) }
+        return accurateRowCount(state: state, connection: connection).map { ($0, false) }
     }
 
-    private func accurateRowCount(whereClause: String?, connection: SPMySQLConnection) -> Int? {
-        var query = "SELECT COUNT(1) FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+    private func accurateRowCount(state: AppliedQueryState, connection: SPMySQLConnection) -> Int? {
+        var query = "SELECT COUNT(1) FROM \(Self.backtickQuoted(state.database)).\(Self.backtickQuoted(state.table))"
 
-        if let whereClause = whereClause {
+        if let whereClause = state.filterSource.whereClause {
             query += " WHERE \(whereClause)"
         }
 
@@ -1259,7 +1485,7 @@ private extension SALightweightContentViewController {
         return reconciledRowCount
     }
 
-    private func loadColumnInfo(connection: SPMySQLConnection) -> [ColumnInfo] {
+    private func loadColumnInfo(database: String, table: String, connection: SPMySQLConnection) -> [ColumnInfo] {
         let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))")
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -1376,7 +1602,9 @@ private extension SALightweightContentViewController {
     }
 
     @objc func applyRuleFilter(_ sender: Any?) {
+        clearAdvancedFilter()
         isRuleFilterActive = sender != nil
+        ruleFilterCaseSensitive = sender != nil && (NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false)
         storeCurrentRuleFilterState()
         sessionStateDidChange?()
 
@@ -1721,8 +1949,7 @@ private extension SALightweightContentViewController {
               !rows.contains(where: { $0.isNew }),
               !limitResults,
               !hasNextPage,
-              !isRuleFilterActive,
-              advancedFilterWhereClause == nil,
+              appliedQueryState?.filterSource.whereClause == nil,
               columnFilterTerms == nil else { return false }
 
         return true
@@ -2465,34 +2692,54 @@ private extension SALightweightContentViewController {
         rowView.focusValueField()
     }
 
-    func sqlWhereExpressionForCurrentFilter(binary: Bool) throws -> String {
-        let expressions = try filterRules.compactMap { rule -> String? in
-            guard rule.isEnabled else { return nil }
-            guard let definition = operatorDefinition(for: rule) else { return nil }
-            guard let parser = SPTableFilterParser(filterClause: definition.clause, numberOfArguments: UInt(definition.numberOfArguments)) else {
-                throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
-            }
-
-            parser.currentField = rule.columnName
-            parser.suppressLeadingTablePlaceholder = definition.suppressLeadingFieldPlaceholder
-            parser.caseSensitive = binary
-
-            if definition.numberOfArguments > 0 {
-                parser.argument = rule.values.indices.contains(0) ? rule.values[0] : ""
-            }
-            if definition.numberOfArguments > 1 {
-                parser.firstBetweenArgument = rule.values.indices.contains(0) ? rule.values[0] : ""
-                parser.secondBetweenArgument = rule.values.indices.contains(1) ? rule.values[1] : ""
-            }
-
-            guard let filterString = parser.filterString(), !filterString.isEmpty else {
-                throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
-            }
-
-            return filterString
+    func sqlWhereExpressionForSerializedFilter(_ serialized: [AnyHashable: Any], columnInfo: [ColumnInfo], binary: Bool) throws -> (expression: String, isValid: Bool) {
+        let filterClass = serialized["filterClass"] as? String
+        if filterClass == "groupNode", (serialized["isConjunction"] as? NSNumber)?.boolValue ?? (serialized["isConjunction"] as? Bool ?? false),
+           let children = serialized["children"] as? [[AnyHashable: Any]] {
+            let expressions = try children.map { try sqlWhereExpressionForSerializedFilter($0, columnInfo: columnInfo, binary: binary) }
+            guard expressions.allSatisfy(\.isValid) else { return ("", false) }
+            return (expressions.map(\.expression).filter { !$0.isEmpty }.joined(separator: " AND "), true)
         }
 
-        return expressions.joined(separator: " AND ")
+        guard filterClass == "expressionNode" else { return ("", false) }
+        guard (serialized["enabled"] as? NSNumber)?.boolValue ?? (serialized["enabled"] as? Bool ?? true) else { return ("", true) }
+        guard let columnName = serialized["column"] as? String,
+              let column = columnInfo.first(where: { $0.name == columnName }),
+              let comparison = serialized["filterComparison"] as? String else { return ("", false) }
+
+        let definitions = contentFilters(for: filterType(for: column))
+        guard let definition = definitions.first(where: { $0.title == comparison }) else { return ("", false) }
+
+        return (try sqlWhereExpression(
+            columnName: columnName,
+            values: serialized["filterValues"] as? [String] ?? [],
+            definition: definition,
+            binary: binary
+        ), true)
+    }
+
+    func sqlWhereExpression(columnName: String, values: [String], definition: ContentFilterDefinition, binary: Bool) throws -> String {
+        guard let parser = SPTableFilterParser(filterClause: definition.clause, numberOfArguments: UInt(definition.numberOfArguments)) else {
+            throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
+        }
+
+        parser.currentField = columnName
+        parser.suppressLeadingTablePlaceholder = definition.suppressLeadingFieldPlaceholder
+        parser.caseSensitive = binary
+
+        if definition.numberOfArguments > 0 {
+            parser.argument = values.indices.contains(0) ? values[0] : ""
+        }
+        if definition.numberOfArguments > 1 {
+            parser.firstBetweenArgument = values.indices.contains(0) ? values[0] : ""
+            parser.secondBetweenArgument = values.indices.contains(1) ? values[1] : ""
+        }
+
+        guard let filterString = parser.filterString(), !filterString.isEmpty else {
+            throw filterError(NSLocalizedString("No valid SQL expression could be generated.", comment: "lightweight content invalid filter fallback"))
+        }
+
+        return filterString
     }
 
     func filterError(_ message: String) -> NSError {
@@ -2562,26 +2809,64 @@ private extension SALightweightContentViewController {
         return normalizedRule
     }
 
-    func ruleFilterStringForCurrentState(showError: Bool) -> (whereClause: String?, failed: Bool) {
-        if let advancedFilterWhereClause = advancedFilterWhereClause {
-            return (advancedFilterWhereClause, false)
-        }
+    private func validatedQueryState(tableKey: SALightweightSessionState.TableKey, database: String, table: String, freshColumnInfo: [ColumnInfo], pageSize: Int, limitResults: Bool) -> ValidatedQueryState? {
+        let schemaIdentity = Self.schemaIdentity(for: freshColumnInfo)
+        let validColumnNames = Set(freshColumnInfo.map(\.name))
+        let validatedSortColumn = sortColumn.flatMap { validColumnNames.contains($0) ? $0 : nil }
+        var filterSource: AppliedFilterSource = .none
+        var clearsRuleFilter = false
+        var clearsAdvancedFilter = false
 
-        guard isRuleFilterActive, isRuleFilterVisible else { return (nil, false) }
-
-        let caseSensitive = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
-        let filter: String
-        do {
-            filter = try sqlWhereExpressionForCurrentFilter(binary: caseSensitive)
-        } catch {
-            if showError {
-                showInvalidRuleFilterAlert(error: error)
+        if let advancedFilterWhereClause {
+            if advancedFilterIsAvailable {
+                filterSource = advancedFilterRequiresVisibleWindow
+                    ? .advanced(whereClause: advancedFilterWhereClause, distinct: isAdvancedFilterDistinct)
+                    : .urlScheme(whereClause: advancedFilterWhereClause)
+            } else {
+                clearsAdvancedFilter = true
             }
-            return (nil, true)
+        } else if isRuleFilterActive, isRuleFilterVisible {
+            let serializedFilter = !filterRules.isEmpty
+                ? serializedFilter() as NSDictionary
+                : sessionState.contentState(for: tableKey)?.serializedRuleFilter
+
+            if let serializedFilter = serializedFilter as? [AnyHashable: Any] {
+                do {
+                    let validatedFilter = try sqlWhereExpressionForSerializedFilter(
+                        serializedFilter,
+                        columnInfo: freshColumnInfo,
+                        binary: ruleFilterCaseSensitive
+                    )
+                    if validatedFilter.isValid {
+                        filterSource = .rule(serialized: NSDictionary(dictionary: serializedFilter), whereClause: validatedFilter.expression, caseSensitive: ruleFilterCaseSensitive)
+                    } else {
+                        clearsRuleFilter = true
+                    }
+                } catch {
+                    showInvalidRuleFilterAlert(error: error)
+                    return nil
+                }
+            } else {
+                clearsRuleFilter = true
+            }
         }
 
-        let trimmedFilter = filter.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmedFilter.isEmpty ? nil : trimmedFilter, false)
+        return ValidatedQueryState(
+            applied: AppliedQueryState(
+                tableKey: tableKey,
+                database: database,
+                table: table,
+                filterSource: filterSource,
+                sortColumn: validatedSortColumn,
+                sortAscending: sortAscending,
+                pageIndex: limitResults ? max(0, pageIndex) : 0,
+                pageSize: pageSize,
+                limitResults: limitResults,
+                schemaIdentity: schemaIdentity
+            ),
+            clearsRuleFilter: clearsRuleFilter,
+            clearsAdvancedFilter: clearsAdvancedFilter
+        )
     }
 
     func storeCurrentRuleFilterState() {
@@ -2600,10 +2885,48 @@ private extension SALightweightContentViewController {
         )
     }
 
+    var advancedFilterIsAvailable: Bool {
+        guard advancedFilterWhereClause != nil else { return false }
+        return !advancedFilterRequiresVisibleWindow || advancedFilterWindow?.isVisible == true
+    }
+
+    func clearAdvancedFilter() {
+        if let advancedFilterWindow {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: advancedFilterWindow)
+        }
+        advancedFilterWhereClause = nil
+        isAdvancedFilterDistinct = false
+        advancedFilterWindow = nil
+        advancedFilterRequiresVisibleWindow = false
+    }
+
+    static func schemaIdentity(for columnInfo: [ColumnInfo]) -> [String] {
+        return columnInfo.map { column in
+            [
+                column.name,
+                column.type,
+                column.typeGrouping,
+                column.length,
+                column.values.joined(separator: "\u{1e}"),
+                column.comment,
+                column.isNullable ? "1" : "0",
+                column.isPrimary ? "1" : "0",
+                column.isAutoIncrement ? "1" : "0",
+                column.isGenerated ? "1" : "0",
+                column.defaultValue.map { "value:\($0)" } ?? "value:<nil>",
+                column.defaultExpression.map { "expression:\($0)" } ?? "expression:<nil>"
+            ].joined(separator: "\u{1f}")
+        }
+    }
+
     func restoreCachedContent(for key: SALightweightSessionState.TableKey) -> Bool {
         guard let cached = contentCache[key],
-              cached.pageSize == pageSize,
-              cached.limitResults == limitResults else {
+              cached.appliedQueryState.tableKey == key,
+              cached.appliedQueryState.pageSize == pageSize,
+              cached.appliedQueryState.limitResults == limitResults,
+              cached.appliedQueryState.schemaIdentity == Self.schemaIdentity(for: cached.columnInfo),
+              columnInfoCache[key].map({ Self.schemaIdentity(for: $0) == cached.appliedQueryState.schemaIdentity }) ?? true,
+              canRestoreCachedAppliedState(cached.appliedQueryState, for: key) else {
             contentCache.removeValue(forKey: key)
             contentCacheOrder.removeAll { $0 == key }
             return false
@@ -2617,27 +2940,22 @@ private extension SALightweightContentViewController {
         rows = cached.rows
         displayCache.invalidateAll()
         columnWidthCache.invalidateAll()
-        pageIndex = cached.pageIndex
+        appliedQueryState = cached.appliedQueryState
+        requiresFreshColumnInfoForNextLoad = false
+        pageIndex = cached.appliedQueryState.pageIndex
         tableObjectType = cached.tableObjectType
         totalRowCount = cached.totalRowCount
         totalRowCountIsEstimate = cached.totalRowCountIsEstimate
         hasNextPage = cached.hasNextPage
-        sortColumn = cached.sortColumn
-        sortAscending = cached.sortAscending
-        isRuleFilterActive = cached.isRuleFilterActive
-        restoreColumnFilter(cached.columnFilter)
-
-        sessionState.setContentState(
-            SALightweightSessionState.ContentState(
-                serializedRuleFilter: cached.serializedRuleFilter,
-                isRuleFilterActive: cached.isRuleFilterActive,
-                sortColumn: cached.sortColumn,
-                sortAscending: cached.sortAscending,
-                pageIndex: cached.pageIndex,
-                columnFilter: cached.columnFilter
-            ),
-            for: key
-        )
+        sortColumn = cached.appliedQueryState.sortColumn
+        sortAscending = cached.appliedQueryState.sortAscending
+        switch cached.appliedQueryState.filterSource {
+        case .rule(_, _, let caseSensitive):
+            isRuleFilterActive = true
+            ruleFilterCaseSensitive = caseSensitive
+        case .none, .advanced, .urlScheme:
+            isRuleFilterActive = false
+        }
         applySortDescriptorsFromCurrentState()
 
         isLoading = false
@@ -2651,26 +2969,50 @@ private extension SALightweightContentViewController {
         return true
     }
 
+    private func canRestoreCachedAppliedState(_ appliedState: AppliedQueryState, for key: SALightweightSessionState.TableKey) -> Bool {
+        let sessionContentState = sessionState.contentState(for: key)
+        guard sessionContentState?.sortColumn == appliedState.sortColumn,
+              sessionContentState?.sortAscending ?? true == appliedState.sortAscending,
+              sessionContentState?.pageIndex ?? 0 == appliedState.pageIndex else { return false }
+
+        switch appliedState.filterSource {
+        case .rule(let serialized, _, _):
+            guard sessionContentState?.isRuleFilterActive == true,
+                  let sessionSerialized = sessionContentState?.serializedRuleFilter else { return false }
+            return serialized.isEqual(sessionSerialized)
+        case .advanced(let whereClause, let distinct):
+            return advancedFilterRequiresVisibleWindow
+                && advancedFilterIsAvailable
+                && advancedFilterWhereClause == whereClause
+                && isAdvancedFilterDistinct == distinct
+        case .urlScheme(let whereClause):
+            return !advancedFilterRequiresVisibleWindow
+                && advancedFilterIsAvailable
+                && advancedFilterWhereClause == whereClause
+        case .none:
+            return sessionContentState?.isRuleFilterActive != true && advancedFilterWhereClause == nil
+        }
+    }
+
     func cacheCurrentContentState() {
-        guard let currentTableKey = currentTableKey, !columns.isEmpty else { return }
+        guard let currentTableKey = currentTableKey,
+              let appliedQueryState,
+              appliedQueryState.tableKey == currentTableKey,
+              appliedQueryState.schemaIdentity == Self.schemaIdentity(for: columnInfo),
+              !columns.isEmpty else { return }
 
         storeCurrentRuleFilterState()
+        guard !isCurrentContentCacheInvalidated else { return }
+
         contentCache[currentTableKey] = ContentCacheEntry(
             columns: columns,
             columnInfo: columnInfo,
             rows: rows,
-            pageIndex: pageIndex,
-            pageSize: pageSize,
-            limitResults: limitResults,
+            appliedQueryState: appliedQueryState,
             tableObjectType: tableObjectType,
             totalRowCount: totalRowCount,
             totalRowCountIsEstimate: totalRowCountIsEstimate,
-            hasNextPage: hasNextPage,
-            sortColumn: sortColumn,
-            sortAscending: sortAscending,
-            isRuleFilterActive: isRuleFilterActive,
-            serializedRuleFilter: sessionState.contentState(for: currentTableKey)?.serializedRuleFilter,
-            columnFilter: serializedColumnFilter()
+            hasNextPage: hasNextPage
         )
         noteContentCacheUse(for: currentTableKey)
     }
@@ -2913,7 +3255,7 @@ private extension SALightweightContentViewController {
         let column = columnInfo[columnIndex]
         let editor = fieldEditor
         editor.editedFieldInfo = [
-            "usedQuery": contentQuery(offset: pageIndex * pageSize, limit: pageSize, whereClause: ruleFilterStringForCurrentState(showError: false).whereClause, columnInfo: columnInfo, limitResults: limitResults),
+            "usedQuery": usedQuery(),
             "tableSource": "content",
             "tableName": table,
             "colName": column.name
@@ -3096,11 +3438,9 @@ private extension SALightweightContentViewController {
 
     @objc(usedQuery)
     func usedQuery() -> String {
-        return contentQuery(offset: pageIndex * pageSize,
-                            limit: pageSize,
-                            whereClause: ruleFilterStringForCurrentState(showError: false).whereClause,
-                            columnInfo: columnInfo,
-                            limitResults: limitResults)
+        guard let appliedQueryState, appliedQueryState.tableKey == currentTableKey else { return "" }
+        let offset = appliedQueryState.limitResults ? appliedQueryState.pageIndex * appliedQueryState.pageSize : 0
+        return contentQuery(offset: offset, limit: appliedQueryState.pageSize, columnInfo: columnInfo, state: appliedQueryState)
     }
 
     @objc(dataColumnDefinitions)

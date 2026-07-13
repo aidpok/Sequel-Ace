@@ -26,8 +26,15 @@ private struct SALightweightRenameStatement {
     let targetName: String
 }
 
+struct SALightweightMutationSnapshot {
+    let database: String?
+    let table: String?
+    let viewMode: SAViewMode
+}
+
 extension SPWindowController {
     @objc func addLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard let selectedDatabase = selectedDatabase else { return }
         guard let tableDetails = promptForLightweightTable() else { return }
         let tableName = tableDetails.name
@@ -49,7 +56,10 @@ extension SPWindowController {
         let statement = "CREATE TABLE \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(tableName)) (id INT(11) UNSIGNED NOT NULL\(primaryKey)) \(options.joined(separator: " "))"
         runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Creating %@...", comment: "Creating table task string"), tableName), statement: statement) { [weak self] success in
             guard let self = self, success else { return }
-            self.loadTables(for: selectedDatabase, restoringTable: tableName)
+            self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                        restoringTable: tableName,
+                                                        restoringViewMode: .structure,
+                                                        recordsHistory: true)
         }
     }
 
@@ -71,6 +81,7 @@ extension SPWindowController {
     }
 
     @objc func renameLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard selectedLightweightTableCount == 1,
               let selectedTable = selectedTable else { return }
 
@@ -82,6 +93,7 @@ extension SPWindowController {
     }
 
     @objc func duplicateLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard let selectedDatabase = selectedDatabase,
               selectedLightweightTableCount == 1,
               let selectedTable = selectedTable else { return }
@@ -107,6 +119,7 @@ extension SPWindowController {
     }
 
     @objc func truncateLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard let selectedDatabase = selectedDatabase else { return }
 
         let selectedTables = selectedLightweightTableItems()
@@ -118,6 +131,7 @@ extension SPWindowController {
 
         let hasSingleSelection = selectedTables.count == 1
         let tableToRestore = primarySelectedLightweightTable()
+        let viewModeToRestore = activeLightweightViewMode
         let hasAutoIncrement = selectedTables.contains { lightweightTableHasAutoIncrement($0, database: selectedDatabase) }
 
         let alert = NSAlert()
@@ -150,15 +164,26 @@ extension SPWindowController {
             ? String(format: NSLocalizedString("Truncating %@...", comment: "Truncating table task string"), selectedTables[0])
             : NSLocalizedString("Truncating selected tables...", comment: "Truncating selected tables task string")
         runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
-            guard let self = self, success else { return }
+            guard let self = self else { return }
+            guard success else {
+                self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                            restoringTable: tableToRestore,
+                                                            restoringTables: selectedTables,
+                                                            restoringViewMode: viewModeToRestore)
+                return
+            }
             if hasAutoIncrement {
                 UserDefaults.standard.set(shouldRememberAutoIncrementReset, forKey: SPResetAutoIncrementAfterDeletionOfAllRows)
             }
-            self.loadTables(for: selectedDatabase, restoringTable: tableToRestore, restoringViewMode: self.activeLightweightViewMode)
+            self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                        restoringTable: tableToRestore,
+                                                        restoringTables: selectedTables,
+                                                        restoringViewMode: viewModeToRestore)
         }
     }
 
     @objc func removeLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard let selectedDatabase = selectedDatabase else { return }
 
         let selectedItems = selectedLightweightTableItems()
@@ -176,6 +201,8 @@ extension SPWindowController {
             return
         }
         let hasSingleSelection = selectedObjects.count == 1
+        let tableToRestore = selectedTable.flatMap { selectedItems.contains($0) ? nil : $0 }
+        let viewModeToRestore = activeLightweightViewMode
 
         let alert = NSAlert()
         alert.messageText = hasSingleSelection
@@ -209,14 +236,30 @@ extension SPWindowController {
             statements.append("/*!32352 SET FOREIGN_KEY_CHECKS=1 */")
         }
         runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
-            guard let self = self, success else { return }
-            selectedItems.forEach { self.unpinLightweightTable($0, database: selectedDatabase) }
-            self.selectedTable = nil
-            self.loadTables(for: selectedDatabase)
+            guard let self = self else { return }
+            guard success else {
+                self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                            restoringTable: tableToRestore,
+                                                            restoringViewMode: viewModeToRestore) { [weak self] in
+                    guard selectedItems.count > 1 else { return }
+                    self?.reconcileLightweightPinnedTables(database: selectedDatabase)
+                }
+                return
+            }
+            let removedPinnedItem = selectedItems.contains { self.lightweightPinnedTables.contains($0) }
+            selectedItems.forEach { self.unpinLightweightTable($0, database: selectedDatabase, notify: false) }
+            if removedPinnedItem {
+                self.postLightweightPinnedTableNotification(database: selectedDatabase)
+            }
+            self.pruneLightweightHistory(removing: Set(selectedItems))
+            self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                        restoringTable: tableToRestore,
+                                                        restoringViewMode: viewModeToRestore)
         }
     }
 
     @objc func togglePinLightweightTable(_ sender: Any?) {
+        guard canStartLightweightMutation() else { return }
         guard let selectedDatabase = selectedDatabase else { return }
 
         let selectedItems = selectedLightweightTableItems()
@@ -227,12 +270,13 @@ extension SPWindowController {
         let tableToRestore = primarySelectedLightweightTable()
 
         if selectedItems.allSatisfy({ lightweightPinnedTables.contains($0) }) {
-            selectedItems.forEach { unpinLightweightTable($0, database: selectedDatabase) }
+            selectedItems.forEach { unpinLightweightTable($0, database: selectedDatabase, notify: false) }
         } else {
-            selectedItems.forEach { pinLightweightTable($0, database: selectedDatabase) }
+            selectedItems.forEach { pinLightweightTable($0, database: selectedDatabase, notify: false) }
         }
 
-        loadTables(for: selectedDatabase, restoringTable: tableToRestore)
+        postLightweightPinnedTableNotification(database: selectedDatabase)
+        restoreLightweightSidebarSelections(selectedItems, primaryTable: tableToRestore)
     }
 
     @objc func openLightweightTableInNewTab(_ sender: Any?) {
@@ -339,7 +383,8 @@ extension SPWindowController {
         let isPinned = hasSelection && selectedItems.allSatisfy { lightweightPinnedTables.contains($0) }
         let canRemoveSelection = hasSelection && selectedItems.allSatisfy { (lightweightTableTypes[$0] ?? .table).sqlDropKeyword != nil }
         let multiSafeCreateSyntax = hasSelection
-        let singleOnlySelection = hasSelection && hasSingleSelection
+        let mutationAllowed = !processing && !isLightweightImportRunning && !databaseListIsLoading
+        let singleOnlySelection = hasSelection && hasSingleSelection && mutationAllowed
 
         updateLightweightSidebarAction(#selector(copyLightweightTableName(_:)),
                                        title: hasSingleSelection
@@ -376,12 +421,12 @@ extension SPWindowController {
                                        title: hasSingleSelection
                                            ? NSLocalizedString("Truncate Table...", comment: "truncate table menu title")
                                            : NSLocalizedString("Truncate Selected Tables...", comment: "truncate selected tables menu title"),
-                                       enabled: isTableSelection,
+                                       enabled: isTableSelection && mutationAllowed,
                                        hidden: !isTableSelection,
                                        in: menu)
         updateLightweightSidebarAction(#selector(removeLightweightTable(_:)),
                                        title: String(format: NSLocalizedString("Remove %@...", comment: "remove selected object menu title"), objectTitle),
-                                       enabled: canRemoveSelection,
+                                       enabled: canRemoveSelection && mutationAllowed,
                                        hidden: !canRemoveSelection,
                                        in: menu)
         updateLightweightSidebarAction(#selector(togglePinLightweightTable(_:)),
@@ -389,7 +434,7 @@ extension SPWindowController {
                                                      ? NSLocalizedString("Unpin %@", comment: "unpin selected object menu item")
                                                      : NSLocalizedString("Pin %@", comment: "pin selected object menu item"),
                                                      objectTitle),
-                                       enabled: hasSelection,
+                                       enabled: hasSelection && mutationAllowed,
                                        hidden: !hasSelection,
                                        in: menu)
         updateLightweightSidebarAction(#selector(openLightweightTableInNewTab(_:)),
@@ -1388,33 +1433,147 @@ extension SPWindowController {
                 Self.displayString(for: row["DEFAULT_COLLATION_NAME"]))
     }
 
+    func canStartLightweightMutation() -> Bool {
+        guard !processing, !isLightweightImportRunning, !databaseListIsLoading else {
+            NSSound.beep()
+            return false
+        }
+
+        return true
+    }
+
+    func beginLightweightMutation(status: String) -> SALightweightMutationSnapshot? {
+        guard canStartLightweightMutation() else { return nil }
+
+        let snapshot = SALightweightMutationSnapshot(database: selectedDatabase,
+                                                     table: selectedTable,
+                                                     viewMode: activeLightweightViewMode)
+        processing = true
+        setLightweightMutationControlsEnabled(false)
+        showLightweightPlaceholder(status)
+        return snapshot
+    }
+
+    func finishLightweightMutation(_ snapshot: SALightweightMutationSnapshot, restoringDetail: Bool) {
+        processing = false
+        setLightweightMutationControlsEnabled(true)
+        if restoringDetail {
+            restoreLightweightDetail(after: snapshot)
+        }
+    }
+
+    func refreshLightweightObjectsAfterMutation(database: String,
+                                                restoringTable: String?,
+                                                restoringTables: [String]? = nil,
+                                                restoringViewMode: SAViewMode,
+                                                recordsHistory: Bool = false,
+                                                completion: (() -> Void)? = nil) {
+        // Intentionally do not post SPTableChangedNotification or the legacy query notifications here.
+        // Their listeners belong to loaded DBView controllers and would duplicate this direct lightweight refresh.
+        processing = true
+        setLightweightMutationControlsEnabled(false)
+        loadTables(for: database,
+                   restoringTable: restoringTable,
+                   restoringTables: restoringTables,
+                   restoringViewMode: restoringViewMode) { [weak self] in
+            guard let self = self else { return }
+            let currentTables = Set(self.lightweightTables)
+            let missingHistoryTables = Set(self.lightweightHistoryBackStack + self.lightweightHistoryForwardStack)
+                .subtracting(currentTables)
+            if !missingHistoryTables.isEmpty {
+                self.pruneLightweightHistory(removing: missingHistoryTables)
+            }
+            if recordsHistory, let restoringTable = restoringTable, self.lightweightTables.contains(restoringTable) {
+                self.recordLightweightHistorySelection(restoringTable)
+            }
+            self.markLightweightResumeStateChanged()
+            self.processing = false
+            self.setLightweightMutationControlsEnabled(true)
+            completion?()
+        }
+    }
+
+    private func setLightweightMutationControlsEnabled(_ enabled: Bool) {
+        tablesListView.isEnabled = enabled
+        tableFilterField.isEnabled = enabled
+        setLightweightFallbackToolbarItemsEnabled(enabled)
+        updateLightweightSidebarActionMenuState()
+    }
+
+    private func restoreLightweightDetail(after snapshot: SALightweightMutationSnapshot) {
+        guard snapshot.database == selectedDatabase else { return }
+
+        setActiveLightweightViewMode(snapshot.viewMode, persist: false)
+        if let table = snapshot.table, lightweightTables.contains(table) {
+            selectLightweightTableInSidebar(table)
+            selectLightweightTable(table, recordsHistory: false)
+            return
+        }
+
+        switch snapshot.viewMode {
+        case .query:
+            showLightweightQuery()
+        case .status:
+            showLightweightStatus(for: nil)
+        case .relations:
+            showLightweightRelations(for: nil)
+        case .triggers:
+            showLightweightTriggers(for: nil)
+        default:
+            showLightweightPlaceholder(lightweightTables.isEmpty
+                ? NSLocalizedString("No tables in this database.", comment: "lightweight database shell no tables")
+                : NSLocalizedString("Select a table or choose a toolbar section.", comment: "lightweight database shell table loaded empty state"))
+        }
+    }
+
     func runLightweightDatabaseMutation(status: String, statement: String, completion: @escaping (Bool) -> Void) {
         runLightweightDatabaseMutation(status: status, statements: [statement], completion: completion)
     }
 
     func runLightweightDatabaseMutation(status: String, statements: [String], completion: @escaping (Bool) -> Void) {
-        guard let activeConnection = activeConnection else { return }
+        guard let activeConnection = activeConnection,
+              let mutationSnapshot = beginLightweightMutation(status: status) else {
+            completion(false)
+            return
+        }
         let statements = expandedLightweightDatabaseMutationStatements(statements)
 
-        showLightweightPlaceholder(status)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
+            guard let self = self else { return }
 
-            for statement in statements {
+            var failedStatementIndex: Int?
+            var mutationError: String?
+            for (index, statement) in statements.enumerated() {
                 _ = activeConnection.queryString(statement)
-                if activeConnection.queryErrored() { break }
+                if activeConnection.queryErrored() {
+                    failedStatementIndex = index
+                    mutationError = activeConnection.lastErrorMessage()
+                    break
+                }
             }
 
-            let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
+            if let failedStatementIndex = failedStatementIndex {
+                for cleanupStatement in statements.dropFirst(failedStatementIndex + 1)
+                    where cleanupStatement.uppercased().contains("FOREIGN_KEY_CHECKS=1") {
+                    _ = activeConnection.queryString(cleanupStatement)
+                }
+            }
+            let mutationFailed = failedStatementIndex != nil
             DispatchQueue.main.async {
-                if let error = error, !error.isEmpty {
-                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"), message: error)
+                if !statements.isEmpty {
+                    self.lightweightStructureController.clearCachedTables()
+                    self.lightweightContentController.clearCachedTables()
+                }
+                self.finishLightweightMutation(mutationSnapshot, restoringDetail: mutationFailed)
+                if mutationFailed {
+                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                              message: mutationError?.isEmpty == false
+                                                ? mutationError!
+                                                : NSLocalizedString("The database operation failed.", comment: "lightweight database mutation fallback error"))
                     completion(false)
                     return
                 }
 
-                self.lightweightStructureController.clearCachedTables()
-                self.lightweightContentController.clearCachedTables()
                 completion(true)
             }
         }
@@ -1477,11 +1636,14 @@ extension SPWindowController {
     }
 
     func runLightweightDatabaseRenameMutation(from sourceDatabase: String, to targetDatabase: String, status: String, completion: @escaping (Bool) -> Void) {
-        guard let activeConnection = activeConnection else { return }
+        guard let activeConnection = activeConnection,
+              let mutationSnapshot = beginLightweightMutation(status: status) else {
+            completion(false)
+            return
+        }
 
-        showLightweightPlaceholder(status)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
+            guard let self = self else { return }
 
             switch self.lightweightDatabaseRenamePreflight(from: sourceDatabase, to: targetDatabase, connection: activeConnection) {
             case .ready(let statements):
@@ -1490,10 +1652,15 @@ extension SPWindowController {
                     if activeConnection.queryErrored() { break }
                 }
 
-                let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
+                let mutationFailed = activeConnection.queryErrored()
+                let error = mutationFailed ? activeConnection.lastErrorMessage() : nil
                 DispatchQueue.main.async {
-                    if let error = error, !error.isEmpty {
-                        self.showLightweightError(title: NSLocalizedString("Error", comment: "error"), message: error)
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: mutationFailed)
+                    if mutationFailed {
+                        self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                                  message: error?.isEmpty == false
+                                                    ? error!
+                                                    : NSLocalizedString("The database operation failed.", comment: "lightweight database mutation fallback error"))
                         completion(false)
                         return
                     }
@@ -1504,24 +1671,28 @@ extension SPWindowController {
                 }
             case .sourceMissing:
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Unable to rename database", comment: "unable to rename database message"),
                                              message: String(format: NSLocalizedString("The database '%@' no longer exists.", comment: "database rename source missing message"), sourceDatabase))
                     completion(false)
                 }
             case .targetExists:
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
                                              message: String(format: NSLocalizedString("The name '%@' is already used.", comment: "message when trying to rename a table/view/proc/etc to an already used name"), targetDatabase))
                     completion(false)
                 }
             case .unsupportedObjects(let unsupportedTypes):
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightDatabaseRenameUnsupportedAlert(database: sourceDatabase,
                                                                        unsupportedTypes: unsupportedTypes)
                     completion(false)
                 }
             case .failed(let message):
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Unable to rename database", comment: "unable to rename database message"), message: message)
                     completion(false)
                 }
@@ -1534,15 +1705,19 @@ extension SPWindowController {
                                             copyContent: Bool,
                                             status: String,
                                             completion: @escaping (Bool) -> Void) {
-        guard let activeConnection = activeConnection else { return }
+        guard let activeConnection = activeConnection,
+              let mutationSnapshot = beginLightweightMutation(status: status) else {
+            completion(false)
+            return
+        }
 
-        showLightweightPlaceholder(status)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
+            guard let self = self else { return }
 
             let databases = activeConnection.databases() as? [String] ?? []
             guard databases.contains(sourceDatabase), !databases.contains(targetDatabase) else {
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Unable to copy database", comment: "unable to copy database message"),
                                               message: String(format: NSLocalizedString("An error occurred while trying to copy the database '%@' to '%@'.", comment: "unable to copy database message informative message"), sourceDatabase, targetDatabase))
                     completion(false)
@@ -1554,6 +1729,7 @@ extension SPWindowController {
             if activeConnection.queryErrored() {
                 let error = activeConnection.lastErrorMessage() ?? ""
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Unable to copy database", comment: "unable to copy database message"),
                                               message: error.isEmpty ? String(format: NSLocalizedString("An error occurred while trying to copy the database '%@' to '%@'.", comment: "unable to copy database message informative message"), sourceDatabase, targetDatabase) : error)
                     completion(false)
@@ -1728,6 +1904,7 @@ extension SPWindowController {
             }
 
             DispatchQueue.main.async {
+                self.finishLightweightMutation(mutationSnapshot, restoringDetail: !success)
                 if success {
                     self.lightweightStructureController.clearCachedTables()
                     self.lightweightContentController.clearCachedTables()
@@ -1985,11 +2162,12 @@ extension SPWindowController {
                                     sourceDatabase: String,
                                     targetDatabase: String,
                                     copyContent: Bool) {
-        guard let activeConnection = activeConnection else { return }
+        let status = String(format: NSLocalizedString("Duplicating %@...", comment: "Duplicating table task string"), sourceName)
+        guard let activeConnection = activeConnection,
+              let mutationSnapshot = beginLightweightMutation(status: status) else { return }
 
-        showLightweightPlaceholder(String(format: NSLocalizedString("Duplicating %@...", comment: "Duplicating table task string"), sourceName))
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
+            guard let self = self else { return }
 
             _ = activeConnection.selectDatabase(sourceDatabase)
             var statements: [String] = []
@@ -2023,42 +2201,69 @@ extension SPWindowController {
 
             if statements.isEmpty {
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
                                               message: NSLocalizedString("The object could not be duplicated.", comment: "lightweight duplicate failed message"))
                 }
                 return
             }
 
-            for statement in statements {
+            var mutationFailed = false
+            var error: String?
+            var contentCopyWarning: String?
+            for (index, statement) in statements.enumerated() {
                 _ = activeConnection.queryString(statement)
-                if activeConnection.queryErrored() { break }
+                guard activeConnection.queryErrored() else { continue }
+
+                let queryError = activeConnection.lastErrorMessage()
+                let isContentCopyFailure = type == .table && copyContent && index == statements.count - 1 && statements.count > 1
+                if isContentCopyFailure {
+                    contentCopyWarning = queryError
+                } else {
+                    mutationFailed = true
+                    error = queryError
+                }
+                break
             }
 
-            let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
             DispatchQueue.main.async {
-                if let error = error, !error.isEmpty {
-                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"), message: error)
+                if mutationFailed {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
+                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                              message: error?.isEmpty == false
+                                                ? error!
+                                                : NSLocalizedString("The object could not be duplicated.", comment: "lightweight duplicate failed message"))
                     return
                 }
 
+                self.finishLightweightMutation(mutationSnapshot, restoringDetail: contentCopyWarning != nil)
+                if contentCopyWarning != nil {
+                    self.showLightweightError(title: NSLocalizedString("Warning", comment: "warning"),
+                                              message: NSLocalizedString("There have been errors while copying table content. Please check the new table.", comment: "message of panel when copying table content fails"))
+                }
                 self.lightweightStructureController.clearCachedTables()
                 self.lightweightContentController.clearCachedTables()
-                self.loadTables(for: targetDatabase, restoringTable: targetName)
+                self.refreshLightweightObjectsAfterMutation(database: targetDatabase,
+                                                            restoringTable: targetName,
+                                                            restoringViewMode: mutationSnapshot.viewMode,
+                                                            recordsHistory: true)
             }
         }
     }
 
     func duplicateLightweightRoutine(_ sourceName: String, to targetName: String, type: SALightweightTableObjectType, database: String, dropSource: Bool) {
-        guard let activeConnection = activeConnection else { return }
+        let status = String(format: NSLocalizedString("Duplicating %@...", comment: "Duplicating table task string"), sourceName)
+        guard let activeConnection = activeConnection,
+              let mutationSnapshot = beginLightweightMutation(status: status) else { return }
 
         let keyword = type == .procedure ? "PROCEDURE" : "FUNCTION"
-        showLightweightPlaceholder(String(format: NSLocalizedString("Duplicating %@...", comment: "Duplicating table task string"), sourceName))
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
+            guard let self = self else { return }
 
             _ = activeConnection.selectDatabase(database)
             guard let result = activeConnection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))") else {
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
                                               message: activeConnection.lastErrorMessage() ?? "")
                 }
@@ -2068,6 +2273,7 @@ extension SPWindowController {
             result.returnDataAsStrings = true
             guard let row = result.getRowAsArray(), row.count > 2, let createSyntax = row[2] as? String else {
                 DispatchQueue.main.async {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
                                               message: NSLocalizedString("Couldn't get create syntax.", comment: "message of panel when table information cannot be retrieved"))
                 }
@@ -2080,21 +2286,39 @@ extension SPWindowController {
                                                                   with: Self.backtickQuoted(targetName),
                                                                   options: .regularExpression)
             _ = activeConnection.queryString(renamedSyntax)
-            if !activeConnection.queryErrored(), dropSource {
+            let createdTarget = !activeConnection.queryErrored()
+            if createdTarget, dropSource {
                 _ = activeConnection.queryString("DROP \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))")
             }
 
-            let error = activeConnection.queryErrored() ? activeConnection.lastErrorMessage() : nil
+            let mutationFailed = activeConnection.queryErrored()
+            let error = mutationFailed ? activeConnection.lastErrorMessage() : nil
             DispatchQueue.main.async {
-                if let error = error, !error.isEmpty {
-                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"), message: error)
+                if mutationFailed {
+                    self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
+                    self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
+                                              message: error?.isEmpty == false
+                                                ? error!
+                                                : NSLocalizedString("The object could not be duplicated.", comment: "lightweight duplicate failed message"))
+                    if createdTarget {
+                        self.refreshLightweightObjectsAfterMutation(database: database,
+                                                                    restoringTable: sourceName,
+                                                                    restoringViewMode: mutationSnapshot.viewMode)
+                    }
                     return
                 }
 
+                self.finishLightweightMutation(mutationSnapshot, restoringDetail: false)
                 self.lightweightStructureController.clearCachedTables()
                 self.lightweightContentController.clearCachedTables()
-                self.handleLightweightPinnedTableRename(from: sourceName, to: targetName)
-                self.loadTables(for: database, restoringTable: targetName)
+                if dropSource {
+                    self.handleLightweightPinnedTableRename(from: sourceName, to: targetName)
+                    self.renameLightweightHistory(from: sourceName, to: targetName)
+                }
+                self.refreshLightweightObjectsAfterMutation(database: database,
+                                                            restoringTable: targetName,
+                                                            restoringViewMode: mutationSnapshot.viewMode,
+                                                            recordsHistory: !dropSource)
             }
         }
     }

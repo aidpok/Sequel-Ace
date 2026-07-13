@@ -144,6 +144,7 @@ final class SALightweightStructureViewController: NSViewController {
     private var indexSortAscending = true
     private var structureCache: [String: StructureCacheEntry] = [:]
     private var structureCacheOrder: [String] = []
+    private var isCurrentStructureCacheInvalidated = false
     private let maximumStructureCacheEntries = 12
     var tableStructureDidChange: (() -> Void)?
     var requestTableInfoView: (() -> Void)?
@@ -451,6 +452,8 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     func clearCachedTables() {
+        loadToken = UUID()
+        isCurrentStructureCacheInvalidated = true
         structureCache.removeAll()
         structureCacheOrder.removeAll()
     }
@@ -523,6 +526,7 @@ final class SALightweightStructureViewController: NSViewController {
                 self.autosizeIndexColumns()
                 self.resetScrollPositionsAfterLayout()
                 self.updateButtonState()
+                self.isCurrentStructureCacheInvalidated = false
                 self.cacheCurrentStructureState()
             }
         }
@@ -1830,7 +1834,7 @@ private extension SALightweightStructureViewController {
     }
 
     private func cacheCurrentStructureState() {
-        guard !database.isEmpty, !table.isEmpty, !rows.isEmpty else { return }
+        guard !isCurrentStructureCacheInvalidated, !database.isEmpty, !table.isEmpty, !rows.isEmpty else { return }
 
         let key = structureCacheKey()
         structureCache[key] = StructureCacheEntry(rows: rows,

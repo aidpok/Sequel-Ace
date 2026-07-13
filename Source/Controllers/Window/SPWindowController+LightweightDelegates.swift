@@ -1497,6 +1497,10 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
         guard isLightweightTablesListView(tableView),
               let oldName = lightweightTableName(atSidebarRow: row),
               let selectedDatabase = selectedDatabase else { return }
+        guard canStartLightweightMutation() else {
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+            return
+        }
 
         let newName = lightweightEditedString(from: object).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newName.isEmpty, oldName != newName else {
@@ -1505,6 +1509,7 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
         }
 
         let tableType = lightweightTableTypes[oldName] ?? .table
+        let viewModeToRestore = activeLightweightViewMode
         guard validateLightweightObjectName(newName, type: tableType, ignoring: oldName) else {
             tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
             return
@@ -1528,12 +1533,17 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
         runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Renaming %@...", comment: "Renaming table task string"), oldName), statement: statement) { [weak self] success in
             guard let self = self else { return }
             guard success else {
-                self.tablesListView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<self.tablesListView.numberOfColumns))
+                self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                            restoringTable: oldName,
+                                                            restoringViewMode: viewModeToRestore)
                 return
             }
 
             self.handleLightweightPinnedTableRename(from: oldName, to: newName)
-            self.loadTables(for: selectedDatabase, restoringTable: newName)
+            self.renameLightweightHistory(from: oldName, to: newName)
+            self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
+                                                        restoringTable: newName,
+                                                        restoringViewMode: viewModeToRestore)
         }
     }
 
@@ -1550,7 +1560,11 @@ extension SPWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
-        return isLightweightTablesListView(tableView) && lightweightTableName(atSidebarRow: row) != nil
+        return isLightweightTablesListView(tableView) &&
+            !processing &&
+            !isLightweightImportRunning &&
+            !databaseListIsLoading &&
+            lightweightTableName(atSidebarRow: row) != nil
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {

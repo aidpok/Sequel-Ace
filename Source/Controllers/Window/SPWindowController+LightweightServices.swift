@@ -114,6 +114,12 @@ private enum SALightweightDBViewFallbackDiagnostics {
     }
 }
 
+private extension String {
+    func appendingCreateSyntaxTerminator() -> String {
+        return hasSuffix(";") ? self : "\(self);"
+    }
+}
+
 @objc(SALightweightAppleScriptDocument)
 final class SALightweightAppleScriptDocument: NSObject {
     private weak var windowController: SPWindowController?
@@ -261,6 +267,165 @@ final class SALightweightAppleScriptDocument: NSObject {
 }
 
 private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
+private var lightweightCreateSyntaxWindowControllerAssociationKey: UInt8 = 0
+
+private final class SALightweightCreateSyntaxWindowController: NSWindowController, NSWindowDelegate {
+    private let syntax: String
+    private let selectedItem: String
+    private let copyNotificationText: String
+
+    var onDismiss: (() -> Void)?
+
+    init(title: String, syntax: String, selectedItem: String, copyNotificationText: String) {
+        self.syntax = syntax
+        self.selectedItem = selectedItem
+        self.copyNotificationText = copyNotificationText
+
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
+                            styleMask: [.titled, .closable, .resizable],
+                            backing: .buffered,
+                            defer: false)
+        panel.title = NSLocalizedString("Create Syntax", comment: "create syntax window title")
+        panel.isReleasedWhenClosed = false
+        panel.isRestorable = false
+        panel.animationBehavior = .none
+        panel.minSize = NSSize(width: 560, height: 320)
+
+        super.init(window: panel)
+        panel.delegate = self
+        buildInterface(title: title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func buildInterface(title: String) {
+        guard let contentView = window?.contentView else { return }
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        titleField.lineBreakMode = .byTruncatingMiddle
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = false
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let textView = NSTextView(frame: .zero)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = UserDefaults.getFont()
+        textView.string = syntax
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width, .height]
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                       height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        scrollView.documentView = textView
+
+        let saveButton = NSButton(title: NSLocalizedString("Save As...", comment: "save create syntax button"),
+                                  target: self,
+                                  action: #selector(saveSyntax(_:)))
+        let copyButton = NSButton(title: NSLocalizedString("Copy", comment: "copy create syntax button"),
+                                  target: self,
+                                  action: #selector(copySyntax(_:)))
+        let closeButton = NSButton(title: NSLocalizedString("Close", comment: "close create syntax button"),
+                                   target: self,
+                                   action: #selector(closeWindow(_:)))
+        closeButton.keyEquivalent = "\r"
+
+        let buttonStack = NSStackView(views: [saveButton, copyButton, closeButton])
+        buttonStack.orientation = .horizontal
+        buttonStack.alignment = .centerY
+        buttonStack.spacing = 8
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+
+        contentView.addSubview(titleField)
+        contentView.addSubview(scrollView)
+        contentView.addSubview(buttonStack)
+
+        NSLayoutConstraint.activate([
+            titleField.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 18),
+            titleField.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            titleField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            scrollView.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 12),
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            scrollView.bottomAnchor.constraint(equalTo: buttonStack.topAnchor, constant: -16),
+
+            buttonStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            buttonStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18)
+        ])
+
+        window?.initialFirstResponder = textView
+    }
+
+    @objc private func copySyntax(_ sender: Any?) {
+        Self.copy(syntax: syntax, notificationText: copyNotificationText, owner: self)
+    }
+
+    @objc private func saveSyntax(_ sender: Any?) {
+        guard let window else { return }
+
+        let panel = NSSavePanel()
+        if let sqlType = UTType(filenameExtension: SPFileExtensionSQL as String) {
+            panel.allowedContentTypes = [sqlType]
+        }
+        panel.isExtensionHidden = false
+        panel.allowsOtherFileTypes = true
+        panel.canSelectHiddenExtension = true
+        panel.nameFieldStringValue = "CreateSyntax-\(selectedItem)"
+        panel.beginSheetModal(for: window) { [syntax, selectedItem] response in
+            guard response == .OK, let url = panel.url, !syntax.isEmpty else { return }
+
+            let output = "-- \(NSLocalizedString("Create syntax for", comment: "create syntax for table comment")) '\(selectedItem)'\n\n\(syntax)\n"
+            try? output.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    @objc private func closeWindow(_ sender: Any?) {
+        guard let window else { return }
+        if let sheetParent = window.sheetParent {
+            sheetParent.endSheet(window)
+        } else {
+            window.close()
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let sheetParent = sender.sheetParent else { return true }
+        sheetParent.endSheet(sender)
+        return false
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onDismiss?()
+    }
+
+    static func copy(syntax: String, notificationText: String, owner: AnyObject) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.declareTypes([.string], owner: owner)
+        pasteboard.setString(syntax, forType: .string)
+
+        let notification = NSUserNotification()
+        notification.title = NSLocalizedString("Syntax Copied", comment: "create table syntax copied notification title")
+        notification.informativeText = notificationText
+        notification.soundName = NSUserNotificationDefaultSoundName
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+}
 
 @objc extension SPWindowController {
     func lightweightAppleScriptDocumentProxy() -> SALightweightAppleScriptDocument? {
@@ -617,7 +782,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
                     return true
                 }
                 viewContent()
-                lightweightContentController.applyAdvancedFilter(whereClause: whereClause, distinct: false)
+                lightweightContentController.applyAdvancedFilter(whereClause: whereClause, distinct: false, source: .urlScheme)
             }
             return true
         }
@@ -2334,7 +2499,8 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         guard sender as AnyObject? === lightweightFilterTableController else { return }
 
         lightweightContentController.applyAdvancedFilter(whereClause: lightweightFilterTableController.tableFilterString(),
-                                                         distinct: lightweightFilterTableController.isDistinct())
+                                                         distinct: lightweightFilterTableController.isDistinct(),
+                                                         source: .panel)
     }
 
     func lightweightLegacyFilterColumns(for table: String, database: String) -> NSArray {
@@ -2565,17 +2731,11 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         guard !tables.isEmpty,
               let syntax = lightweightCreateTableSyntaxes(for: tables, showErrors: true) else { return }
 
-        let pasteboard = NSPasteboard.general
-        pasteboard.declareTypes([.string], owner: self)
-        pasteboard.setString(syntax, forType: .string)
-
-        let notification = NSUserNotification()
-        notification.title = NSLocalizedString("Syntax Copied", comment: "create table syntax copied notification title")
-        notification.informativeText = tables.count == 1
-            ? String(format: NSLocalizedString("Syntax for %@ copied", comment: "description for create syntax copied notification"), tables[0])
-            : NSLocalizedString("Syntaxes for selected items copied", comment: "description for selected create syntaxes copied notification")
-        notification.soundName = NSUserNotificationDefaultSoundName
-        NSUserNotificationCenter.default.deliver(notification)
+        SALightweightCreateSyntaxWindowController.copy(
+            syntax: syntax,
+            notificationText: lightweightCreateSyntaxCopiedNotificationText(for: tables),
+            owner: self
+        )
     }
 
     @objc func showLightweightCreateTableSyntax(_ sender: Any?) {
@@ -2591,7 +2751,7 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         let title = tables.count == 1
             ? String(format: NSLocalizedString("Create syntax for %@ '%@'", comment: "Create syntax label"), lightweightCreateSyntaxTypeTitle(for: tables[0]), tables[0])
             : NSLocalizedString("Create syntaxes for selected items", comment: "Create syntaxes for selected items label")
-        showLightweightCreateSyntaxSheet(title: title, syntax: syntax)
+        showLightweightCreateSyntaxSheet(title: title, syntax: syntax, tables: tables)
     }
 
     @objc(copyCreateTableSyntax:) func copyCreateTableSyntaxMenuBridge(_ sender: Any?) {
@@ -2895,16 +3055,20 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
 
     @nonobjc func lightweightCreateSyntaxString(_ syntax: String, objectType: SALightweightTableObjectType) -> String {
         switch objectType {
-        case .procedure, .function:
-            return lightweightRoutineCreateSyntaxString(syntax)
-        case .none, .table, .view:
-            return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+        case .procedure:
+            return lightweightProcedureCreateSyntaxString(syntax)
+        case .view:
+            return lightweightPrettifiedViewCreateSyntax(syntax).appendingCreateSyntaxTerminator()
+        case .none, .table, .function:
+            return syntax.appendingCreateSyntaxTerminator()
         }
     }
 
-    @nonobjc func lightweightRoutineCreateSyntaxString(_ syntax: String) -> String {
+    @nonobjc func lightweightProcedureCreateSyntaxString(_ syntax: String) -> String {
         let trimmedSyntax = syntax.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedSyntax.range(of: #"(?im)^\s*DELIMITER\b"#, options: .regularExpression) == nil else { return trimmedSyntax }
+        guard trimmedSyntax.range(of: #"(?im)^\s*DELIMITER\b"#, options: .regularExpression) == nil else {
+            return trimmedSyntax
+        }
 
         var statement = trimmedSyntax
         while statement.hasSuffix(";") {
@@ -2912,9 +3076,30 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
             statement = statement.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        guard statement.contains(";") else { return "\(statement);" }
-
         return "DELIMITER ;;\n\(statement);;\nDELIMITER ;"
+    }
+
+    @nonobjc func lightweightPrettifiedViewCreateSyntax(_ syntax: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: "(.*?) AS select (.*?) (from.*)",
+                                                        options: [.anchorsMatchLines, .dotMatchesLineSeparators]) else {
+            return syntax.hasSuffix(";") ? syntax : "\(syntax);"
+        }
+
+        let source = syntax as NSString
+        let range = NSRange(location: 0, length: source.length)
+        guard let match = expression.firstMatch(in: syntax, range: range), match.numberOfRanges == 4 else {
+            return syntax
+        }
+
+        let prefix = source.substring(with: match.range(at: 1))
+        let columns = source.substring(with: match.range(at: 2))
+            .replacingOccurrences(of: "`,`", with: "`,\n   `")
+        let fromClause = source.substring(with: match.range(at: 3))
+        guard fromClause.count >= 4 else { return syntax }
+
+        let uppercasedFromClause = "FROM" + fromClause.dropFirst(4)
+        return "\(prefix)\nAS SELECT\n   \(columns)\n\(uppercasedFromClause)"
+            .replacingOccurrences(of: " WHERE (", with: "\nWHERE (")
     }
 
     enum LightweightTableMaintenanceAction {
@@ -3232,37 +3417,57 @@ private var lightweightAppleScriptDocumentAssociationKey: UInt8 = 0
         alert.runModalCentered(over: window)
     }
 
-    func showLightweightCreateSyntaxSheet(title: String, syntax: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+    func showLightweightCreateSyntaxSheet(title: String, syntax: String, tables: [String]) {
+        guard let selectedItem = tables.first else { return }
 
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 360))
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = false
-        scrollView.borderType = .bezelBorder
+        let controller = SALightweightCreateSyntaxWindowController(
+            title: title,
+            syntax: syntax,
+            selectedItem: selectedItem,
+            copyNotificationText: lightweightCreateSyntaxCopiedNotificationText(for: tables)
+        )
+        controller.onDismiss = { [weak self, weak controller] in
+            guard let self,
+                  let controller,
+                  objc_getAssociatedObject(self, &lightweightCreateSyntaxWindowControllerAssociationKey) as? SALightweightCreateSyntaxWindowController === controller else {
+                return
+            }
+            objc_setAssociatedObject(self,
+                                     &lightweightCreateSyntaxWindowControllerAssociationKey,
+                                     nil,
+                                     .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+        objc_setAssociatedObject(self,
+                                 &lightweightCreateSyntaxWindowControllerAssociationKey,
+                                 controller,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
-        let textView = NSTextView(frame: scrollView.bounds)
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.isRichText = false
-        textView.font = UserDefaults.getFont()
-        textView.string = syntax
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = true
-        textView.autoresizingMask = [.width, .height]
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = false
+        guard let parentWindow = window, let syntaxWindow = controller.window else {
+            controller.showWindow(self)
+            controller.window?.center()
+            return
+        }
 
-        scrollView.documentView = textView
-        alert.accessoryView = scrollView
-        alert.window.animationBehavior = .none
+        parentWindow.beginSheet(syntaxWindow) { [weak self, weak controller] _ in
+            syntaxWindow.orderOut(nil)
+            guard let self,
+                  let controller,
+                  objc_getAssociatedObject(self, &lightweightCreateSyntaxWindowControllerAssociationKey) as? SALightweightCreateSyntaxWindowController === controller else {
+                return
+            }
+            objc_setAssociatedObject(self,
+                                     &lightweightCreateSyntaxWindowControllerAssociationKey,
+                                     nil,
+                                     .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+    }
 
-        alert.runModalCentered(over: window)
+    @nonobjc func lightweightCreateSyntaxCopiedNotificationText(for tables: [String]) -> String {
+        guard tables.count == 1, let table = tables.first else {
+            return NSLocalizedString("Syntaxes for selected items copied", comment: "description for selected create syntaxes copied notification")
+        }
+
+        return String(format: NSLocalizedString("Syntax for %@ copied", comment: "description for create syntax copied notification"), table)
     }
 
     func showLightweightCreateSyntaxError(_ message: String) {

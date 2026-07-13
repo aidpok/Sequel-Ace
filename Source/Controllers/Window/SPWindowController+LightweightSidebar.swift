@@ -4,6 +4,9 @@
 //
 
 import Cocoa
+import ObjectiveC
+
+private var lightweightPinnedTableNotificationAssociationKey: UInt8 = 0
 
 enum SALightweightSidebarRow {
     case group(String)
@@ -572,27 +575,99 @@ extension SPWindowController {
         return connection.host ?? ""
     }
 
-    func pinLightweightTable(_ table: String, database: String) {
+    func pinLightweightTable(_ table: String, database: String, notify: Bool = true) {
         guard let activeConnection = activeConnection else { return }
 
         SQLitePinnedTableManager.sharedInstance.pinTable(hostName: lightweightPinnedTableConnectionIdentifier(connection: activeConnection),
                                                          databaseName: database,
                                                          tableToPin: table)
+        if notify {
+            postLightweightPinnedTableNotification(database: database)
+        }
     }
 
-    func unpinLightweightTable(_ table: String, database: String) {
+    func unpinLightweightTable(_ table: String, database: String, notify: Bool = true) {
         guard let activeConnection = activeConnection else { return }
 
         SQLitePinnedTableManager.sharedInstance.unpinTable(hostName: lightweightPinnedTableConnectionIdentifier(connection: activeConnection),
                                                            databaseName: database,
                                                            tableToUnpin: table)
+        if notify {
+            postLightweightPinnedTableNotification(database: database)
+        }
     }
 
     func handleLightweightPinnedTableRename(from oldName: String, to newName: String) {
         guard let selectedDatabase = selectedDatabase, lightweightPinnedTables.contains(oldName) else { return }
 
-        unpinLightweightTable(oldName, database: selectedDatabase)
-        pinLightweightTable(newName, database: selectedDatabase)
+        unpinLightweightTable(oldName, database: selectedDatabase, notify: false)
+        pinLightweightTable(newName, database: selectedDatabase, notify: false)
+        postLightweightPinnedTableNotification(database: selectedDatabase)
+    }
+
+    func reconcileLightweightPinnedTables(database: String) {
+        let liveTables = Set(lightweightTables)
+        let deadPinnedTables = lightweightPinnedTables.subtracting(liveTables)
+        guard !deadPinnedTables.isEmpty else { return }
+
+        deadPinnedTables.forEach { unpinLightweightTable($0, database: database, notify: false) }
+        postLightweightPinnedTableNotification(database: database)
+    }
+
+    func lightweightPinnedTableNotificationName(database: String, connection: SPMySQLConnection) -> Notification.Name {
+        let allowedCharacters = CharacterSet.urlQueryAllowed
+        let connectionIdentifier = lightweightPinnedTableConnectionIdentifier(connection: connection)
+            .addingPercentEncoding(withAllowedCharacters: allowedCharacters) ?? ""
+        let databaseIdentifier = database.addingPercentEncoding(withAllowedCharacters: allowedCharacters) ?? ""
+        return Notification.Name("PinnedTableNotification|Connection=\(connectionIdentifier)|Database=\(databaseIdentifier)")
+    }
+
+    func subscribeToLightweightPinnedTableNotifications(database: String, connection: SPMySQLConnection) {
+        let notificationName = lightweightPinnedTableNotificationName(database: database, connection: connection)
+        if let previousName = objc_getAssociatedObject(self, &lightweightPinnedTableNotificationAssociationKey) as? String {
+            NotificationCenter.default.removeObserver(self, name: Notification.Name(previousName), object: nil)
+        }
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(processLightweightPinnedTableNotification(_:)),
+                                               name: notificationName,
+                                               object: nil)
+        objc_setAssociatedObject(self,
+                                 &lightweightPinnedTableNotificationAssociationKey,
+                                 notificationName.rawValue,
+                                 .OBJC_ASSOCIATION_COPY_NONATOMIC)
+    }
+
+    func postLightweightPinnedTableNotification(database: String) {
+        guard let activeConnection = activeConnection else { return }
+
+        // Reuse the scoped legacy pin contract: existing legacy windows only refresh their
+        // already-loaded table list, while lightweight windows stay entirely on this path.
+        NotificationCenter.default.post(name: lightweightPinnedTableNotificationName(database: database, connection: activeConnection),
+                                        object: nil)
+    }
+
+    @objc func processLightweightPinnedTableNotification(_ notification: Notification) {
+        guard let activeConnection = activeConnection,
+              let selectedDatabase = selectedDatabase,
+              notification.name == lightweightPinnedTableNotificationName(database: selectedDatabase, connection: activeConnection) else { return }
+
+        let selectedItems = selectedLightweightTableItems()
+        let primaryTable = primarySelectedLightweightTable()
+        let pinnedTables = loadLightweightPinnedTables(for: selectedDatabase, connection: activeConnection)
+        let canonicalTables = lightweightTables.sorted { left, right in
+            let leftType = lightweightTableTypes[left] ?? .table
+            let rightType = lightweightTableTypes[right] ?? .table
+            let leftGroup = leftType == .procedure || leftType == .function ? 1 : 0
+            let rightGroup = rightType == .procedure || rightType == .function ? 1 : 0
+            if leftGroup != rightGroup { return leftGroup < rightGroup }
+            return left.localizedCaseInsensitiveCompare(right) == .orderedAscending
+        }
+        lightweightPinnedTables = pinnedTables
+        lightweightTables = orderLightweightTables(canonicalTables, pinnedTables: pinnedTables)
+        applyLightweightTableFilter()
+        tablesListView.reloadData()
+        restoreLightweightSidebarSelections(selectedItems, primaryTable: primaryTable)
+        updateLightweightSidebarActionMenuState()
     }
 
     func applyPendingLightweightSessionSnapshot() {
@@ -625,8 +700,16 @@ extension SPWindowController {
         loadTables(for: database, restoringTable: restoredTable, restoringViewMode: restoredViewMode)
     }
 
-    func loadTables(for database: String, preservingSelection: Bool = false, restoringTable: String? = nil, restoringViewMode: SAViewMode? = nil) {
-        guard let activeConnection = activeConnection else { return }
+    func loadTables(for database: String,
+                    preservingSelection: Bool = false,
+                    restoringTable: String? = nil,
+                    restoringTables: [String]? = nil,
+                    restoringViewMode: SAViewMode? = nil,
+                    completion: (() -> Void)? = nil) {
+        guard let activeConnection = activeConnection else {
+            completion?()
+            return
+        }
 
         ensureLightweightTableListAllowsMultipleSelection()
         saveCurrentLightweightViewState()
@@ -637,6 +720,7 @@ extension SPWindowController {
             resetLightweightTableHistory()
         }
         selectedDatabase = database
+        subscribeToLightweightPinnedTableNotifications(database: database, connection: activeConnection)
         selectedTable = nil
         updateLightweightSidebarActionMenuState()
         setLightweightFallbackToolbarItemsEnabled(true)
@@ -650,7 +734,12 @@ extension SPWindowController {
         tablesListView.reloadData()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
-            guard let self = self, let activeConnection = activeConnection else { return }
+            guard let self = self, let activeConnection = activeConnection else {
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
             _ = activeConnection.selectDatabase(database)
             let loadedObjects = self.loadLightweightTableObjects(for: database, connection: activeConnection)
             let pinnedTables = self.loadLightweightPinnedTables(for: database, connection: activeConnection)
@@ -667,6 +756,14 @@ extension SPWindowController {
             let tables = self.orderLightweightTables(uniqueTables, pinnedTables: pinnedTables)
 
             DispatchQueue.main.async {
+                guard self.selectedDatabase == database, self.activeConnection === activeConnection else {
+                    completion?()
+                    return
+                }
+                defer {
+                    self.refreshLightweightQueryCompletionMetadataFromCurrentState()
+                    completion?()
+                }
                 self.selectedDatabase = database
                 self.updateLightweightWindowTitle()
                 self.lightweightTables = tables
@@ -684,6 +781,9 @@ extension SPWindowController {
                     }
                     self.selectLightweightTableInSidebar(tableToRestore)
                     self.selectLightweightTable(tableToRestore, recordsHistory: false)
+                    if let restoringTables = restoringTables {
+                        self.restoreLightweightSidebarSelections(restoringTables, primaryTable: tableToRestore)
+                    }
                     return
                 }
                 if let restoringViewMode = restoringViewMode, restoringViewMode == .query {
@@ -853,6 +953,40 @@ extension SPWindowController {
         tablesListView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         tablesListView.scrollRowToVisible(index)
         isRestoringLightweightHistory = false
+    }
+
+    func restoreLightweightSidebarSelections(_ tables: [String], primaryTable: String?) {
+        let rows = IndexSet(tables.compactMap { lightweightSidebarRowIndex(for: $0) })
+        guard !rows.isEmpty else { return }
+
+        isRestoringLightweightHistory = true
+        tablesListView.selectRowIndexes(rows, byExtendingSelection: false)
+        if let primaryTable = primaryTable, let primaryRow = lightweightSidebarRowIndex(for: primaryTable) {
+            tablesListView.scrollRowToVisible(primaryRow)
+        }
+        isRestoringLightweightHistory = false
+    }
+
+    func renameLightweightHistory(from oldName: String, to newName: String) {
+        lightweightHistoryBackStack = lightweightHistoryBackStack.map { $0 == oldName ? newName : $0 }
+        lightweightHistoryForwardStack = lightweightHistoryForwardStack.map { $0 == oldName ? newName : $0 }
+        lightweightHistoryBackStack = removingAdjacentDuplicateLightweightHistoryEntries(lightweightHistoryBackStack)
+        lightweightHistoryForwardStack = removingAdjacentDuplicateLightweightHistoryEntries(lightweightHistoryForwardStack)
+        updateLightweightHistoryToolbarState()
+    }
+
+    func pruneLightweightHistory(removing removedTables: Set<String>) {
+        lightweightHistoryBackStack.removeAll { removedTables.contains($0) }
+        lightweightHistoryForwardStack.removeAll { removedTables.contains($0) }
+        updateLightweightHistoryToolbarState()
+    }
+
+    private func removingAdjacentDuplicateLightweightHistoryEntries(_ entries: [String]) -> [String] {
+        return entries.reduce(into: []) { result, entry in
+            if result.last != entry {
+                result.append(entry)
+            }
+        }
     }
 
     func resetLightweightTableInfo() {
