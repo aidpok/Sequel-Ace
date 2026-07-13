@@ -11,7 +11,7 @@ extension SPConnectionController {
         name = info.name
         host = info.host
         user = info.user
-        password = info.password.isEmpty && !info.connectionKeychainItemName.isEmpty ? "SequelAceSecretPassword" : info.password
+        password = info.password.isEmpty && !info.connectionKeychainItemName.isEmpty ? SAConnectionInfoObjC.keychainPasswordPlaceholder : info.password
         database = info.database
         socket = info.socket
         port = info.port
@@ -33,7 +33,7 @@ extension SPConnectionController {
         sslCACertFileLocation = info.sslCACertFileLocation
         sshHost = info.sshHost
         sshUser = info.sshUser
-        sshPassword = info.sshPassword.isEmpty && !info.connectionSSHKeychainItemName.isEmpty ? "SequelAceSecretPassword" : info.sshPassword
+        sshPassword = info.sshPassword.isEmpty && !info.connectionSSHKeychainItemName.isEmpty ? SAConnectionInfoObjC.keychainPasswordPlaceholder : info.sshPassword
         sshKeyLocationEnabled = info.sshKeyLocationEnabled
         sshKeyLocation = info.sshKeyLocation
         sshPort = info.sshPort
