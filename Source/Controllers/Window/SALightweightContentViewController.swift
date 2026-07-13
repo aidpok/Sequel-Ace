@@ -4392,6 +4392,7 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
     var onRemove: ((UUID) -> Void)?
     var onApply: (() -> Void)?
     private var selectedOperatorTitle = ""
+    private var preferredOperatorWidth: CGFloat = 92
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -4472,6 +4473,10 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
         }
         operatorPopup.selectItem(withTitle: selectedOperator.title)
         selectedOperatorTitle = selectedOperator.title
+        let sizingCell = NSPopUpButtonCell(textCell: selectedOperator.title, pullsDown: false)
+        sizingCell.controlSize = operatorPopup.controlSize
+        sizingCell.font = operatorPopup.font
+        preferredOperatorWidth = ceil(sizingCell.cellSize.width)
 
         let values = rule.values
         firstValueField.stringValue = values.indices.contains(0) ? values[0] : ""
@@ -4497,9 +4502,14 @@ fileprivate final class LightweightFilterRuleRowView: NSView, NSTextFieldDelegat
 
         checkbox.frame = NSRect(x: 0, y: y + 2, width: 20, height: 18)
         columnPopup.frame = NSRect(x: checkbox.frame.maxX + gap, y: y, width: 260, height: controlHeight)
-        operatorPopup.frame = NSRect(x: columnPopup.frame.maxX + gap, y: y, width: 92, height: controlHeight)
         addButton.frame = NSRect(x: bounds.width - buttonSize, y: y, width: buttonSize, height: controlHeight)
         removeButton.frame = NSRect(x: addButton.frame.minX - buttonSize - 3, y: y, width: buttonSize, height: controlHeight)
+
+        let operatorX = columnPopup.frame.maxX + gap
+        let minimumValueWidth: CGFloat = firstValueField.isHidden ? 0 : (secondValueField.isHidden ? 80 : 164)
+        let maximumOperatorWidth = max(92, removeButton.frame.minX - operatorX - gap * 2 - minimumValueWidth)
+        let operatorWidth = min(max(92, preferredOperatorWidth), maximumOperatorWidth)
+        operatorPopup.frame = NSRect(x: operatorX, y: y, width: operatorWidth, height: controlHeight)
 
         let valueX = operatorPopup.frame.maxX + gap
         let valueWidth = max(80, removeButton.frame.minX - valueX - gap)

@@ -653,6 +653,7 @@ extension SPWindowController {
         actionButton.menu?.addItem(exportItem)
         actionButton.menu?.addItem(.separator())
         addLightweightSidebarAction(NSLocalizedString("Refresh Tables", comment: "refresh tables menu item"), #selector(refreshLightweightTables), to: actionButton.menu)
+        tablesListView.menu = actionButton.menu
         updateLightweightSidebarActionMenuState()
         lightweightSidebarButtonBar.addSubview(actionButton)
 
