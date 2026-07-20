@@ -494,16 +494,15 @@ final class SALightweightStructureViewController: NSViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            _ = connection.selectDatabase(database)
             let canLoadColumns = objectType == .table || objectType == .view
             let tableMetadata: (engine: String, encoding: String, collation: String) = canLoadColumns
                 ? self.loadTableMetadata(table: table, database: database, connection: connection)
                 : (engine: "", encoding: "", collation: "")
-            let encodingOptions = self.loadEncodingOptions(connection: connection)
-            let collationOptionsByEncoding = self.loadCollationOptions(connection: connection)
+            let encodingOptions = self.loadEncodingOptions(database: database, connection: connection)
+            let collationOptionsByEncoding = self.loadCollationOptions(database: database, connection: connection)
             let foreignKeyConstraints = objectType == .table ? self.loadForeignKeyConstraints(table: table, database: database, connection: connection) : []
             let fields = canLoadColumns ? self.loadFields(table: table, database: database, connection: connection) : []
-            let indexes = objectType == .table ? self.loadIndexes(table: table, connection: connection) : []
+            let indexes = objectType == .table ? self.loadIndexes(table: table, database: database, connection: connection) : []
 
             DispatchQueue.main.async {
                 guard self.loadToken == token else { return }
@@ -533,7 +532,7 @@ final class SALightweightStructureViewController: NSViewController {
     }
 
     private func loadFields(table: String, database: String, connection: SPMySQLConnection) -> [StructureRow] {
-        let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))")
+        let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))", assertingDatabase: database)
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -551,8 +550,8 @@ final class SALightweightStructureViewController: NSViewController {
         return loadedRows
     }
 
-    private func loadIndexes(table: String, connection: SPMySQLConnection) -> [[String: String]] {
-        let result = connection.queryString("SHOW INDEX FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))")
+    private func loadIndexes(table: String, database: String, connection: SPMySQLConnection) -> [[String: String]] {
+        let result = connection.queryString("SHOW INDEX FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))", assertingDatabase: database)
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -576,7 +575,7 @@ final class SALightweightStructureViewController: NSViewController {
 
     private func loadTableMetadata(table: String, database: String, connection: SPMySQLConnection) -> (engine: String, encoding: String, collation: String) {
         let query = "SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) WHERE Name = \(Self.sqlString(table, connection: connection))"
-        guard let result = connection.queryString(query) else { return ("", "", "") }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return ("", "", "") }
 
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -587,14 +586,14 @@ final class SALightweightStructureViewController: NSViewController {
         return (engine, Self.encodingName(from: collation), collation)
     }
 
-    private func loadEncodingOptions(connection: SPMySQLConnection) -> [EncodingOption] {
+    private func loadEncodingOptions(database: String, connection: SPMySQLConnection) -> [EncodingOption] {
         let queries = [
             "SELECT CHARACTER_SET_NAME, DESCRIPTION, MAXLEN FROM information_schema.character_sets ORDER BY character_set_name ASC",
             "SHOW CHARACTER SET"
         ]
 
         for query in queries {
-            guard let result = connection.queryString(query) else { continue }
+            guard let result = connection.queryString(query, assertingDatabase: database) else { continue }
 
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -617,14 +616,14 @@ final class SALightweightStructureViewController: NSViewController {
         return []
     }
 
-    private func loadCollationOptions(connection: SPMySQLConnection) -> [String: [String]] {
+    private func loadCollationOptions(database: String, connection: SPMySQLConnection) -> [String: [String]] {
         let queries = [
             "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.collations ORDER BY collation_name ASC",
             "SHOW COLLATION"
         ]
 
         for query in queries {
-            guard let result = connection.queryString(query) else { continue }
+            guard let result = connection.queryString(query, assertingDatabase: database) else { continue }
 
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -654,7 +653,7 @@ final class SALightweightStructureViewController: NSViewController {
               AND REFERENCED_TABLE_NAME IS NOT NULL
             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
             """
-        guard let result = connection.queryString(query) else { return [] }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return [] }
 
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -829,10 +828,11 @@ final class SALightweightStructureViewController: NSViewController {
             query = changeQuery
         }
         pendingAutoIncrementIndex = nil
+        let database = database
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
             DispatchQueue.main.async {
@@ -1625,14 +1625,16 @@ private extension SALightweightStructureViewController {
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "cancel button"))
         guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
+        let database = database
+        let tableReference = tableReference()
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
             var error: String?
 
             for constraint in fieldConstraints {
-                let relationQuery = "ALTER TABLE \(self.tableReference()) DROP FOREIGN KEY \(Self.backtickQuoted(constraint.name))"
-                connection.queryString(relationQuery)
+                let relationQuery = "ALTER TABLE \(tableReference) DROP FOREIGN KEY \(Self.backtickQuoted(constraint.name))"
+                connection.queryString(relationQuery, assertingDatabase: database)
                 if connection.queryErrored() {
                     error = String(format: NSLocalizedString("An error occurred while trying to delete the relation '%@'.\n\nMySQL said: %@", comment: "error deleting relation informative message"), constraint.name, connection.lastErrorMessage() ?? "")
                     break
@@ -1640,8 +1642,8 @@ private extension SALightweightStructureViewController {
             }
 
             if error == nil {
-                let query = "ALTER TABLE \(self.tableReference()) DROP \(Self.backtickQuoted(row.name))"
-                connection.queryString(query)
+                let query = "ALTER TABLE \(tableReference) DROP \(Self.backtickQuoted(row.name))"
+                connection.queryString(query, assertingDatabase: database)
                 if connection.queryErrored() {
                     error = String(format: NSLocalizedString("Couldn't delete field %@.\nMySQL said: %@", comment: "message of panel when field cannot be deleted"), row.name, connection.lastErrorMessage() ?? "")
                 }
@@ -1683,10 +1685,12 @@ private extension SALightweightStructureViewController {
         guard alert.runModalCenteredInKeyWindow() == .alertFirstButtonReturn else { return }
 
         let value = max(valueField.integerValue, 1)
+        let database = database
+        let tableReference = tableReference()
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString("ALTER TABLE \(self.tableReference()) AUTO_INCREMENT = \(value)")
+            connection.queryString("ALTER TABLE \(tableReference) AUTO_INCREMENT = \(value)", assertingDatabase: database)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
             DispatchQueue.main.async {
@@ -1705,13 +1709,15 @@ private extension SALightweightStructureViewController {
         guard let sourceIndex = sourceIndex(forDisplayedRow: selectedRow), let connection = connection else { return }
         let row = rows[sourceIndex]
         let fieldName = row.name
+        let database = database
+        let tableReference = tableReference()
 
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
             var message: String?
 
-            if let result = connection.queryString("SELECT \(Self.backtickQuoted(fieldName)) FROM \(self.tableReference()) PROCEDURE ANALYSE(0,8192)"), !connection.queryErrored() {
+            if let result = connection.queryString("SELECT \(Self.backtickQuoted(fieldName)) FROM \(tableReference) PROCEDURE ANALYSE(0,8192)", assertingDatabase: database), !connection.queryErrored() {
                 result.returnDataAsStrings = true
                 result.defaultRowReturnType = SPMySQLResultRowAsDictionary
                 if let analysis = result.getRowAsDictionary() as? [String: Any] {
@@ -1720,7 +1726,7 @@ private extension SALightweightStructureViewController {
             }
 
             if message?.isEmpty != false {
-                message = self.estimatedOptimizedFieldType(for: row, connection: connection)
+                message = self.estimatedOptimizedFieldType(for: row, database: database, tableReference: tableReference, connection: connection)
                     ?? NSLocalizedString("No optimized field type found.", comment: "no optimized field type found message")
             }
 
@@ -1731,12 +1737,12 @@ private extension SALightweightStructureViewController {
         }
     }
 
-    private func estimatedOptimizedFieldType(for row: StructureRow, connection: SPMySQLConnection) -> String? {
+    private func estimatedOptimizedFieldType(for row: StructureRow, database: String, tableReference: String, connection: SPMySQLConnection) -> String? {
         let fieldType = (row.values["type"] ?? "").uppercased()
         let fieldName = row.name
 
         if ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"].contains(fieldType) {
-            guard let stats = columnStats(for: fieldName, lengthFunction: nil, connection: connection),
+            guard let stats = columnStats(for: fieldName, lengthFunction: nil, database: database, tableReference: tableReference, connection: connection),
                   nonNullRows(in: stats),
                   let minimum = SPOptimizedFieldTypeEstimator.decimalNumber(fromStatValue: stats["min_value"]),
                   let maximum = SPOptimizedFieldTypeEstimator.decimalNumber(fromStatValue: stats["max_value"]) else { return nil }
@@ -1744,7 +1750,7 @@ private extension SALightweightStructureViewController {
         }
 
         if ["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"].contains(fieldType) {
-            guard let stats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", connection: connection),
+            guard let stats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", database: database, tableReference: tableReference, connection: connection),
                   nonNullRows(in: stats) else { return nil }
             let minLength = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["min_length"])
             let maxLength = max(UInt(1), SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["max_length"]))
@@ -1755,8 +1761,8 @@ private extension SALightweightStructureViewController {
         }
 
         if ["CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"].contains(fieldType) {
-            guard let stats = columnStats(for: fieldName, lengthFunction: "CHAR_LENGTH", connection: connection),
-                  let byteStats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", connection: connection),
+            guard let stats = columnStats(for: fieldName, lengthFunction: "CHAR_LENGTH", database: database, tableReference: tableReference, connection: connection),
+                  let byteStats = columnStats(for: fieldName, lengthFunction: "OCTET_LENGTH", database: database, tableReference: tableReference, connection: connection),
                   nonNullRows(in: stats) else { return nil }
             let minLength = SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["min_length"])
             let maxLength = max(UInt(1), SPOptimizedFieldTypeEstimator.unsignedIntegerValue(fromStatValue: stats["max_length"]))
@@ -1773,16 +1779,16 @@ private extension SALightweightStructureViewController {
         return nil
     }
 
-    private func columnStats(for fieldName: String, lengthFunction: String?, connection: SPMySQLConnection) -> [String: Any]? {
+    private func columnStats(for fieldName: String, lengthFunction: String?, database: String, tableReference: String, connection: SPMySQLConnection) -> [String: Any]? {
         let quotedField = Self.backtickQuoted(fieldName)
         let query: String
         if let lengthFunction = lengthFunction {
             let expression = "\(lengthFunction)(\(quotedField))"
-            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(expression)) AS min_length, MAX(\(expression)) AS max_length FROM \(tableReference())"
+            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(expression)) AS min_length, MAX(\(expression)) AS max_length FROM \(tableReference)"
         } else {
-            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(quotedField)) AS min_value, MAX(\(quotedField)) AS max_value FROM \(tableReference())"
+            query = "SELECT COUNT(*) AS row_count, SUM(\(quotedField) IS NULL) AS null_count, MIN(\(quotedField)) AS min_value, MAX(\(quotedField)) AS max_value FROM \(tableReference)"
         }
-        guard let result = connection.queryString(query), !connection.queryErrored() else { return nil }
+        guard let result = connection.queryString(query, assertingDatabase: database), !connection.queryErrored() else { return nil }
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         return result.getRowAsDictionary() as? [String: Any]
@@ -1933,10 +1939,11 @@ private extension SALightweightStructureViewController {
     private func runIndexQuery(_ query: String, connection: SPMySQLConnection, errorTitle: String) {
         guard !query.isEmpty else { return }
 
+        let database = database
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
             DispatchQueue.main.async {
@@ -1972,10 +1979,11 @@ private extension SALightweightStructureViewController {
             ? "ALTER TABLE \(tableReference()) DROP PRIMARY KEY"
             : "ALTER TABLE \(tableReference()) DROP INDEX \(Self.backtickQuoted(indexName))"
 
+        let database = database
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             let errorID = connection.queryErrored() ? connection.lastErrorID() : 0
 
@@ -2019,13 +2027,14 @@ private extension SALightweightStructureViewController {
             ? "ALTER TABLE \(tableReference()) DROP PRIMARY KEY"
             : "ALTER TABLE \(tableReference()) DROP INDEX \(Self.backtickQuoted(indexName))"
 
+        let database = database
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(dropForeignKeyQuery)
+            connection.queryString(dropForeignKeyQuery, assertingDatabase: database)
             var error = connection.queryErrored() ? String(format: NSLocalizedString("An error occurred while trying to delete the relation '%@'.\n\nMySQL said: %@", comment: "error deleting relation informative message"), foreignKey.name, connection.lastErrorMessage() ?? "") : nil
             if error == nil {
-                connection.queryString(dropIndexQuery)
+                connection.queryString(dropIndexQuery, assertingDatabase: database)
                 error = connection.queryErrored() ? (connection.lastErrorMessage() ?? originalError) : nil
             }
 
@@ -2686,10 +2695,11 @@ extension SALightweightStructureViewController: NSTableViewDataSource, NSTableVi
             }
         }
 
+        let database = database
         isSaving = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
             DispatchQueue.main.async {

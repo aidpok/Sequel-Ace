@@ -7,6 +7,29 @@ import Cocoa
 import ObjectiveC
 
 private var lightweightPinnedTableNotificationAssociationKey: UInt8 = 0
+private var lightweightDatabaseSelectionCoordinatorAssociationKey: UInt8 = 0
+
+private final class SALightweightDatabaseSelectionCoordinator: NSObject {
+    let queue = DispatchQueue(label: "com.sequel-ace.lightweight-database-selection", qos: .userInitiated)
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    func beginSelection() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+
+        generation &+= 1
+        return generation
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        return generation == candidate
+    }
+}
 
 enum SALightweightSidebarRow {
     case group(String)
@@ -22,6 +45,19 @@ enum SALightweightSidebarRow {
 }
 
 extension SPWindowController {
+    private var lightweightDatabaseSelectionCoordinator: SALightweightDatabaseSelectionCoordinator {
+        if let coordinator = objc_getAssociatedObject(self, &lightweightDatabaseSelectionCoordinatorAssociationKey) as? SALightweightDatabaseSelectionCoordinator {
+            return coordinator
+        }
+
+        let coordinator = SALightweightDatabaseSelectionCoordinator()
+        objc_setAssociatedObject(self,
+                                 &lightweightDatabaseSelectionCoordinatorAssociationKey,
+                                 coordinator,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return coordinator
+    }
+
     func preferredLightweightViewModeFromPreferences() -> SAViewMode {
         let preferredValue = UserDefaults.standard.integer(forKey: SPDefaultViewMode)
         if preferredValue > 0 {
@@ -253,6 +289,13 @@ extension SPWindowController {
             let databases = activeConnection.databases() as? [String] ?? []
 
             DispatchQueue.main.async {
+                guard self.activeConnection === activeConnection else {
+                    self.databaseListIsLoading = false
+                    self.databaseListNeedsLoad = true
+                    self.requestLightweightDatabases(forceReload: true)
+                    return
+                }
+
                 self.databaseListNeedsLoad = false
                 self.databaseListIsLoading = false
                 self.lightweightDatabases = databases
@@ -460,7 +503,7 @@ extension SPWindowController {
             ? "SHOW TABLE STATUS FROM \(Self.backtickQuoted(database))"
             : "SHOW FULL TABLES FROM \(Self.backtickQuoted(database))"
 
-        if let result = connection.queryString(tableQuery) {
+        if let result = connection.queryString(tableQuery, assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -476,7 +519,7 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_name") {
+           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_name", assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -516,7 +559,7 @@ extension SPWindowController {
     func loadLightweightTableComments(for database: String, connection: SPMySQLConnection) -> [String: String] {
         var comments: [String: String] = [:]
 
-        guard let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database))") else { return comments }
+        guard let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database))", assertingDatabase: database) else { return comments }
 
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
@@ -733,14 +776,24 @@ extension SPWindowController {
         lightweightPinnedTables = []
         tablesListView.reloadData()
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak activeConnection] in
+        let selectionCoordinator = lightweightDatabaseSelectionCoordinator
+        let selectionGeneration = selectionCoordinator.beginSelection()
+
+        selectionCoordinator.queue.async { [weak self, weak activeConnection] in
             guard let self = self, let activeConnection = activeConnection else {
                 DispatchQueue.main.async {
                     completion?()
                 }
                 return
             }
-            _ = activeConnection.selectDatabase(database)
+
+            guard selectionCoordinator.isCurrent(selectionGeneration) else {
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
+
             let loadedObjects = self.loadLightweightTableObjects(for: database, connection: activeConnection)
             let pinnedTables = self.loadLightweightPinnedTables(for: database, connection: activeConnection)
             var uniqueTables: [String] = []
@@ -755,8 +808,19 @@ extension SPWindowController {
             }
             let tables = self.orderLightweightTables(uniqueTables, pinnedTables: pinnedTables)
 
+            guard selectionCoordinator.isCurrent(selectionGeneration) else {
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
+
+            _ = activeConnection.selectDatabase(database)
+
             DispatchQueue.main.async {
-                guard self.selectedDatabase == database, self.activeConnection === activeConnection else {
+                guard selectionCoordinator.isCurrent(selectionGeneration),
+                      self.selectedDatabase == database,
+                      self.activeConnection === activeConnection else {
                     completion?()
                     return
                 }

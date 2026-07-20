@@ -48,8 +48,8 @@ private final class MCPDesiredState {
     var port: UInt16 = 0
 }
 
-// Stable id attached to each open document for its lifetime, so the agent can
-// target a specific tab. (processID is not reliably populated.)
+// Stable id attached to each loaded legacy document for its lifetime, so the
+// agent can target a specific tab. Lightweight tabs use SPWindowController.uniqueID.
 private var mcpDocIDKey: UInt8 = 0
 
 private func mcpDocumentID(_ doc: SPDatabaseDocument?) -> String {
@@ -215,34 +215,53 @@ extension SPAppController: SPMCPDataSource {
         var info: MCPResolvedConnection?
         let resolve = {
             let wcs = self.tabManager.windowControllers
-            var doc: SPDatabaseDocument?
             if !connID.isEmpty {
                 for wc in wcs {
-                    guard let loadedDocument = wc.loadedDatabaseDocumentIfAvailable() else { continue }
-                    if mcpDocumentID(loadedDocument) == connID {
-                        doc = loadedDocument
+                    guard let candidate = self.mcpResolvedConnection(for: wc) else { continue }
+                    if candidate.id == connID {
+                        info = candidate
                         break
                     }
                 }
             } else {
-                doc = self.frontDocument()
-                // frontDocument is nil when the app is not frontmost (it relies on the
-                // active window), so fall back to the first connected tab.
-                if !(doc != nil && doc!.isProcessing == false && (doc!.getConnection()?.isConnected() ?? false)) {
-                    doc = nil
-                    for wc in wcs {
-                        guard let d = wc.loadedDatabaseDocumentIfAvailable() else { continue }
-                        if !d.isProcessing, let c = d.getConnection(), c.isConnected() { doc = d; break }
-                    }
+                // Prefer the selected tab even while Sequel Ace is not frontmost.
+                // If it is not connected, fall back to the first connected tab.
+                if let activeWindowController = self.tabManager.activeWindowController {
+                    info = self.mcpResolvedConnection(for: activeWindowController)
                 }
-            }
-            if let doc = doc, !doc.isProcessing, let c = doc.getConnection(), c.isConnected() {
-                info = MCPResolvedConnection(conn: c, id: mcpDocumentID(doc),
-                                             database: doc.database() ?? "", host: doc.host() ?? "")
+                if info == nil {
+                    info = wcs.lazy.compactMap { self.mcpResolvedConnection(for: $0) }.first
+                }
             }
         }
         if Thread.isMainThread { resolve() } else { DispatchQueue.main.sync(execute: resolve) }
         return info
+    }
+
+    // Resolves either the existing DBView-backed document or a lightweight tab.
+    // Legacy documents keep their historical MCP id; lightweight tabs use the
+    // window controller's lifetime-stable UUID so duplicate connections remain distinct.
+    private func mcpResolvedConnection(for wc: SPWindowController) -> MCPResolvedConnection? {
+        if let doc = wc.loadedDatabaseDocumentIfAvailable() {
+            guard !doc.isProcessing, let conn = doc.getConnection(), conn.isConnected() else { return nil }
+            return MCPResolvedConnection(conn: conn,
+                                         id: mcpDocumentID(doc),
+                                         database: doc.database() ?? "",
+                                         host: doc.host() ?? "")
+        }
+
+        guard let conn = wc.activeConnection, conn.isConnected() else { return nil }
+        let database = wc.selectedDatabase ?? wc.activeConnectionInfo?.database ?? conn.database ?? ""
+        let host: String
+        if wc.activeConnectionInfo?.type == .socket {
+            host = "localhost"
+        } else {
+            host = wc.activeConnectionInfo?.host ?? conn.host ?? ""
+        }
+        return MCPResolvedConnection(conn: conn,
+                                     id: wc.uniqueID.uuidString,
+                                     database: database,
+                                     host: host)
     }
 
     private func mcpNoConnectionError() -> [String: Any] {
@@ -261,20 +280,27 @@ extension SPAppController: SPMCPDataSource {
     public func mcpListConnections() -> [[String: Any]] {
         var result: [[String: Any]] = []
         let collect = {
-            let front = self.frontDocument()
+            let activeWindowController = self.tabManager.activeWindowController
             for wc in self.tabManager.windowControllers {
-                guard let doc = wc.loadedDatabaseDocumentIfAvailable() else { continue }
-                let c = doc.isProcessing ? nil : doc.getConnection()
-                guard let conn = c, conn.isConnected() else { continue }
+                guard let resolved = self.mcpResolvedConnection(for: wc) else { continue }
                 var info: [String: Any] = [:]
-                info["id"] = mcpDocumentID(doc)
-                let name = doc.name()
-                info["name"] = name.isEmpty ? doc.host() : name
-                let host = doc.host()
-                if !host.isEmpty { info["host"] = host }
-                if let db = doc.database(), !db.isEmpty { info["database"] = db }
-                info["active"] = (front != nil && doc == front)
-                if let favorite = self.mcpFavoriteInfo(for: doc) {
+                info["id"] = resolved.id
+                info["active"] = (wc === activeWindowController)
+
+                let favoriteID: String?
+                if let doc = wc.loadedDatabaseDocumentIfAvailable() {
+                    let name = doc.name()
+                    info["name"] = name.isEmpty ? resolved.host : name
+                    favoriteID = doc.connectionController().connectionKeychainID
+                } else {
+                    let name = wc.activeConnectionInfo?.name ?? ""
+                    info["name"] = name.isEmpty ? resolved.host : name
+                    favoriteID = wc.activeConnectionInfo?.connectionKeychainID
+                }
+
+                if !resolved.host.isEmpty { info["host"] = resolved.host }
+                if !resolved.database.isEmpty { info["database"] = resolved.database }
+                if let favorite = self.mcpFavoriteInfo(forKeychainID: favoriteID) {
                     info["favoriteName"] = favorite.name
                     info["favoritePath"] = favorite.path
                 }
@@ -287,10 +313,10 @@ extension SPAppController: SPMCPDataSource {
 
     // MARK: - SPMCPDataSource: favorite metadata
 
-    // The favorite a document connected from, or nil for ad-hoc/quick connections
+    // The favorite a connection originated from, or nil for ad-hoc/quick connections
     // and for favorites that are no longer in the tree. Must run on the main thread.
-    private func mcpFavoriteInfo(for doc: SPDatabaseDocument) -> (name: String, path: String)? {
-        guard let favoriteID = doc.connectionController().connectionKeychainID, !favoriteID.isEmpty else {
+    private func mcpFavoriteInfo(forKeychainID favoriteID: String?) -> (name: String, path: String)? {
+        guard let favoriteID = favoriteID, !favoriteID.isEmpty, favoriteID != "_" else {
             return nil
         }
 

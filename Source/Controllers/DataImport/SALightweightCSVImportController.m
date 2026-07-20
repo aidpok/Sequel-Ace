@@ -721,6 +721,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 {
 	self.importRunning = YES;
 	self.importCancelled = NO;
+	NSString *importDatabaseName = [self.databaseName ?: self.connection.database copy];
 
 	__weak SALightweightCSVImportController *weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -734,9 +735,10 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 
 		@autoreleasepool {
 			BOOL completed = [strongSelf _performStreamingImportRowsImported:&rowsImported
-																	  errors:rowErrors
-																	progress:progress
-																	   error:&fatalError];
+														  errors:rowErrors
+														progress:progress
+												 expectedDatabase:importDatabaseName
+														   error:&fatalError];
 			cancelled = (!completed && !fatalError) || strongSelf.importCancelled;
 		}
 
@@ -751,6 +753,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 - (BOOL)_performStreamingImportRowsImported:(NSInteger *)rowsImported
 									 errors:(NSMutableArray<NSString *> *)errors
 								   progress:(SALightweightCSVImportProgress)progress
+							expectedDatabase:(NSString *)expectedDatabase
 									  error:(NSError **)error
 {
 	if (![self _hasAcceptedFieldMappingState]) {
@@ -758,7 +761,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 		return NO;
 	}
 
-	if (![self _selectTargetDatabaseWithError:error]) {
+	if (![self _selectTargetDatabase:expectedDatabase error:error]) {
 		return NO;
 	}
 
@@ -834,10 +837,11 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 
 				if (self.importMethodIsUpdate) {
 					BOOL imported = [self _executeUpdateRow:csvRowArray
-												  rowNumber:sourceDataRowNumber
-										 insertBaseString:insertBaseString
+											  rowNumber:sourceDataRowNumber
+									 insertBaseString:insertBaseString
 								 insertRemainingBaseString:insertRemainingBaseString
-													 errors:errors];
+									 expectedDatabase:expectedDatabase
+											 errors:errors];
 					if (imported) (*rowsImported)++;
 					[self _publishImportProgress:progress rowsImported:*rowsImported bytesRead:[csvFileHandle realDataReadLength] totalBytes:fileTotalLength];
 				}
@@ -845,9 +849,10 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 					[insertRows addObject:csvRowArray];
 					if ([insertRows count] >= SALightweightCSVImportRowsPerQuery) {
 						NSInteger imported = [self _executeInsertRows:insertRows
-													   firstRowNumber:(sourceDataRowNumber - (NSInteger)[insertRows count] + 1)
-													 insertBaseString:insertBaseString
-															  errors:errors];
+												   firstRowNumber:(sourceDataRowNumber - (NSInteger)[insertRows count] + 1)
+												 insertBaseString:insertBaseString
+												expectedDatabase:expectedDatabase
+														  errors:errors];
 						*rowsImported += imported;
 						[insertRows removeAllObjects];
 						[self _publishImportProgress:progress rowsImported:*rowsImported bytesRead:[csvFileHandle realDataReadLength] totalBytes:fileTotalLength];
@@ -873,6 +878,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 		NSInteger imported = [self _executeInsertRows:insertRows
 									   firstRowNumber:(sourceDataRowNumber - (NSInteger)[insertRows count] + 1)
 									 insertBaseString:insertBaseString
+									expectedDatabase:expectedDatabase
 											  errors:errors];
 		*rowsImported += imported;
 		[self _publishImportProgress:progress rowsImported:*rowsImported bytesRead:[csvFileHandle realDataReadLength] totalBytes:fileTotalLength];
@@ -1006,6 +1012,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 - (NSInteger)_executeInsertRows:(NSArray<NSArray<id> *> *)rows
 				 firstRowNumber:(NSInteger)firstRowNumber
 			   insertBaseString:(NSString *)insertBaseString
+			  expectedDatabase:(NSString *)expectedDatabase
 						  errors:(NSMutableArray<NSString *> *)errors
 {
 	NSInteger importedRows = 0;
@@ -1025,13 +1032,13 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 		}
 
 		NSString *queryToRun = [self _queryByAppendingImportTailIfNeeded:query];
-		[self.connection queryString:queryToRun];
+		[self.connection queryString:queryToRun assertingDatabase:expectedDatabase];
 
 		if ([self.connection queryErrored]) {
 			for (NSUInteger i = 0; i < rowsThisQuery && !self.importCancelled; i++) {
 				NSMutableString *singleQuery = [NSMutableString stringWithString:insertBaseString];
 				[singleQuery appendString:[self mappedValueStringForRowArray:[rows objectAtIndex:(rowIndex + i)]]];
-				[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:singleQuery]];
+				[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:singleQuery] assertingDatabase:expectedDatabase];
 
 				if ([self.connection queryErrored]) {
 					[errors addObject:[NSString stringWithFormat:NSLocalizedString(@"[ERROR in row %ld] %@", @"lightweight CSV row import error"), (long)(firstRowNumber + (NSInteger)rowIndex + (NSInteger)i), [self.connection lastErrorMessage] ?: @""]];
@@ -1055,11 +1062,12 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 				rowNumber:(NSInteger)rowNumber
 		  insertBaseString:(NSString *)insertBaseString
  insertRemainingBaseString:(NSString *)insertRemainingBaseString
+		 expectedDatabase:(NSString *)expectedDatabase
 					errors:(NSMutableArray<NSString *> *)errors
 {
 	NSMutableString *query = [NSMutableString stringWithString:insertBaseString];
 	[query appendString:[self mappedUpdateSetStatementStringForRowArray:row]];
-	[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:query]];
+	[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:query] assertingDatabase:expectedDatabase];
 
 	if ([self.connection queryErrored]) {
 		[errors addObject:[NSString stringWithFormat:NSLocalizedString(@"[ERROR in row %ld] %@", @"lightweight CSV row import error"), (long)rowNumber, [self.connection lastErrorMessage] ?: @""]];
@@ -1069,7 +1077,7 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 	if (self.insertRemainingRowsAfterUpdate && ![self.connection rowsAffectedByLastQuery]) {
 		NSMutableString *insertRemainingQuery = [NSMutableString stringWithString:insertRemainingBaseString ?: @""];
 		[insertRemainingQuery appendString:[self mappedValueStringForRowArray:row]];
-		[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:insertRemainingQuery]];
+		[self.connection queryString:[self _queryByAppendingImportTailIfNeeded:insertRemainingQuery] assertingDatabase:expectedDatabase];
 
 		if ([self.connection queryErrored]) {
 			[errors addObject:[NSString stringWithFormat:NSLocalizedString(@"[ERROR in row %ld] %@", @"lightweight CSV row import error"), (long)rowNumber, [self.connection lastErrorMessage] ?: @""]];
@@ -1298,7 +1306,12 @@ static NSUInteger const SALightweightCSVImportMaxQueryLength = 250000;
 
 - (BOOL)_selectTargetDatabaseWithError:(NSError **)error
 {
-	NSString *databaseName = self.databaseName ?: self.connection.database;
+	return [self _selectTargetDatabase:self.databaseName ?: self.connection.database error:error];
+}
+
+- (BOOL)_selectTargetDatabase:(NSString *)expectedDatabase error:(NSError **)error
+{
+	NSString *databaseName = expectedDatabase;
 	if (![databaseName length]) {
 		[self.class _assignError:error code:SALightweightCSVImportControllerErrorMissingConnection message:NSLocalizedString(@"Select a database before starting a lightweight CSV import.", @"lightweight CSV import missing database error")];
 		return NO;

@@ -347,9 +347,9 @@ enum SALightweightTableInfoLoader {
                                               createSyntax: createSyntax,
                                               objectType: tableType,
                                               values: formValues(from: tableStatus),
-                                              engineOptions: storageEngineOptions(connection: connection),
-                                              encodingOptions: encodingOptions(connection: connection),
-                                              collationOptions: selectedEncoding.map { collationOptions(for: $0, connection: connection) } ?? [],
+                                              engineOptions: storageEngineOptions(database: database, connection: connection),
+                                              encodingOptions: encodingOptions(database: database, connection: connection),
+                                              collationOptions: selectedEncoding.map { collationOptions(for: $0, database: database, connection: connection) } ?? [],
                                               selectedEncodingName: selectedEncoding,
                                               canEdit: canEdit,
                                               hasAutoIncrement: displayString(tableStatus["Auto_increment"]) != nil)
@@ -361,7 +361,7 @@ enum SALightweightTableInfoLoader {
             FROM information_schema.VIEWS \
             WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) AND TABLE_NAME = \(sqlString(table, connection: connection))
             """
-        guard let result = connection.queryString(query) else { return }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let viewStatus = result.getRowAsDictionary() as? [String: Any], !viewStatus.isEmpty else { return }
@@ -380,7 +380,7 @@ enum SALightweightTableInfoLoader {
             FROM information_schema.VIEWS \
             WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) AND TABLE_NAME = \(sqlString(table, connection: connection))
             """
-        guard let result = connection.queryString(query) else { return [] }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let viewStatus = result.getRowAsDictionary() as? [String: Any], !viewStatus.isEmpty else { return [] }
@@ -454,7 +454,7 @@ enum SALightweightTableInfoLoader {
               AND ROUTINE_NAME = \(sqlString(routine, connection: connection)) \
               AND ROUTINE_TYPE = \(sqlString(routineType, connection: connection))
             """
-        guard let result = connection.queryString(query) else { return nil }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return nil }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         return result.getRowAsDictionary() as? [String: Any]
@@ -578,8 +578,8 @@ enum SALightweightTableInfoLoader {
         }
     }
 
-    private static func storageEngineOptions(connection: SPMySQLConnection) -> [String] {
-        guard let result = connection.queryString("SHOW ENGINES") else { return [] }
+    private static func storageEngineOptions(database: String, connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW ENGINES", assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         var engines: [String] = []
@@ -596,14 +596,14 @@ enum SALightweightTableInfoLoader {
         return engines.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
-    private static func encodingOptions(connection: SPMySQLConnection) -> [SALightweightTableInfoEncodingOption] {
+    private static func encodingOptions(database: String, connection: SPMySQLConnection) -> [SALightweightTableInfoEncodingOption] {
         let queries = [
             "SELECT CHARACTER_SET_NAME, DESCRIPTION FROM information_schema.character_sets ORDER BY character_set_name ASC",
             "SHOW CHARACTER SET"
         ]
 
         for query in queries {
-            guard let result = connection.queryString(query) else { continue }
+            guard let result = connection.queryString(query, assertingDatabase: database) else { continue }
 
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             var encodings: [SALightweightTableInfoEncodingOption] = []
@@ -623,17 +623,17 @@ enum SALightweightTableInfoLoader {
         return []
     }
 
-    static func collationOptions(for encoding: String, connection: SPMySQLConnection) -> [String] {
-        var collations = collationOptionsFromShowCollation(for: encoding, connection: connection)
+    static func collationOptions(for encoding: String, database: String, connection: SPMySQLConnection) -> [String] {
+        var collations = collationOptionsFromShowCollation(for: encoding, database: database, connection: connection)
         if collations.isEmpty, let alias = utf8Alias(for: encoding) {
-            collations = collationOptionsFromShowCollation(for: alias, connection: connection)
+            collations = collationOptionsFromShowCollation(for: alias, database: database, connection: connection)
         }
 
         return collations
     }
 
-    private static func collationOptionsFromShowCollation(for encoding: String, connection: SPMySQLConnection) -> [String] {
-        guard let result = connection.queryString("SHOW COLLATION WHERE Charset = \(sqlString(encoding, connection: connection))") else { return [] }
+    private static func collationOptionsFromShowCollation(for encoding: String, database: String, connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW COLLATION WHERE Charset = \(sqlString(encoding, connection: connection))", assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         var collations: [String] = []
@@ -649,7 +649,7 @@ enum SALightweightTableInfoLoader {
 
     private static func tableStatusValues(for table: String, database: String, connection: SPMySQLConnection) -> [String: Any]? {
         let query = "SHOW TABLE STATUS FROM \(backtickQuoted(database)) WHERE Name = \(sqlString(table, connection: connection))"
-        guard let result = connection.queryString(query) else { return nil }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return nil }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard var tableStatus = result.getRowAsDictionary() as? [String: Any], !tableStatus.isEmpty else { return nil }
@@ -674,7 +674,7 @@ enum SALightweightTableInfoLoader {
 
     private static func accurateRowCount(for table: String, database: String, connection: SPMySQLConnection) -> Int? {
         let query = "SELECT COUNT(1) FROM \(backtickQuoted(database)).\(backtickQuoted(table))"
-        guard let result = connection.queryString(query),
+        guard let result = connection.queryString(query, assertingDatabase: database),
               let row = result.getRowAsArray(),
               let value = row.first else { return nil }
 
@@ -709,7 +709,7 @@ enum SALightweightTableInfoLoader {
             SELECT TABLE_TYPE FROM information_schema.TABLES \
             WHERE TABLE_SCHEMA = \(sqlString(database, connection: connection)) AND TABLE_NAME = \(sqlString(table, connection: connection))
             """
-        guard let result = connection.queryString(query) else { return .table }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return .table }
 
         result.defaultRowReturnType = SPMySQLResultRowAsArray
         guard
@@ -722,7 +722,7 @@ enum SALightweightTableInfoLoader {
 
     static func createSyntax(for table: String, database: String, connection: SPMySQLConnection) -> String? {
         let query = "SHOW CREATE TABLE \(backtickQuoted(database)).\(backtickQuoted(table))"
-        guard let result = connection.queryString(query) else { return nil }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return nil }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let row = result.getRowAsDictionary() as? [String: Any] else { return nil }
@@ -747,7 +747,7 @@ enum SALightweightTableInfoLoader {
         guard let routineType = routineTypeKeyword(for: objectType) else { return nil }
 
         let query = "SHOW CREATE \(routineType) \(backtickQuoted(database)).\(backtickQuoted(routine))"
-        guard let result = connection.queryString(query) else { return nil }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return nil }
 
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let row = result.getRowAsDictionary() as? [String: Any] else { return nil }
@@ -1175,6 +1175,53 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
         }
     }
 
+    func printableSnapshot() -> NSAttributedString? {
+        guard let snapshot = currentSnapshot, !snapshot.rows.isEmpty else { return nil }
+
+        let bodyFont = UserDefaults.getFont()
+        let headingFont = NSFont.boldSystemFont(ofSize: bodyFont.pointSize)
+        let textColor = NSColor.black
+        let output = NSMutableAttributedString(string: "")
+
+        for row in snapshot.rows {
+            if row.isGroup {
+                if output.length > 0 {
+                    output.append(NSAttributedString(string: "\n"))
+                }
+                output.append(NSAttributedString(string: "\(row.label)\n", attributes: [
+                    .font: headingFont,
+                    .foregroundColor: textColor
+                ]))
+                continue
+            }
+
+            output.append(NSAttributedString(string: row.label, attributes: [
+                .font: headingFont,
+                .foregroundColor: textColor
+            ]))
+            if !row.value.isEmpty {
+                output.append(NSAttributedString(string: ": \(row.value)", attributes: [
+                    .font: bodyFont,
+                    .foregroundColor: textColor
+                ]))
+            }
+            output.append(NSAttributedString(string: "\n"))
+        }
+
+        if let createSyntax = snapshot.createSyntax?.trimmingCharacters(in: .whitespacesAndNewlines), !createSyntax.isEmpty {
+            output.append(NSAttributedString(string: "\n\(NSLocalizedString("Create syntax:", comment: "table info create syntax label"))\n", attributes: [
+                .font: headingFont,
+                .foregroundColor: textColor
+            ]))
+            output.append(NSAttributedString(string: createSyntax, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular),
+                .foregroundColor: textColor
+            ]))
+        }
+
+        return output
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         return rows.count
     }
@@ -1463,11 +1510,12 @@ final class SALightweightTableInfoViewController: NSViewController, NSTableViewD
                                           useQueryWarning: Bool,
                                           restoreHandler: (() -> Void)?) {
         guard let connection = connection else { return }
+        let database = database
 
         let executeChange = { [weak self] in
             guard let self = self else { return }
 
-            _ = connection.queryString(query)
+            _ = connection.queryString(query, assertingDatabase: database)
 
             if connection.queryErrored() {
                 restoreHandler?()

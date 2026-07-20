@@ -891,7 +891,10 @@ private final class SALightweightCreateSyntaxWindowController: NSWindowControlle
         defer { try? resultHandle.close() }
 
         let writeAsCSV = params.count == 2 && params[1] == "csv"
-        guard let result = connection.streamingQueryString(query) else {
+        guard let result = connection.queryString(query,
+                                                  usingEncoding: connection.stringEncoding(),
+                                                  with: SPMySQLResultAsFastStreamingResult,
+                                                  assertingDatabaseContext: selectedDatabase) as? SPMySQLResult else {
             status = "1"
             return
         }
@@ -2506,7 +2509,7 @@ private final class SALightweightCreateSyntaxWindowController: NSWindowControlle
     func lightweightLegacyFilterColumns(for table: String, database: String) -> NSArray {
         guard let activeConnection = activeConnection else { return [] }
 
-        guard let result = activeConnection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))") else { return [] }
+        guard let result = activeConnection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))", assertingDatabase: database) else { return [] }
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -2976,7 +2979,7 @@ private final class SALightweightCreateSyntaxWindowController: NSWindowControlle
         let objectType = lightweightTableTypes[table] ?? .table
         let keyword = lightweightCreateSyntaxKeyword(for: objectType)
         let query = "SHOW CREATE \(keyword) \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(table))"
-        guard let result = activeConnection.queryString(query) else {
+        guard let result = activeConnection.queryString(query, assertingDatabase: selectedDatabase) else {
             if showErrors {
                 showLightweightCreateSyntaxError(NSLocalizedString("Couldn't get create syntax.", comment: "message of panel when table information cannot be retrieved"))
             }
@@ -3255,7 +3258,7 @@ private final class SALightweightCreateSyntaxWindowController: NSWindowControlle
             let tableReference = selectedTables
                 .map { "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted($0))" }
                 .joined(separator: ", ")
-            guard let result = activeConnection.queryString("\(action.queryKeyword) \(tableReference)") else {
+            guard let result = activeConnection.queryString("\(action.queryKeyword) \(tableReference)", assertingDatabase: selectedDatabase) else {
                 DispatchQueue.main.async {
                     self.showLightweightTableMaintenanceQueryError(action, tables: selectedTables, mysqlError: activeConnection.lastErrorMessage() ?? "")
                 }

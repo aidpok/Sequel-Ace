@@ -996,7 +996,6 @@ private extension SALightweightContentViewController {
                 return
             }
 
-            _ = connection.selectDatabase(database)
             let tableObjectType = self.loadTableObjectType(database: database, table: table, connection: connection)
             let freshColumnInfo = cachedColumnInfo ?? self.loadColumnInfo(database: database, table: table, connection: connection)
             guard !freshColumnInfo.isEmpty else {
@@ -1150,7 +1149,7 @@ private extension SALightweightContentViewController {
         let offset = state.limitResults ? state.pageIndex * state.pageSize : 0
         let limit = state.limitResults ? state.pageSize + 1 : state.pageSize
         let query = contentQuery(offset: offset, limit: limit, columnInfo: columnInfo, state: state)
-        let result = connection.streamingQueryString(query)
+        let result = connection.streamingQueryString(query, assertingDatabase: state.database)
         result?.defaultRowReturnType = SPMySQLResultRowAsArray
 
         let fieldNames = result?.fieldNames() as? [String] ?? []
@@ -1369,7 +1368,10 @@ private extension SALightweightContentViewController {
     private func loadTableObjectType(database: String, table: String, connection: SPMySQLConnection) -> TableObjectType {
         guard let quotedTable = connection.escapeAndQuoteString(table) else { return .unknown }
 
-        let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database)) LIKE \(quotedTable)")
+        let result = connection.queryString(
+            "SHOW FULL TABLES FROM \(Self.backtickQuoted(database)) LIKE \(quotedTable)",
+            assertingDatabase: database
+        )
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -1388,7 +1390,10 @@ private extension SALightweightContentViewController {
     private func rowCount(state: AppliedQueryState, connection: SPMySQLConnection) -> (count: Int, isEstimate: Bool)? {
         if state.filterSource.whereClause == nil,
            let tableName = connection.escapeAndQuoteString(state.table),
-           let result = connection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(state.database)) LIKE \(tableName)") {
+           let result = connection.queryString(
+               "SHOW TABLE STATUS FROM \(Self.backtickQuoted(state.database)) LIKE \(tableName)",
+               assertingDatabase: state.database
+           ) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -1415,7 +1420,7 @@ private extension SALightweightContentViewController {
             query += " WHERE \(whereClause)"
         }
 
-        guard let result = connection.queryString(query),
+        guard let result = connection.queryString(query, assertingDatabase: state.database),
               let row = result.getRowAsArray(),
               let value = row.first else { return nil }
 
@@ -1486,7 +1491,10 @@ private extension SALightweightContentViewController {
     }
 
     private func loadColumnInfo(database: String, table: String, connection: SPMySQLConnection) -> [ColumnInfo] {
-        let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))")
+        let result = connection.queryString(
+            "SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))",
+            assertingDatabase: database
+        )
         result?.returnDataAsStrings = true
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -1792,7 +1800,8 @@ private extension SALightweightContentViewController {
             return
         }
 
-        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let selectedDatabase = database
+        let tableReference = "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(table))"
         let selectedColumns = columnInfo.map { Self.backtickQuoted($0.name) }.joined(separator: ", ")
         let query = "SELECT \(selectedColumns) FROM \(tableReference) WHERE \(whereClause) LIMIT 1"
 
@@ -1803,8 +1812,7 @@ private extension SALightweightContentViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            _ = connection.selectDatabase(self.database)
-            let result = connection.queryString(query)
+            let result = connection.queryString(query, assertingDatabase: selectedDatabase)
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             let hydratedRow = result?.getRowAsArray()?.map { Self.contentValue(for: $0) }
@@ -1916,10 +1924,10 @@ private extension SALightweightContentViewController {
                 UserDefaults.standard.set(resetAutoIncrement, forKey: SPResetAutoIncrementAfterDeletionOfAllRows)
             }) { [database, table] connection in
                 let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
-                _ = connection.queryString("DELETE FROM \(tableReference)")
+                _ = connection.queryString("DELETE FROM \(tableReference)", assertingDatabase: database)
                 let deletedRows = connection.queryErrored() ? 0 : connection.rowsAffectedByLastQuery()
                 if resetAutoIncrement, !connection.queryErrored() {
-                    _ = connection.queryString("ALTER TABLE \(tableReference) AUTO_INCREMENT = 1")
+                    _ = connection.queryString("ALTER TABLE \(tableReference) AUTO_INCREMENT = 1", assertingDatabase: database)
                 }
                 return MutationExecutionResult(affectedRows: deletedRows, expectedAffectedRows: expectedAffectedRows)
             }
@@ -1934,7 +1942,7 @@ private extension SALightweightContentViewController {
                 guard let whereClause = Self.rowIdentityWhereClause(for: row.originalValues, columnInfo: columnInfo, connection: connection) else { continue }
                 let limit = columnInfo.contains { $0.isPrimary } ? "" : " LIMIT 1"
                 let query = "DELETE FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table)) WHERE \(whereClause)\(limit)"
-                _ = connection.queryString(query)
+                _ = connection.queryString(query, assertingDatabase: database)
                 if connection.queryErrored() { break }
                 affectedRows += connection.rowsAffectedByLastQuery()
             }
@@ -2045,7 +2053,6 @@ private extension SALightweightContentViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            _ = connection.selectDatabase(self.database)
             let mutationResult = mutation(connection)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
 
@@ -3886,6 +3893,9 @@ private extension SALightweightContentViewController {
 
         deferredFieldEditorRequestID += 1
         let requestID = deferredFieldEditorRequestID
+        let selectedDatabase = database
+        let selectedTable = table
+        let selectedColumnName = columnInfo[columnIndex].name
         isLoading = true
         updateControls()
         statusLabel.stringValue = NSLocalizedString("Loading cell...", comment: "lightweight content deferred cell loading")
@@ -3893,9 +3903,8 @@ private extension SALightweightContentViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            _ = connection.selectDatabase(self.database)
-            let query = "SELECT \(Self.backtickQuoted(self.columnInfo[columnIndex].name)) FROM \(Self.backtickQuoted(self.database)).\(Self.backtickQuoted(self.table)) WHERE \(whereClause) LIMIT 1"
-            let result = connection.queryString(query)
+            let query = "SELECT \(Self.backtickQuoted(selectedColumnName)) FROM \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(selectedTable)) WHERE \(whereClause) LIMIT 1"
+            let result = connection.queryString(query, assertingDatabase: selectedDatabase)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             result?.defaultRowReturnType = SPMySQLResultRowAsArray
             let value: Any? = result?.getRowAsArray()?.first ?? nil
@@ -4042,7 +4051,8 @@ private extension SALightweightContentViewController {
             insertValues.append(sqlValue)
         }
 
-        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let selectedDatabase = database
+        let tableReference = "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(table))"
         let insertQuery: String
         if insertColumns.isEmpty {
             insertQuery = "INSERT INTO \(tableReference) () VALUES ()"
@@ -4061,7 +4071,7 @@ private extension SALightweightContentViewController {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
-            connection.queryString(insertQuery)
+            connection.queryString(insertQuery, assertingDatabase: selectedDatabase)
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             let affectedRows = error == nil ? connection.rowsAffectedByLastQuery() : 0
             let lastInsertID = connection.lastInsertID()
@@ -4424,7 +4434,8 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             return
         }
 
-        let tableReference = "\(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
+        let selectedDatabase = database
+        let tableReference = "\(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(table))"
         let countQuery = "SELECT COUNT(1) FROM \(tableReference) WHERE \(whereClause)"
         let updateQuery = "UPDATE \(tableReference) SET \(Self.backtickQuoted(columnName)) = \(updatedValue.sql) WHERE \(whereClause)"
         let refreshQuery = "SELECT \(Self.backtickQuoted(columnName)) FROM \(tableReference) WHERE \(whereClause) LIMIT 1"
@@ -4441,12 +4452,15 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self = self, let connection = connection else { return }
 
-            _ = connection.selectDatabase(self.database)
-            let matchingRows = SALightweightResultGrid.matchingRowCount(for: countQuery, connection: connection)
+            let matchingRows = SALightweightResultGrid.matchingRowCount(
+                for: countQuery,
+                connection: connection,
+                assertingDatabase: selectedDatabase
+            )
             let error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             var affectedRows: UInt64 = 0
             if error == nil, matchingRows == 1 {
-                _ = connection.queryString(updateQuery)
+                _ = connection.queryString(updateQuery, assertingDatabase: selectedDatabase)
                 if !connection.queryErrored() {
                     affectedRows = connection.rowsAffectedByLastQuery()
                 }
@@ -4454,7 +4468,7 @@ extension SALightweightContentViewController: NSTableViewDataSource, NSTableView
             let updateError = connection.queryErrored() ? connection.lastErrorMessage() : error
             var refreshedValue: ContentValue?
             if updateError == nil, matchingRows == 1, affectedRows > 0, updatedValue.requiresReload, !reloadAfterEdit {
-                let result = connection.queryString(refreshQuery)
+                let result = connection.queryString(refreshQuery, assertingDatabase: selectedDatabase)
                 result?.defaultRowReturnType = SPMySQLResultRowAsArray
                 if !connection.queryErrored(),
                    let row = result?.getRowAsArray(),

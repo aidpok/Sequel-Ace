@@ -678,9 +678,16 @@ enum SALightweightResultGrid {
         NSLog("SA LightweightGridPerformance %@ %.2f ms %@", action, milliseconds, details)
     }
 
-    static func matchingRowCount(for query: String, connection: SPMySQLConnection) -> Int? {
-        guard let result = connection.queryString(query) else { return nil }
+    static func matchingRowCount(for query: String,
+                                 connection: SPMySQLConnection,
+                                 assertingDatabase database: String) -> Int? {
+        guard let result = connection.queryString(query, assertingDatabase: database),
+              !connection.queryErrored() else { return nil }
 
+        return matchingRowCount(from: result)
+    }
+
+    private static func matchingRowCount(from result: SPMySQLResult) -> Int? {
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsArray
 

@@ -109,6 +109,31 @@ struct SALightweightSQLImportResult {
     let errors: [String]
     let wasCancelled: Bool
     let readError: SALightweightSQLImportReadError?
+    let initialDatabaseContext: String?
+    let databaseContext: String?
+    let droppedSelectedDatabaseContext: String?
+    let metadataChangingQueries: [String]
+    let databaseContextChangingQueries: [String]
+
+    init(queriesPerformed: Int,
+         errors: [String],
+         wasCancelled: Bool,
+         readError: SALightweightSQLImportReadError?,
+         initialDatabaseContext: String? = nil,
+         databaseContext: String? = nil,
+         droppedSelectedDatabaseContext: String? = nil,
+         metadataChangingQueries: [String] = [],
+         databaseContextChangingQueries: [String] = []) {
+        self.queriesPerformed = queriesPerformed
+        self.errors = errors
+        self.wasCancelled = wasCancelled
+        self.readError = readError
+        self.initialDatabaseContext = initialDatabaseContext
+        self.databaseContext = databaseContext
+        self.droppedSelectedDatabaseContext = droppedSelectedDatabaseContext
+        self.metadataChangingQueries = metadataChangingQueries
+        self.databaseContextChangingQueries = databaseContextChangingQueries
+    }
 }
 
 @objcMembers
@@ -203,6 +228,7 @@ final class SALightweightQueryViewController: NSViewController {
     }
 
     private struct CellUpdate {
+        let database: String
         let countQuery: String
         let updateQuery: String
         let refreshQuery: String?
@@ -872,14 +898,14 @@ final class SALightweightQueryViewController: NSViewController {
         updateControls()
         queryExecutionWillBegin?()
         let queryExecutionDidEnd = queryExecutionDidEnd
-        let importDatabase = database
+        let importDatabaseContext: String? = database.isEmpty ? nil : database
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self, let connection else { return }
             let result = self.performStreamingSQLImport(from: url,
                                                         encoding: encoding,
                                                         connection: connection,
-                                                        database: importDatabase,
+                                                        databaseContext: importDatabaseContext,
                                                         sourceName: sourceName,
                                                         token: token,
                                                         ignoresErrorsByDefault: ignoresErrorsByDefault,
@@ -888,6 +914,12 @@ final class SALightweightQueryViewController: NSViewController {
 
             DispatchQueue.main.async {
                 guard self.queryToken == token else { return }
+                let handledDatabaseContextQueries = self.applyBatchDatabaseContext(result.databaseContext,
+                                                                                    initialDatabaseContext: result.initialDatabaseContext,
+                                                                                    droppedSelectedDatabaseContext: result.droppedSelectedDatabaseContext)
+                let completionMetadataQueries = handledDatabaseContextQueries && result.databaseContextChangingQueries.count == 1
+                    ? result.metadataChangingQueries.filter { !result.databaseContextChangingQueries.contains($0) }
+                    : result.metadataChangingQueries
                 self.hideQueryProgressPanel()
                 self.isRunning = false
                 self.isCancellationRequested = false
@@ -900,6 +932,9 @@ final class SALightweightQueryViewController: NSViewController {
                                      isError: !result.errors.isEmpty)
                 self.rebuildMenus()
                 self.updateControls()
+                if !completionMetadataQueries.isEmpty {
+                    self.notifyLightweightMetadataChanged(after: completionMetadataQueries)
+                }
                 queryExecutionDidEnd?()
                 completion(result)
             }
@@ -1730,7 +1765,8 @@ private extension SALightweightQueryViewController {
               let table,
               completionTablesListProxy.allTableAndViewNames.contains(table) else { return }
 
-        guard let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))") else { return }
+        guard let result = connection.queryString("SHOW FULL COLUMNS FROM \(Self.backtickQuoted(table)) FROM \(Self.backtickQuoted(database))",
+                                                  assertingDatabase: database) else { return }
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
 
@@ -1768,14 +1804,19 @@ private extension SALightweightQueryViewController {
     func performStreamingSQLImport(from url: URL,
                                    encoding: String.Encoding,
                                    connection: SPMySQLConnection,
-                                   database: String,
+                                   databaseContext initialDatabaseContext: String?,
                                    sourceName: String,
                                    token: UUID,
                                    ignoresErrorsByDefault: Bool,
                                    errorChoice: @escaping (String) -> SALightweightSQLImportErrorChoice,
                                    charsetErrorChoice: @escaping () -> Bool) -> SALightweightSQLImportResult {
         guard let fileHandle = SPFileHandle.fileHandleForReading(atPath: url.path) as? SPFileHandle else {
-            return SALightweightSQLImportResult(queriesPerformed: 0, errors: [], wasCancelled: false, readError: .cannotOpenFile)
+            return SALightweightSQLImportResult(queriesPerformed: 0,
+                                                errors: [],
+                                                wasCancelled: false,
+                                                readError: .cannotOpenFile,
+                                                initialDatabaseContext: initialDatabaseContext,
+                                                databaseContext: initialDatabaseContext)
         }
         defer {
             fileHandle.closeFile()
@@ -1793,25 +1834,36 @@ private extension SALightweightQueryViewController {
         var sqlModeToRestore: String?
         var readError: SALightweightSQLImportReadError?
         var serverStatus = SPMySQLServerStatusBits()
+        var databaseContext = initialDatabaseContext
+        var databaseNamesAreCaseSensitive = false
+        var databaseNameCaseSensitivityWasLoaded = false
+        var droppedSelectedDatabaseContext: String?
+        var metadataChangingQueries: [String] = []
+        var databaseContextChangingQueries: [String] = []
+        let serverVersion = Int(connection.serverMajorVersion()) * 10_000
+            + Int(connection.serverMinorVersion()) * 100
+            + Int(connection.serverReleaseVersion())
+        let serverIsMariaDB = connection.serverVersionString()?.range(of: "mariadb", options: .caseInsensitive) != nil
 
         defer {
             if let connectionEncodingToRestore {
-                _ = connection.queryString("SET NAMES '\(connectionEncodingToRestore)'")
+                _ = connection.queryString("SET NAMES '\(connectionEncodingToRestore)'",
+                                           assertingDatabaseContext: databaseContext)
             }
             if let sqlModeToRestore {
-                _ = connection.queryString("SET SQL_MODE=\(SALightweightQueryViewController.sqlSingleQuoted(sqlModeToRestore))")
+                _ = connection.queryString("SET SQL_MODE=\(SALightweightQueryViewController.sqlSingleQuoted(sqlModeToRestore))",
+                                           assertingDatabaseContext: databaseContext)
             }
             connection.retryQueriesOnConnectionFailure = oldRetryQueries
         }
 
-        _ = connection.selectDatabase(database)
-
         if let mysqlCharset = SALightweightQueryViewController.mysqlCharset(for: encoding), let currentEncoding = connection.encoding(), !currentEncoding.isEmpty {
             connectionEncodingToRestore = currentEncoding
-            _ = connection.queryString("SET NAMES '\(mysqlCharset)'")
+            _ = connection.queryString("SET NAMES '\(mysqlCharset)'",
+                                       assertingDatabaseContext: databaseContext)
         }
 
-        if let result = connection.queryString("SELECT @@sql_mode") {
+        if let result = connection.queryString("SELECT @@sql_mode", assertingDatabaseContext: databaseContext) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsArray
             if let row = result.getRowAsArray() as? [Any], let sqlMode = row.first as? String {
@@ -1919,6 +1971,14 @@ private extension SALightweightQueryViewController {
                                                 connection: connection,
                                                 parser: parser,
                                                 serverStatus: &serverStatus,
+                                                databaseContext: &databaseContext,
+                                                databaseNamesAreCaseSensitive: &databaseNamesAreCaseSensitive,
+                                                databaseNameCaseSensitivityWasLoaded: &databaseNameCaseSensitivityWasLoaded,
+                                                droppedSelectedDatabaseContext: &droppedSelectedDatabaseContext,
+                                                metadataChangingQueries: &metadataChangingQueries,
+                                                databaseContextChangingQueries: &databaseContextChangingQueries,
+                                                serverVersion: serverVersion,
+                                                serverIsMariaDB: serverIsMariaDB,
                                                 errors: &errors,
                                                 ignoreSQLErrors: &ignoreSQLErrors,
                                                 ignoreCharsetError: &ignoreCharsetError,
@@ -1966,6 +2026,14 @@ private extension SALightweightQueryViewController {
                                             connection: connection,
                                             parser: parser,
                                             serverStatus: &serverStatus,
+                                            databaseContext: &databaseContext,
+                                            databaseNamesAreCaseSensitive: &databaseNamesAreCaseSensitive,
+                                            databaseNameCaseSensitivityWasLoaded: &databaseNameCaseSensitivityWasLoaded,
+                                            droppedSelectedDatabaseContext: &droppedSelectedDatabaseContext,
+                                            metadataChangingQueries: &metadataChangingQueries,
+                                            databaseContextChangingQueries: &databaseContextChangingQueries,
+                                            serverVersion: serverVersion,
+                                            serverIsMariaDB: serverIsMariaDB,
                                             errors: &errors,
                                             ignoreSQLErrors: &ignoreSQLErrors,
                                             ignoreCharsetError: &ignoreCharsetError,
@@ -1979,7 +2047,12 @@ private extension SALightweightQueryViewController {
         return SALightweightSQLImportResult(queriesPerformed: queriesPerformed,
                                            errors: errors,
                                            wasCancelled: wasCancelled,
-                                           readError: readError)
+                                           readError: readError,
+                                           initialDatabaseContext: initialDatabaseContext,
+                                           databaseContext: databaseContext,
+                                           droppedSelectedDatabaseContext: droppedSelectedDatabaseContext,
+                                           metadataChangingQueries: metadataChangingQueries,
+                                           databaseContextChangingQueries: databaseContextChangingQueries)
     }
 
     func normalisedStreamingImportQuery(_ rawQuery: String, parser: SPSQLParser, whitespaceAndNewline: CharacterSet) -> String {
@@ -1996,19 +2069,63 @@ private extension SALightweightQueryViewController {
                                      connection: SPMySQLConnection,
                                      parser: SPSQLParser,
                                      serverStatus: inout SPMySQLServerStatusBits,
+                                     databaseContext: inout String?,
+                                     databaseNamesAreCaseSensitive: inout Bool,
+                                     databaseNameCaseSensitivityWasLoaded: inout Bool,
+                                     droppedSelectedDatabaseContext: inout String?,
+                                     metadataChangingQueries: inout [String],
+                                     databaseContextChangingQueries: inout [String],
+                                     serverVersion: Int,
+                                     serverIsMariaDB: Bool,
                                      errors: inout [String],
                                      ignoreSQLErrors: inout Bool,
                                      ignoreCharsetError: inout Bool,
                                      wasCancelled: inout Bool,
                                      errorChoice: (String) -> SALightweightSQLImportErrorChoice,
                                      charsetErrorChoice: () -> Bool) {
-        _ = connection.queryString(query, usingEncoding: encoding.rawValue, with: SPMySQLResultAsResult)
+        if !databaseNameCaseSensitivityWasLoaded,
+           SASQLDatabaseContext.requiresDatabaseNameCaseSensitivityLookup(for: query,
+                                                                           currentDatabase: databaseContext,
+                                                                           serverVersion: serverVersion,
+                                                                           serverIsMariaDB: serverIsMariaDB) {
+            let lowerCaseTableNames = connection.getFirstField(fromQuery: "SELECT @@lower_case_table_names",
+                                                               assertingDatabase: databaseContext)
+            let lowerCaseTableNamesValue = (lowerCaseTableNames as? NSNumber)?.intValue
+                ?? (lowerCaseTableNames as? String).flatMap(Int.init)
+            databaseNamesAreCaseSensitive = lowerCaseTableNamesValue == 0
+            databaseNameCaseSensitivityWasLoaded = true
+        }
+
+        _ = connection.queryString(query,
+                                   usingEncoding: encoding.rawValue,
+                                   with: SPMySQLResultAsResult,
+                                   assertingDatabaseContext: databaseContext)
 
         if connection.update(&serverStatus) {
             parser.setNoBackslashEscapes(serverStatus.noBackslashEscapes != 0)
         }
 
-        guard connection.queryErrored(), connection.lastErrorMessage() != "Query was empty" else { return }
+        if !connection.queryErrored() {
+            if queryMayChangeLightweightMetadata(query) {
+                metadataChangingQueries.append(query)
+            }
+
+            let updatedDatabaseContext = SASQLDatabaseContext.databaseName(afterSuccessfulQuery: query,
+                                                                            currentDatabase: databaseContext,
+                                                                            databaseNamesAreCaseSensitive: databaseNamesAreCaseSensitive,
+                                                                            serverVersion: serverVersion,
+                                                                            serverIsMariaDB: serverIsMariaDB)
+            if SASQLDatabaseContext.databaseNameChanged(from: databaseContext, to: updatedDatabaseContext) {
+                databaseContextChangingQueries.append(query)
+                if updatedDatabaseContext == nil {
+                    droppedSelectedDatabaseContext = databaseContext
+                }
+            }
+            databaseContext = updatedDatabaseContext
+            return
+        }
+
+        guard connection.lastErrorMessage() != "Query was empty" else { return }
 
         let error = connection.lastErrorMessage() ?? NSLocalizedString("Unknown MySQL error.", comment: "unknown mysql error")
         let detailedError = String(format: NSLocalizedString("[ERROR in query %ld] %@", comment: "error text when multiple custom query failed"), queryNumber, error)
@@ -2131,6 +2248,10 @@ private extension SALightweightQueryViewController {
             return
         }
 
+        // Capture the UI-selected context before leaving the main thread. Each
+        // statement derives the context for the next statement from this value.
+        let initialDatabaseContext = database.isEmpty ? nil : database
+
         if UserDefaults.standard.bool(forKey: SPQueryWarningEnabled),
            queriesContainDestructiveSQL(runnableQueries) {
             let alert = NSAlert()
@@ -2204,10 +2325,6 @@ private extension SALightweightQueryViewController {
                 }
             }
 
-            if !self.database.isEmpty {
-                _ = connection.selectDatabase(self.database)
-            }
-
             let retriesWereEnabled = connection.retryQueriesOnConnectionFailure
             connection.retryQueriesOnConnectionFailure = false
             defer {
@@ -2225,6 +2342,16 @@ private extension SALightweightQueryViewController {
             var didPublishRows = false
             var didPerformSuccessfulQuery = false
             var metadataChangingQueries: [String] = []
+            var databaseContextChangingQueries: [String] = []
+            var databaseContext = initialDatabaseContext
+            var droppedSelectedDatabaseContext: String?
+            var databaseNamesAreCaseSensitive = false
+            var databaseNameCaseSensitivityWasLoaded = false
+            let serverVersion = Int(connection.serverMajorVersion()) * 10_000
+                + Int(connection.serverMinorVersion()) * 100
+                + Int(connection.serverReleaseVersion())
+            let serverIsMariaDB = connection.serverVersionString()?.range(of: "mariadb", options: .caseInsensitive) != nil
+            let resultEncoding = connection.stringEncoding()
             var finalResult = QueryResult(columnDefinitions: [], rows: [], affectedRows: 0, executionTime: 0, fatalError: nil, errorText: nil, firstErrorQueryNumber: nil, executedQuery: "", resultQuery: "", lastErrorID: 0, queriesRun: 0, truncated: false)
 
             for (index, query) in runnableQueries.enumerated() {
@@ -2248,8 +2375,28 @@ private extension SALightweightQueryViewController {
 
                 let executionQuery = appliesDisplayLimit ? self.queryByApplyingDisplayLimit(to: query) : query
                 executedQueries.append(query)
+
+                // Only a case-only DROP comparison needs lower_case_table_names.
+                // Keep this immediately before that statement so metadata lookup
+                // cannot replace SHOW WARNINGS, ROW_COUNT(), or FOUND_ROWS().
+                if !databaseNameCaseSensitivityWasLoaded,
+                   SASQLDatabaseContext.requiresDatabaseNameCaseSensitivityLookup(for: query,
+                                                                                   currentDatabase: databaseContext,
+                                                                                   serverVersion: serverVersion,
+                                                                                   serverIsMariaDB: serverIsMariaDB) {
+                    let lowerCaseTableNames = connection.getFirstField(fromQuery: "SELECT @@lower_case_table_names",
+                                                                       assertingDatabase: databaseContext)
+                    let lowerCaseTableNamesValue = (lowerCaseTableNames as? NSNumber)?.intValue
+                        ?? (lowerCaseTableNames as? String).flatMap(Int.init)
+                    databaseNamesAreCaseSensitive = lowerCaseTableNamesValue == 0
+                    databaseNameCaseSensitivityWasLoaded = true
+                }
+
                 let queryStart = CFAbsoluteTimeGetCurrent()
-                guard let result = connection.streamingQueryString(executionQuery) else {
+                guard let result = connection.queryString(executionQuery,
+                                                          usingEncoding: resultEncoding,
+                                                          with: SPMySQLResultAsFastStreamingResult,
+                                                          assertingDatabaseContext: databaseContext) as? SPMySQLResult else {
                     queriesRun += 1
                     if connection.lastQueryWasCancelled || self.isCancellationRequested {
                         let error = NSLocalizedString("Query cancelled.", comment: "lightweight query cancelled status")
@@ -2340,6 +2487,19 @@ private extension SALightweightQueryViewController {
                     metadataChangingQueries.append(query)
                 }
 
+                let updatedDatabaseContext = SASQLDatabaseContext.databaseName(afterSuccessfulQuery: query,
+                                                                                currentDatabase: databaseContext,
+                                                                                databaseNamesAreCaseSensitive: databaseNamesAreCaseSensitive,
+                                                                                serverVersion: serverVersion,
+                                                                                serverIsMariaDB: serverIsMariaDB)
+                if SASQLDatabaseContext.databaseNameChanged(from: databaseContext, to: updatedDatabaseContext) {
+                    databaseContextChangingQueries.append(query)
+                    if updatedDatabaseContext == nil {
+                        droppedSelectedDatabaseContext = databaseContext
+                    }
+                }
+                databaseContext = updatedDatabaseContext
+
                 let definitions = result.fieldDefinitions() as? [NSDictionary] ?? []
                 var loadedRows: [[Any]] = []
                 var pendingPublishedRows: [[Any]] = []
@@ -2427,6 +2587,9 @@ private extension SALightweightQueryViewController {
                 finalResult = QueryResult(columnDefinitions: finalResult.columnDefinitions, rows: finalResult.rows, affectedRows: totalAffectedRows, executionTime: totalExecutionTime, fatalError: finalResult.fatalError, errorText: errors.isEmpty ? finalResult.errorText : errors.joined(separator: "\n"), firstErrorQueryNumber: firstErrorQueryNumber, executedQuery: executedQueries.joined(separator: ";\n"), resultQuery: resultQuery, lastErrorID: finalResult.lastErrorID, queriesRun: queriesRun, truncated: finalResult.truncated)
             }
 
+            let completedDatabaseContext = databaseContext
+            let completedDroppedSelectedDatabaseContext = droppedSelectedDatabaseContext
+
             DispatchQueue.main.async {
                 let publishStart = CFAbsoluteTimeGetCurrent()
                 defer {
@@ -2434,6 +2597,13 @@ private extension SALightweightQueryViewController {
                 }
 
                 guard self.queryToken == token else { return }
+
+                let handledDatabaseContextQueries = self.applyBatchDatabaseContext(completedDatabaseContext,
+                                                                                    initialDatabaseContext: initialDatabaseContext,
+                                                                                    droppedSelectedDatabaseContext: completedDroppedSelectedDatabaseContext)
+                let completionMetadataQueries = handledDatabaseContextQueries && databaseContextChangingQueries.count == 1
+                    ? metadataChangingQueries.filter { !databaseContextChangingQueries.contains($0) }
+                    : metadataChangingQueries
 
                 self.hideQueryProgressPanel()
                 self.isRunning = false
@@ -2479,7 +2649,7 @@ private extension SALightweightQueryViewController {
                     self.restorePendingResultGridViewState()
                     self.pendingSortFailureRestore = nil
                     self.publishQueryCompletionSideEffects(didPerformSuccessfulQuery: didPerformSuccessfulQuery,
-                                                           metadataChangingQueries: metadataChangingQueries)
+                                                           metadataChangingQueries: completionMetadataQueries)
                     return
                 }
 
@@ -2519,9 +2689,48 @@ private extension SALightweightQueryViewController {
                 self.pendingSortFailureRestore = nil
                 self.isApplyingQuerySort = false
                 self.publishQueryCompletionSideEffects(didPerformSuccessfulQuery: didPerformSuccessfulQuery,
-                                                       metadataChangingQueries: metadataChangingQueries)
+                                                       metadataChangingQueries: completionMetadataQueries)
             }
         }
+    }
+
+    @discardableResult
+    func applyBatchDatabaseContext(_ databaseContext: String?,
+                                   initialDatabaseContext: String?,
+                                   droppedSelectedDatabaseContext: String?) -> Bool {
+        guard SASQLDatabaseContext.databaseNameChanged(from: initialDatabaseContext, to: databaseContext) else {
+            return false
+        }
+
+        database = databaseContext ?? ""
+        table = nil
+
+        guard let windowController = view.window?.windowController as? SPWindowController else {
+            return false
+        }
+
+        if let document = windowController.loadedDatabaseDocument {
+            // The legacy bridge currently imports this parameter as nonoptional.
+            // Commit a selected context directly, and leave nil clearing to the
+            // existing metadata refresh instead of inventing a sentinel value.
+            if let databaseContext {
+                document.setCurrentDatabaseFromQueryContext(databaseContext)
+            }
+            return false
+        }
+
+        if let databaseContext, !databaseContext.isEmpty {
+            windowController.selectLightweightDatabaseInToolbar(databaseContext)
+            windowController.loadTables(for: databaseContext)
+            return true
+        }
+
+        if let droppedSelectedDatabaseContext, !droppedSelectedDatabaseContext.isEmpty {
+            windowController.clearLightweightDatabaseSelection(afterRemoving: droppedSelectedDatabaseContext)
+            return true
+        }
+
+        return false
     }
 
     func queryResultAfterError(_ error: String,
@@ -4770,7 +4979,8 @@ private extension SALightweightQueryViewController {
             fallbackRefreshQuery = newValue.requiresReload ? "SELECT \(Self.backtickQuoted(origin.column)) FROM \(tableReference) \(blobWhereClause) LIMIT 1" : nil
         }
 
-        return CellUpdate(countQuery: countQuery,
+        return CellUpdate(database: origin.database,
+                          countQuery: countQuery,
                           updateQuery: updateQuery,
                           refreshQuery: refreshQuery,
                           fallbackCountQuery: fallbackCountQuery,
@@ -4829,7 +5039,7 @@ private extension SALightweightQueryViewController {
         }
 
         let query = "SHOW COLUMNS FROM \(Self.backtickQuoted(database)).\(Self.backtickQuoted(table))"
-        guard let result = connection.queryString(query) else {
+        guard let result = connection.queryString(query, assertingDatabase: database) else {
             return []
         }
 
@@ -5526,13 +5736,13 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak connection] in
             guard let self, let connection else { return }
 
-            if !self.database.isEmpty {
-                _ = connection.selectDatabase(self.database)
-            }
-
             var activeUpdateQuery = update.updateQuery
             var activeRefreshQuery = update.refreshQuery
-            var matchingRows = SALightweightResultGrid.matchingRowCount(for: update.countQuery, connection: connection)
+            var matchingRows = SALightweightResultGrid.matchingRowCount(
+                for: update.countQuery,
+                connection: connection,
+                assertingDatabase: update.database
+            )
             var error = connection.queryErrored() ? connection.lastErrorMessage() : nil
             var affectedRows: UInt64 = 0
 
@@ -5541,7 +5751,11 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                count > 1,
                let fallbackCountQuery = update.fallbackCountQuery,
                let fallbackUpdateQuery = update.fallbackUpdateQuery {
-                matchingRows = SALightweightResultGrid.matchingRowCount(for: fallbackCountQuery, connection: connection)
+                matchingRows = SALightweightResultGrid.matchingRowCount(
+                    for: fallbackCountQuery,
+                    connection: connection,
+                    assertingDatabase: update.database
+                )
                 error = connection.queryErrored() ? connection.lastErrorMessage() : nil
                 if error == nil {
                     activeUpdateQuery = fallbackUpdateQuery
@@ -5550,7 +5764,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
             }
 
             if error == nil, matchingRows == 1 {
-                _ = connection.queryString(activeUpdateQuery)
+                _ = connection.queryString(activeUpdateQuery, assertingDatabase: update.database)
                 error = connection.queryErrored() ? connection.lastErrorMessage() : nil
                 if error == nil {
                     affectedRows = connection.rowsAffectedByLastQuery()
@@ -5562,7 +5776,7 @@ extension SALightweightQueryViewController: NSTableViewDataSource, NSTableViewDe
                update.requiresReload,
                !reloadAfterEdit,
                let refreshQuery = activeRefreshQuery {
-                let result = connection.queryString(refreshQuery)
+                let result = connection.queryString(refreshQuery, assertingDatabase: update.database)
                 result?.defaultRowReturnType = SPMySQLResultRowAsArray
                 if !connection.queryErrored(),
                    let row = result?.getRowAsArray(),

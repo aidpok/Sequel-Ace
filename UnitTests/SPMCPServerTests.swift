@@ -458,3 +458,42 @@ final class SPMCPFavoriteTests: XCTestCase {
         XCTAssertNil(SPMCPFavorite.idString(Date()))
     }
 }
+
+/// SPAppController+MCP.swift is app-target-only while the Unit Tests target is
+/// deliberately hostless. These focused source-contract tests pin the lightweight
+/// bridge so it cannot silently regress to DBView-only discovery.
+final class SPMCPLightweightConnectionParityTests: XCTestCase {
+
+    private func mcpAppControllerSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot
+            .appendingPathComponent("Source/Controllers/MCP/SPAppController+MCP.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    func testLightweightConnectionsUseStablePerWindowIdentity() throws {
+        let source = try mcpAppControllerSource()
+
+        XCTAssertTrue(source.contains("id: wc.uniqueID.uuidString"))
+        XCTAssertFalse(source.contains("id: wc.lightweightNavigatorConnectionID()"))
+    }
+
+    func testListAndResolutionShareTheLightweightConnectionPath() throws {
+        let source = try mcpAppControllerSource()
+
+        XCTAssertTrue(source.contains("guard let conn = wc.activeConnection, conn.isConnected()"))
+        XCTAssertTrue(source.contains("guard let resolved = self.mcpResolvedConnection(for: wc)"))
+        XCTAssertTrue(source.contains("if candidate.id == connID"))
+    }
+
+    func testLightweightMetadataUsesActiveTabAndFavoriteKeychainID() throws {
+        let source = try mcpAppControllerSource()
+
+        XCTAssertTrue(source.contains("let activeWindowController = self.tabManager.activeWindowController"))
+        XCTAssertTrue(source.contains("info[\"active\"] = (wc === activeWindowController)"))
+        XCTAssertTrue(source.contains("favoriteID = wc.activeConnectionInfo?.connectionKeychainID"))
+        XCTAssertTrue(source.contains("if let favorite = self.mcpFavoriteInfo(forKeychainID: favoriteID)"))
+    }
+}

@@ -987,7 +987,10 @@ extension SPWindowController {
             self.processing = false
             self.setLightweightConsoleQueryMode(0)
             self.requestLightweightDatabases(forceReload: true)
-            self.loadTables(for: database, preservingSelection: true)
+            if !SASQLDatabaseContext.databaseNameChanged(from: result.initialDatabaseContext,
+                                                          to: result.databaseContext) {
+                self.loadTables(for: database, preservingSelection: true)
+            }
 
             if let readError = result.readError {
                 NSSound.beep()
@@ -1048,6 +1051,14 @@ extension SPWindowController {
             var ignoreCharsetError = false
             var connectionEncodingToRestore: String?
             var sqlModeToRestore: String?
+            var databaseContext: String? = database
+            var droppedSelectedDatabaseContext: String?
+            var databaseNamesAreCaseSensitive = false
+            var databaseNameCaseSensitivityWasLoaded = false
+            let serverVersion = Int(connection.serverMajorVersion()) * 10_000
+                + Int(connection.serverMinorVersion()) * 100
+                + Int(connection.serverReleaseVersion())
+            let serverIsMariaDB = connection.serverVersionString()?.range(of: "mariadb", options: .caseInsensitive) != nil
 
             defer {
                 if let connectionEncodingToRestore = connectionEncodingToRestore {
@@ -1058,12 +1069,21 @@ extension SPWindowController {
                 }
                 connection.retryQueriesOnConnectionFailure = oldRetryQueries
 
+                let completedDatabaseContext = databaseContext
+                let completedDroppedSelectedDatabaseContext = droppedSelectedDatabaseContext
+
                 DispatchQueue.main.async {
                     self.isLightweightImportRunning = false
                     self.processing = false
                     self.setLightweightConsoleQueryMode(0)
                     self.requestLightweightDatabases(forceReload: true)
-                    self.loadTables(for: database, preservingSelection: true)
+                    if let completedDatabaseContext, !completedDatabaseContext.isEmpty {
+                        self.loadTables(for: completedDatabaseContext, preservingSelection: true)
+                    } else if let completedDroppedSelectedDatabaseContext, !completedDroppedSelectedDatabaseContext.isEmpty {
+                        self.clearLightweightDatabaseSelection(afterRemoving: completedDroppedSelectedDatabaseContext)
+                    } else {
+                        self.loadTables(for: database, preservingSelection: true)
+                    }
 
                     if errors.isEmpty {
                         let alert = NSAlert()
@@ -1077,8 +1097,6 @@ extension SPWindowController {
                     }
                 }
             }
-
-            _ = connection.selectDatabase(database)
 
             if let mysqlCharset = Self.mysqlCharset(for: encoding), let currentEncoding = connection.encoding(), !currentEncoding.isEmpty {
                 connectionEncodingToRestore = currentEncoding
@@ -1101,7 +1119,26 @@ extension SPWindowController {
                     break
                 }
 
-                _ = connection.queryString(query, usingEncoding: encoding.rawValue, with: SPMySQLResultAsResult)
+                // Only a case-only DROP comparison needs lower_case_table_names.
+                // Keep this immediately before the user statement so the
+                // import query remains the source for connection status calls.
+                if !databaseNameCaseSensitivityWasLoaded,
+                   SASQLDatabaseContext.requiresDatabaseNameCaseSensitivityLookup(for: query,
+                                                                                   currentDatabase: databaseContext,
+                                                                                   serverVersion: serverVersion,
+                                                                                   serverIsMariaDB: serverIsMariaDB) {
+                    let lowerCaseTableNames = connection.getFirstField(fromQuery: "SELECT @@lower_case_table_names",
+                                                                       assertingDatabase: databaseContext)
+                    let lowerCaseTableNamesValue = (lowerCaseTableNames as? NSNumber)?.intValue
+                        ?? (lowerCaseTableNames as? String).flatMap(Int.init)
+                    databaseNamesAreCaseSensitive = lowerCaseTableNamesValue == 0
+                    databaseNameCaseSensitivityWasLoaded = true
+                }
+
+                _ = connection.queryString(query,
+                                           usingEncoding: encoding.rawValue,
+                                           with: SPMySQLResultAsResult,
+                                           assertingDatabaseContext: databaseContext)
 
                 if connection.queryErrored(), connection.lastErrorMessage() != "Query was empty" {
                     let error = connection.lastErrorMessage() ?? NSLocalizedString("Unknown MySQL error.", comment: "unknown mysql error")
@@ -1135,6 +1172,18 @@ extension SPWindowController {
                             progressCancelled = true
                         }
                     }
+                }
+                else {
+                    let updatedDatabaseContext = SASQLDatabaseContext.databaseName(afterSuccessfulQuery: query,
+                                                                                    currentDatabase: databaseContext,
+                                                                                    databaseNamesAreCaseSensitive: databaseNamesAreCaseSensitive,
+                                                                                    serverVersion: serverVersion,
+                                                                                    serverIsMariaDB: serverIsMariaDB)
+                    if SASQLDatabaseContext.databaseNameChanged(from: databaseContext, to: updatedDatabaseContext),
+                       updatedDatabaseContext == nil {
+                        droppedSelectedDatabaseContext = databaseContext
+                    }
+                    databaseContext = updatedDatabaseContext
                 }
 
                 queriesPerformed += 1

@@ -10,6 +10,13 @@ import Cocoa
 struct SALightweightPrintTarget {
     let sourceView: NSView
     let title: String
+    let attributedSnapshot: NSAttributedString?
+
+    init(sourceView: NSView, title: String, attributedSnapshot: NSAttributedString? = nil) {
+        self.sourceView = sourceView
+        self.title = title
+        self.attributedSnapshot = attributedSnapshot
+    }
 }
 
 private final class SALightweightPrintableTableView: NSView {
@@ -63,12 +70,15 @@ private final class SALightweightPrintableTableView: NSView {
         let alternateFill = NSColor(calibratedWhite: 0.975, alpha: 1)
         let headerAttributes = paragraphAttributes(font: headerFont, color: .black)
         let bodyAttributes = paragraphAttributes(font: bodyFont, color: .black)
+        let drawsBackgrounds = UserDefaults.standard.bool(forKey: printBackgroundPreferenceKey)
 
         var y = margin + titleHeight
         var x = margin
 
-        headerFill.setFill()
-        NSRect(x: margin, y: y, width: bounds.width - (margin * 2), height: headerHeight).fill()
+        if drawsBackgrounds {
+            headerFill.setFill()
+            NSRect(x: margin, y: y, width: bounds.width - (margin * 2), height: headerHeight).fill()
+        }
 
         for column in columns {
             drawString(column.title, in: NSRect(x: x + 4, y: y + 3, width: column.width - 8, height: headerHeight - 4), attributes: headerAttributes)
@@ -92,7 +102,7 @@ private final class SALightweightPrintableTableView: NSView {
         }
 
         for (rowIndex, row) in rows.enumerated() {
-            if rowIndex.isMultiple(of: 2) == false {
+            if drawsBackgrounds && rowIndex.isMultiple(of: 2) == false {
                 alternateFill.setFill()
                 NSRect(x: margin, y: y, width: bounds.width - (margin * 2), height: rowHeight).fill()
             }
@@ -143,12 +153,14 @@ private final class SALightweightPrintableTextView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(title: String, attributedString: NSAttributedString, font: NSFont) {
+    init(title: String, attributedString: NSAttributedString, font: NSFont, preservesFontAttributes: Bool = false) {
         self.title = title
         self.contentWidth = 720
 
         let mutableString = NSMutableAttributedString(attributedString: attributedString)
-        mutableString.addAttribute(.font, value: font, range: NSRange(location: 0, length: mutableString.length))
+        if !preservesFontAttributes {
+            mutableString.addAttribute(.font, value: font, range: NSRange(location: 0, length: mutableString.length))
+        }
         mutableString.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: mutableString.length)) { value, range, _ in
             guard value == nil else { return }
             mutableString.addAttribute(.foregroundColor, value: NSColor.black, range: range)
@@ -223,13 +235,12 @@ extension SPWindowController {
                                             title: String(format: NSLocalizedString("Table Structure - %@", comment: "lightweight table structure print job title"), tableName))
 
         case .status:
-            guard let tableView = firstTableView(in: lightweightTableInfoController.view),
-                  tableView.numberOfColumns > 0,
-                  tableView.numberOfRows > 0 else { return nil }
+            guard let snapshot = lightweightTableInfoController.printableSnapshot() else { return nil }
 
             let tableName = selectedTable ?? NSLocalizedString("Table", comment: "lightweight print fallback table title")
-            return SALightweightPrintTarget(sourceView: tableView,
-                                            title: String(format: NSLocalizedString("Table Information - %@", comment: "lightweight table info print job title"), tableName))
+            return SALightweightPrintTarget(sourceView: lightweightTableInfoController.view,
+                                            title: String(format: NSLocalizedString("Table Information - %@", comment: "lightweight table info print job title"), tableName),
+                                            attributedSnapshot: snapshot)
 
         case .relations:
             return lightweightMetadataPrintTarget(in: lightweightRelationsController.view,
@@ -288,11 +299,9 @@ extension SPWindowController {
         target.sourceView.layoutSubtreeIfNeeded()
         let printView = lightweightPrintableView(for: target)
 
-        let printInfo = NSPrintInfo.shared.copy() as? NSPrintInfo ?? NSPrintInfo.shared
-        printInfo.horizontalPagination = .automatic
-        printInfo.verticalPagination = .automatic
+        let printInfo = SAPrintUtility.configuredPrintInfo()
+        printInfo.horizontalPagination = .fit
         printInfo.isHorizontallyCentered = false
-        printInfo.isVerticallyCentered = false
 
         let operation = NSPrintOperation(view: printView, printInfo: printInfo)
         operation.jobTitle = target.title
@@ -300,6 +309,7 @@ extension SPWindowController {
 
         let printPanel = operation.printPanel
         printPanel.options.insert([.showsOrientation, .showsScaling, .showsPaperSize])
+        printPanel.addAccessoryController(SAPrintAccessoryController(webView: nil))
         operation.printPanel = printPanel
 
         if let window = window {
@@ -310,6 +320,13 @@ extension SPWindowController {
     }
 
     func lightweightPrintableView(for target: SALightweightPrintTarget) -> NSView {
+        if let attributedSnapshot = target.attributedSnapshot {
+            return SALightweightPrintableTextView(title: target.title,
+                                                  attributedString: attributedSnapshot,
+                                                  font: UserDefaults.getFont(),
+                                                  preservesFontAttributes: true)
+        }
+
         if let tableView = target.sourceView as? NSTableView {
             return lightweightPrintableTableView(from: tableView, title: target.title)
         }

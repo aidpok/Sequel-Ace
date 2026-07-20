@@ -416,7 +416,7 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
         for row in selectedRows {
             guard let constraint = row["name"], !constraint.isEmpty else { continue }
             let query = "ALTER TABLE \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(table)) DROP FOREIGN KEY \(SALightweightSchemaMetadataLoader.sqlIdentifier(constraint))"
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
 
             if connection.queryErrored() {
                 showError(title: NSLocalizedString("Unable to delete relation", comment: "error deleting relation message"),
@@ -498,7 +498,7 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
             query += " ON UPDATE \(onUpdate)"
         }
 
-        connection.queryString(query)
+        connection.queryString(query, assertingDatabase: database)
 
         if connection.queryErrored() {
             let errorText = connection.lastErrorMessage() ?? ""
@@ -517,7 +517,7 @@ final class SALightweightRelationsViewController: NSViewController, NSMenuItemVa
     }
 
     private func referenceColumnAllowsForeignKeyReference(_ relation: SALightweightRelationValue, connection: SPMySQLConnection) -> Bool {
-        guard SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(connection: connection) else { return true }
+        guard SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(database: database, connection: connection) else { return true }
         guard !relation.referenceColumn.isEmpty, !relation.referenceTable.isEmpty else { return false }
 
         return SALightweightSchemaMetadataLoader.singleColumnUniqueReferenceColumns(for: relation.referenceTable,
@@ -749,10 +749,10 @@ private final class SALightweightRelationSheetController: NSWindowController, NS
 
         localColumns = SALightweightSchemaMetadataLoader.columns(for: table, database: database, connection: connection)
         takenConstraintNames = SALightweightSchemaMetadataLoader.relationConstraintNames(for: table, database: database, connection: connection)
-        requiresStandardReferenceColumns = SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(connection: connection)
+        requiresStandardReferenceColumns = SALightweightSchemaMetadataLoader.serverRequiresStandardForeignKeyReferences(database: database, connection: connection)
         standardReferenceColumnCache.removeAll()
         setPopUpItems(columnPopUpButton, items: localColumns.map { $0.name }, selecting: nil)
-        setPopUpItems(refDatabasePopUpButton, items: SALightweightSchemaMetadataLoader.userDatabases(connection: connection), selecting: database)
+        setPopUpItems(refDatabasePopUpButton, items: SALightweightSchemaMetadataLoader.userDatabases(assertingDatabase: database, connection: connection), selecting: database)
 
         constraintNameField.stringValue = ""
         updateAvailableTables()
@@ -1012,7 +1012,7 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
         for row in selectedRows {
             guard let trigger = row["TriggerName"], !trigger.isEmpty else { continue }
             let query = "DROP TRIGGER \(SALightweightSchemaMetadataLoader.sqlIdentifier(database)).\(SALightweightSchemaMetadataLoader.sqlIdentifier(trigger))"
-            connection.queryString(query)
+            connection.queryString(query, assertingDatabase: database)
 
             if connection.queryErrored() {
                 showError(title: NSLocalizedString("Unable to delete trigger", comment: "error deleting trigger message"),
@@ -1106,10 +1106,10 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
 
     private func saveTrigger(_ trigger: SALightweightTriggerValue, replacing originalTrigger: [String: String]?, connection: SPMySQLConnection) -> Bool {
         guard canEditTriggers else { return false }
-        _ = connection.selectDatabase(database)
+        let database = database
 
         if let originalName = originalTrigger?["TriggerName"], !originalName.isEmpty {
-            connection.queryString(dropTriggerQuery(named: originalName))
+            connection.queryString(dropTriggerQuery(named: originalName), assertingDatabase: database)
 
             if connection.queryErrored() {
                 showError(title: NSLocalizedString("Unable to delete trigger", comment: "error deleting trigger message"),
@@ -1118,14 +1118,14 @@ final class SALightweightTriggersViewController: NSViewController, NSMenuItemVal
             }
         }
 
-        connection.queryString(createTriggerQuery(trigger))
+        connection.queryString(createTriggerQuery(trigger), assertingDatabase: database)
 
         if connection.queryErrored() {
             let createError = connection.lastErrorMessage() ?? ""
 
             if let originalTrigger = originalTrigger,
                let originalValue = SALightweightTriggerValue(row: originalTrigger) {
-                connection.queryString(createTriggerQuery(originalValue))
+                connection.queryString(createTriggerQuery(originalValue), assertingDatabase: database)
             }
 
             showError(title: NSLocalizedString("Error creating trigger", comment: "error creating trigger message"),
@@ -1365,7 +1365,7 @@ private enum SALightweightMetadataReadService {
               AND TABLE_NAME = \(sqlString(table, connection: connection))
             """
 
-        guard let result = connection.queryString(query), !connection.queryErrored() else {
+        guard let result = connection.queryString(query, assertingDatabase: database), !connection.queryErrored() else {
             return .unavailable(errorMessage(prefix: NSLocalizedString("Unable to determine whether this table supports relations.", comment: "relations support metadata error placeholder"), connection: connection))
         }
 
@@ -1409,7 +1409,7 @@ private enum SALightweightMetadataReadService {
             ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
             """
 
-        guard let result = connection.queryString(query) else {
+        guard let result = connection.queryString(query, assertingDatabase: database) else {
             return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load relations.", comment: "relations error placeholder"), connection: connection))
         }
 
@@ -1461,7 +1461,7 @@ private enum SALightweightMetadataReadService {
             ORDER BY TRIGGER_NAME
             """
 
-        guard let result = connection.queryString(query) else {
+        guard let result = connection.queryString(query, assertingDatabase: database) else {
             return SALightweightMetadataSnapshot(rows: [], emptyMessage: errorMessage(prefix: NSLocalizedString("Unable to load triggers.", comment: "triggers error placeholder"), connection: connection))
         }
 
@@ -1510,14 +1510,14 @@ private enum SALightweightMetadataReadService {
 }
 
 enum SALightweightSchemaMetadataLoader {
-    fileprivate static func serverRequiresStandardForeignKeyReferences(connection: SPMySQLConnection) -> Bool {
+    fileprivate static func serverRequiresStandardForeignKeyReferences(database: String, connection: SPMySQLConnection) -> Bool {
         let serverMajorVersion = connection.serverMajorVersion()
         let serverMinorVersion = connection.serverMinorVersion()
         let serverVersionIsAtLeast84 = serverMajorVersion > 8
             || (serverMajorVersion == 8 && serverMinorVersion >= 4)
         guard !connection.isMariaDB(), serverVersionIsAtLeast84 else { return false }
 
-        let result = connection.queryString("SELECT @@session.restrict_fk_on_non_standard_key")
+        let result = connection.queryString("SELECT @@session.restrict_fk_on_non_standard_key", assertingDatabase: database)
         result?.returnDataAsStrings = true
 
         let restrictionQueryErrored = connection.queryErrored()
@@ -1547,7 +1547,7 @@ enum SALightweightSchemaMetadataLoader {
             }
         }
 
-        guard let result = connection.queryString("SHOW INDEX FROM \(tableReference)") else { return [] }
+        guard let result = connection.queryString("SHOW INDEX FROM \(tableReference)", assertingDatabase: database) else { return [] }
         result.returnDataAsStrings = true
 
         var indexRows: [NSDictionary] = []
@@ -1570,7 +1570,7 @@ enum SALightweightSchemaMetadataLoader {
               AND REFERENCED_TABLE_NAME IS NOT NULL
             """
 
-        guard let result = connection.queryString(query) else { return [] }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsArray
         result.returnDataAsStrings = true
@@ -1582,8 +1582,8 @@ enum SALightweightSchemaMetadataLoader {
         return names
     }
 
-    fileprivate static func userDatabases(connection: SPMySQLConnection) -> [String] {
-        guard let result = connection.queryString("SHOW DATABASES") else { return [] }
+    fileprivate static func userDatabases(assertingDatabase database: String, connection: SPMySQLConnection) -> [String] {
+        guard let result = connection.queryString("SHOW DATABASES", assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsArray
         result.returnDataAsStrings = true
@@ -1607,7 +1607,7 @@ enum SALightweightSchemaMetadataLoader {
             ORDER BY TABLE_NAME
             """
 
-        guard let result = connection.queryString(query) else { return [] }
+        guard let result = connection.queryString(query, assertingDatabase: database) else { return [] }
 
         result.defaultRowReturnType = SPMySQLResultRowAsArray
         result.returnDataAsStrings = true
@@ -1620,7 +1620,7 @@ enum SALightweightSchemaMetadataLoader {
     }
 
     fileprivate static func columns(for table: String, database: String, connection: SPMySQLConnection) -> [SALightweightRelationColumn] {
-        let result = connection.queryString("SHOW FULL COLUMNS FROM \(sqlIdentifier(table)) FROM \(sqlIdentifier(database))")
+        let result = connection.queryString("SHOW FULL COLUMNS FROM \(sqlIdentifier(table)) FROM \(sqlIdentifier(database))", assertingDatabase: database)
 
         result?.defaultRowReturnType = SPMySQLResultRowAsDictionary
         result?.returnDataAsStrings = true

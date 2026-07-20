@@ -54,7 +54,9 @@ extension SPWindowController {
 
         let primaryKey = tableDetails.tableType == "CSV" ? "" : " PRIMARY KEY AUTO_INCREMENT"
         let statement = "CREATE TABLE \(Self.backtickQuoted(selectedDatabase)).\(Self.backtickQuoted(tableName)) (id INT(11) UNSIGNED NOT NULL\(primaryKey)) \(options.joined(separator: " "))"
-        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Creating %@...", comment: "Creating table task string"), tableName), statement: statement) { [weak self] success in
+        runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Creating %@...", comment: "Creating table task string"), tableName),
+                                       statement: statement,
+                                       assertingDatabase: selectedDatabase) { [weak self] success in
             guard let self = self, success else { return }
             self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
                                                         restoringTable: tableName,
@@ -163,7 +165,9 @@ extension SPWindowController {
         let status = hasSingleSelection
             ? String(format: NSLocalizedString("Truncating %@...", comment: "Truncating table task string"), selectedTables[0])
             : NSLocalizedString("Truncating selected tables...", comment: "Truncating selected tables task string")
-        runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
+        runLightweightDatabaseMutation(status: status,
+                                       statements: statements,
+                                       assertingDatabase: selectedDatabase) { [weak self] success in
             guard let self = self else { return }
             guard success else {
                 self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
@@ -235,7 +239,9 @@ extension SPWindowController {
         if force {
             statements.append("/*!32352 SET FOREIGN_KEY_CHECKS=1 */")
         }
-        runLightweightDatabaseMutation(status: status, statements: statements) { [weak self] success in
+        runLightweightDatabaseMutation(status: status,
+                                       statements: statements,
+                                       assertingDatabase: selectedDatabase) { [weak self] success in
             guard let self = self else { return }
             guard success else {
                 self.refreshLightweightObjectsAfterMutation(database: selectedDatabase,
@@ -1034,7 +1040,9 @@ extension SPWindowController {
             query = "SHOW VARIABLES LIKE 'character_set_server'"
         }
 
-        guard let result = activeConnection.queryString(query) else { return NSLocalizedString("Default", comment: "default encoding title") }
+        let result = database.map { activeConnection.queryString(query, assertingDatabase: $0) }
+            ?? activeConnection.queryString(query)
+        guard let result = result else { return NSLocalizedString("Default", comment: "default encoding title") }
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let row = result.getRowAsDictionary() as? [String: Any] else { return NSLocalizedString("Default", comment: "default encoding title") }
@@ -1052,7 +1060,9 @@ extension SPWindowController {
             query = "SHOW VARIABLES LIKE 'collation_server'"
         }
 
-        guard let result = activeConnection.queryString(query) else { return NSLocalizedString("Default", comment: "default collation title") }
+        let result = database.map { activeConnection.queryString(query, assertingDatabase: $0) }
+            ?? activeConnection.queryString(query)
+        guard let result = result else { return NSLocalizedString("Default", comment: "default collation title") }
         result.returnDataAsStrings = true
         result.defaultRowReturnType = SPMySQLResultRowAsDictionary
         guard let row = result.getRowAsDictionary() as? [String: Any] else { return NSLocalizedString("Default", comment: "default collation title") }
@@ -1177,7 +1187,8 @@ extension SPWindowController {
 
     func lightweightTableHasAutoIncrement(_ table: String, database: String) -> Bool {
         guard let activeConnection = activeConnection,
-              let result = activeConnection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) WHERE Name = \(Self.sqlString(table))") else {
+              let result = activeConnection.queryString("SHOW TABLE STATUS FROM \(Self.backtickQuoted(database)) WHERE Name = \(Self.sqlString(table))",
+                                                        assertingDatabase: database) else {
             return false
         }
 
@@ -1355,7 +1366,7 @@ extension SPWindowController {
     func loadLightweightDatabaseRenameObjects(for database: String, connection: SPMySQLConnection) -> [(name: String, type: SALightweightDatabaseRenameObjectType)] {
         var objects: [(name: String, type: SALightweightDatabaseRenameObjectType)] = []
 
-        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))") {
+        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))", assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1377,7 +1388,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_name") {
+           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1393,7 +1405,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name") {
+           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1408,7 +1421,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name") {
+           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1422,7 +1436,8 @@ extension SPWindowController {
     }
 
     func lightweightDatabaseDefaults(for database: String, connection: SPMySQLConnection) -> (encoding: String?, collation: String?)? {
-        guard let result = connection.queryString("SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = \(Self.sqlString(database))") else {
+        guard let result = connection.queryString("SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = \(Self.sqlString(database))",
+                                                  assertingDatabase: database) else {
             return nil
         }
 
@@ -1526,17 +1541,27 @@ extension SPWindowController {
         }
     }
 
-    func runLightweightDatabaseMutation(status: String, statement: String, completion: @escaping (Bool) -> Void) {
-        runLightweightDatabaseMutation(status: status, statements: [statement], completion: completion)
+    func runLightweightDatabaseMutation(status: String,
+                                        statement: String,
+                                        assertingDatabase database: String? = nil,
+                                        completion: @escaping (Bool) -> Void) {
+        runLightweightDatabaseMutation(status: status,
+                                       statements: [statement],
+                                       assertingDatabase: database,
+                                       completion: completion)
     }
 
-    func runLightweightDatabaseMutation(status: String, statements: [String], completion: @escaping (Bool) -> Void) {
+    func runLightweightDatabaseMutation(status: String,
+                                        statements: [String],
+                                        assertingDatabase database: String? = nil,
+                                        completion: @escaping (Bool) -> Void) {
         guard let activeConnection = activeConnection,
               let mutationSnapshot = beginLightweightMutation(status: status) else {
             completion(false)
             return
         }
         let statements = expandedLightweightDatabaseMutationStatements(statements)
+        let assertionDatabase = database ?? mutationSnapshot.database
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
             guard let self = self else { return }
@@ -1544,7 +1569,9 @@ extension SPWindowController {
             var failedStatementIndex: Int?
             var mutationError: String?
             for (index, statement) in statements.enumerated() {
-                _ = activeConnection.queryString(statement)
+                self.runLightweightMutationStatement(statement,
+                                                     connection: activeConnection,
+                                                     assertingDatabase: assertionDatabase)
                 if activeConnection.queryErrored() {
                     failedStatementIndex = index
                     mutationError = activeConnection.lastErrorMessage()
@@ -1555,7 +1582,9 @@ extension SPWindowController {
             if let failedStatementIndex = failedStatementIndex {
                 for cleanupStatement in statements.dropFirst(failedStatementIndex + 1)
                     where cleanupStatement.uppercased().contains("FOREIGN_KEY_CHECKS=1") {
-                    _ = activeConnection.queryString(cleanupStatement)
+                    self.runLightweightMutationStatement(cleanupStatement,
+                                                         connection: activeConnection,
+                                                         assertingDatabase: assertionDatabase)
                 }
             }
             let mutationFailed = failedStatementIndex != nil
@@ -1576,6 +1605,20 @@ extension SPWindowController {
 
                 completion(true)
             }
+        }
+    }
+
+    private func runLightweightMutationStatement(_ statement: String,
+                                                 connection: SPMySQLConnection,
+                                                 assertingDatabase database: String?) {
+        let normalizedStatement = statement.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let isConnectionGlobal = normalizedStatement.hasPrefix("SET ")
+            || (normalizedStatement.hasPrefix("/*!") && normalizedStatement.contains(" SET "))
+
+        if let database = database, !isConnectionGlobal {
+            _ = connection.queryString(statement, assertingDatabase: database)
+        } else {
+            _ = connection.queryString(statement)
         }
     }
 
@@ -1648,7 +1691,7 @@ extension SPWindowController {
             switch self.lightweightDatabaseRenamePreflight(from: sourceDatabase, to: targetDatabase, connection: activeConnection) {
             case .ready(let statements):
                 for statement in statements {
-                    _ = activeConnection.queryString(statement)
+                    _ = activeConnection.queryString(statement, assertingDatabase: sourceDatabase)
                     if activeConnection.queryErrored() { break }
                 }
 
@@ -1755,7 +1798,8 @@ extension SPWindowController {
                 }
             }
 
-            _ = activeConnection.queryString("CREATE DATABASE \(Self.backtickQuoted(targetDatabase)) \(options.joined(separator: " "))")
+            _ = activeConnection.queryString("CREATE DATABASE \(Self.backtickQuoted(targetDatabase)) \(options.joined(separator: " "))",
+                                             assertingDatabase: sourceDatabase)
             var success = !activeConnection.queryErrored()
             var error = success ? nil : activeConnection.lastErrorMessage()
             var didDisableForeignKeyChecks = false
@@ -1785,7 +1829,7 @@ extension SPWindowController {
                         break
                     }
 
-                    _ = activeConnection.queryString(createStatement)
+                    _ = activeConnection.queryString(createStatement, assertingDatabase: sourceDatabase)
                     if activeConnection.queryErrored() {
                         success = false
                         error = activeConnection.lastErrorMessage()
@@ -1793,7 +1837,8 @@ extension SPWindowController {
                     }
 
                     if copyContent {
-                        _ = activeConnection.queryString("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table.name)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table.name))")
+                        _ = activeConnection.queryString("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(table.name)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table.name))",
+                                                         assertingDatabase: sourceDatabase)
                         if activeConnection.queryErrored() {
                             success = false
                             error = activeConnection.lastErrorMessage()
@@ -1801,11 +1846,6 @@ extension SPWindowController {
                         }
                     }
                 }
-            }
-
-            if success {
-                success = activeConnection.selectDatabase(targetDatabase)
-                if !success { error = activeConnection.lastErrorMessage() }
             }
 
             if success {
@@ -1819,7 +1859,7 @@ extension SPWindowController {
                         break
                     }
 
-                    _ = activeConnection.queryString(createStatement)
+                    _ = activeConnection.queryString(createStatement, assertingDatabase: targetDatabase)
                     if activeConnection.queryErrored() {
                         success = false
                         error = activeConnection.lastErrorMessage()
@@ -1839,7 +1879,7 @@ extension SPWindowController {
                         break
                     }
 
-                    _ = activeConnection.queryString(createStatement)
+                    _ = activeConnection.queryString(createStatement, assertingDatabase: targetDatabase)
                     if activeConnection.queryErrored() {
                         success = false
                         error = activeConnection.lastErrorMessage()
@@ -1859,7 +1899,7 @@ extension SPWindowController {
                         break
                     }
 
-                    _ = activeConnection.queryString(createStatement)
+                    _ = activeConnection.queryString(createStatement, assertingDatabase: targetDatabase)
                     if activeConnection.queryErrored() {
                         success = false
                         error = activeConnection.lastErrorMessage()
@@ -1879,7 +1919,7 @@ extension SPWindowController {
                         break
                     }
 
-                    _ = activeConnection.queryString(createStatement)
+                    _ = activeConnection.queryString(createStatement, assertingDatabase: targetDatabase)
                     if activeConnection.queryErrored() {
                         success = false
                         error = activeConnection.lastErrorMessage()
@@ -1926,7 +1966,8 @@ extension SPWindowController {
                                              targetTable: String? = nil,
                                              stripForeignKeyConstraintNames: Bool = false,
                                              stripAutoIncrement: Bool = false) -> String? {
-        guard let result = connection.queryString("SHOW CREATE TABLE \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))") else {
+        guard let result = connection.queryString("SHOW CREATE TABLE \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(table))",
+                                                  assertingDatabase: sourceDatabase) else {
             return nil
         }
 
@@ -1959,7 +2000,7 @@ extension SPWindowController {
     private func loadLightweightDatabaseCopyObjects(for database: String, connection: SPMySQLConnection) -> [SALightweightDatabaseCopyObject] {
         var objects: [SALightweightDatabaseCopyObject] = []
 
-        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))") {
+        if let result = connection.queryString("SHOW FULL TABLES FROM \(Self.backtickQuoted(database))", assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1981,7 +2022,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_type, routine_name") {
+           let result = connection.queryString("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.routines WHERE routine_schema = \(quotedDatabase) ORDER BY routine_type, routine_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -1997,7 +2039,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name") {
+           let result = connection.queryString("SELECT TRIGGER_NAME FROM information_schema.triggers WHERE trigger_schema = \(quotedDatabase) ORDER BY event_object_table, action_timing, event_manipulation, trigger_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -2012,7 +2055,8 @@ extension SPWindowController {
         }
 
         if let quotedDatabase = connection.escapeAndQuoteString(database),
-           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name") {
+           let result = connection.queryString("SELECT EVENT_NAME FROM information_schema.events WHERE event_schema = \(quotedDatabase) ORDER BY event_name",
+                                               assertingDatabase: database) {
             result.returnDataAsStrings = true
             result.defaultRowReturnType = SPMySQLResultRowAsDictionary
             while let row = result.getRowAsDictionary() as? [String: Any] {
@@ -2064,7 +2108,8 @@ extension SPWindowController {
     }
 
     private func lightweightShowCreateStatement(keyword: String, object: String, database: String, connection: SPMySQLConnection) -> String? {
-        guard let result = connection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(object))") else {
+        guard let result = connection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(object))",
+                                                  assertingDatabase: database) else {
             return nil
         }
 
@@ -2146,7 +2191,8 @@ extension SPWindowController {
         }
 
         runLightweightDatabaseMutation(status: String(format: NSLocalizedString("Altering %@...", comment: "Altering database task string"), database),
-                                       statement: statement) { success in
+                                       statement: statement,
+                                       assertingDatabase: database) { success in
             guard success else {
                 completion(false)
                 return
@@ -2169,8 +2215,7 @@ extension SPWindowController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
             guard let self = self else { return }
 
-            _ = activeConnection.selectDatabase(sourceDatabase)
-            var statements: [String] = []
+            var statements: [(statement: String, assertingDatabase: String)] = []
             if type == .view {
                 if let createView = self.lightweightShowCreateStatement(keyword: "VIEW",
                                                                         object: sourceName,
@@ -2182,7 +2227,7 @@ extension SPWindowController {
                                                                            targetName: targetName,
                                                                            sourceDatabase: sourceDatabase,
                                                                            targetDatabase: targetDatabase) {
-                    statements = [statement]
+                    statements = [(statement, targetDatabase)]
                 }
             } else {
                 if let createTable = self.lightweightCreateTableCopyStatement(table: sourceName,
@@ -2192,9 +2237,10 @@ extension SPWindowController {
                                                                               targetTable: targetName,
                                                                               stripForeignKeyConstraintNames: true,
                                                                               stripAutoIncrement: !copyContent) {
-                    statements = [createTable]
+                    statements = [(createTable, sourceDatabase)]
                     if copyContent {
-                        statements.append("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))")
+                        statements.append(("INSERT INTO \(Self.backtickQuoted(targetDatabase)).\(Self.backtickQuoted(targetName)) SELECT * FROM \(Self.backtickQuoted(sourceDatabase)).\(Self.backtickQuoted(sourceName))",
+                                           sourceDatabase))
                     }
                 }
             }
@@ -2211,8 +2257,9 @@ extension SPWindowController {
             var mutationFailed = false
             var error: String?
             var contentCopyWarning: String?
-            for (index, statement) in statements.enumerated() {
-                _ = activeConnection.queryString(statement)
+            for (index, operation) in statements.enumerated() {
+                _ = activeConnection.queryString(operation.statement,
+                                                 assertingDatabase: operation.assertingDatabase)
                 guard activeConnection.queryErrored() else { continue }
 
                 let queryError = activeConnection.lastErrorMessage()
@@ -2260,8 +2307,8 @@ extension SPWindowController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, activeConnection] in
             guard let self = self else { return }
 
-            _ = activeConnection.selectDatabase(database)
-            guard let result = activeConnection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))") else {
+            guard let result = activeConnection.queryString("SHOW CREATE \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))",
+                                                            assertingDatabase: database) else {
                 DispatchQueue.main.async {
                     self.finishLightweightMutation(mutationSnapshot, restoringDetail: true)
                     self.showLightweightError(title: NSLocalizedString("Error", comment: "error"),
@@ -2285,10 +2332,11 @@ extension SPWindowController {
             let renamedSyntax = createSyntax.replacingOccurrences(of: pattern,
                                                                   with: Self.backtickQuoted(targetName),
                                                                   options: .regularExpression)
-            _ = activeConnection.queryString(renamedSyntax)
+            _ = activeConnection.queryString(renamedSyntax, assertingDatabase: database)
             let createdTarget = !activeConnection.queryErrored()
             if createdTarget, dropSource {
-                _ = activeConnection.queryString("DROP \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))")
+                _ = activeConnection.queryString("DROP \(keyword) \(Self.backtickQuoted(database)).\(Self.backtickQuoted(sourceName))",
+                                                 assertingDatabase: database)
             }
 
             let mutationFailed = activeConnection.queryErrored()
