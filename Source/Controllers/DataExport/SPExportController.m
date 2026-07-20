@@ -92,6 +92,8 @@ static inline void SetOnOff(NSNumber *ref,id obj);
 
 @interface SPExportController () <SPCSVExporterProtocol, SPSQLExporterProtocol, SPXMLExporterProtocol, SPDotExporterProtocol, SPPDFExporterProtocol, SPHTMLExporterProtocol>
 
+@property (readwrite, copy) NSString *exportDatabaseName;
+
 - (void)_switchTab;
 - (void)_checkForDatabaseChanges;
 - (void)_displayExportTypeOptions:(BOOL)display;
@@ -702,6 +704,7 @@ set_input:
 	// Finally get rid of all the exporters and files
 	[exportFiles removeAllObjects];
 	[exporters removeAllObjects];
+	self.exportDatabaseName = nil;
 }
 
 - (void)_hideExportProgress
@@ -1749,6 +1752,7 @@ set_input:
 
 	// Restore the connection encoding to it's pre-export value
 	[self _restorePreviousConnectionEncoding];
+	self.exportDatabaseName = nil;
 }
 
 /**
@@ -1866,6 +1870,8 @@ set_input:
 {
 	BOOL singleFileHandleSet = NO;
 	SPExportFile *singleExportFile = nil, *file = nil;
+	self.exportDatabaseName = [self _exportDatabaseName];
+	NSString *databaseName = self.exportDatabaseName;
 
 	// Change query logging mode
 	[self _setExportQueryMode:SPImportExportQueryMode];
@@ -1949,9 +1955,9 @@ set_input:
 
 		SPSQLExporter *sqlExporter = [[SPSQLExporter alloc] initWithDelegate:self];
 
-			[sqlExporter setSqlDatabaseHost:[self _exportHostName]];
-			[sqlExporter setSqlDatabaseName:[self _exportDatabaseName]];
-			[sqlExporter setSqlDatabaseVersion:[self _exportServerVersion]];
+		[sqlExporter setSqlDatabaseHost:[self _exportHostName]];
+		[sqlExporter setSqlDatabaseName:databaseName];
+		[sqlExporter setSqlDatabaseVersion:[self _exportServerVersion]];
 
 		[sqlExporter setSqlOutputIncludeUTF8BOM:[exportUseUTF8BOMButton state]];
 		[sqlExporter setSqlOutputEncodeBLOBasHex:[exportSQLBLOBFieldsAsHexCheck state]];
@@ -2051,9 +2057,9 @@ set_input:
 
 		[dotExporter setDotTableData:tableDataInstance];
 		[dotExporter setDotForceLowerTableNames:[exportDotForceLowerTableNamesCheck state]];
-			[dotExporter setDotDatabaseHost:[self _exportHostName]];
-			[dotExporter setDotDatabaseName:[self _exportDatabaseName]];
-			[dotExporter setDotDatabaseVersion:[self _exportServerVersion]];
+		[dotExporter setDotDatabaseHost:[self _exportHostName]];
+		[dotExporter setDotDatabaseName:databaseName];
+		[dotExporter setDotDatabaseVersion:[self _exportServerVersion]];
 
 		[dotExporter setDotExportTables:exportTables];
 
@@ -2062,7 +2068,7 @@ set_input:
 			[exportFilename setString:[self expandCustomFilenameFormatUsingTableName:nil]];
 		}
 		else {
-				[exportFilename setString:[self _exportDatabaseName]];
+			[exportFilename setString:databaseName];
 		}
 
 		// Only append the extension if necessary
@@ -2083,6 +2089,7 @@ set_input:
 	for (SPExporter *exporter in exporters)
 	{
 		[exporter setConnection:connection];
+		[exporter setDatabaseName:databaseName];
 		[exporter setServerSupport:[self serverSupport]];
 		[exporter setExportOutputEncoding:[connection stringEncoding]];
 		[exporter setExportMaxProgress:(NSInteger)[exportProgressIndicator bounds].size.width];
@@ -2176,7 +2183,7 @@ set_input:
 		}
 		else {
 			BOOL isSingleTableExport = (exportSource == SPTableExport && exportTableCount == 1);
-				[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [self _exportDatabaseName] : table)];
+			[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? self.exportDatabaseName : table)];
 		}
 
 		// Only append the extension if necessary
@@ -2239,7 +2246,7 @@ set_input:
 		}
 		else {
 			BOOL isSingleTableExport = (exportSource == SPTableExport && exportTableCount == 1);
-				[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? [self _exportDatabaseName] : table)];
+			[exportFilename setString:(isSingleTableExport) ? [self generateDefaultExportFilename] : ((dataArray) ? self.exportDatabaseName : table)];
 		}
 
 		// Only append the extension if necessary
@@ -2288,7 +2295,7 @@ set_input:
 					  NSLocalizedString(@"Host", @"export header host label"),
 					  [self _exportHostName],
 					  NSLocalizedString(@"Database", @"export header database label"),
-					  [self _exportDatabaseName],
+					  self.exportDatabaseName,
 					  NSLocalizedString(@"Generation Time", @"export header generation time label"),
 					  [NSDate date],
 					  lineEnding,
@@ -2314,7 +2321,7 @@ set_input:
 	[header appendFormat:@"- %@ %@\n-\n", NSLocalizedString(@"Version", @"export header version label"), [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]];
 	[header appendFormat:@"- %@\n- %@\n-\n", SPLOCALIZEDURL_HOMEPAGE, SPDevURL];
 	[header appendFormat:@"- %@: %@ (MySQL %@)\n", NSLocalizedString(@"Host", @"export header host label"), [self _exportHostName], [self _exportServerVersion]];
-	[header appendFormat:@"- %@: %@\n", NSLocalizedString(@"Database", @"export header database label"), [self _exportDatabaseName]];
+	[header appendFormat:@"- %@: %@\n", NSLocalizedString(@"Database", @"export header database label"), self.exportDatabaseName];
 	[header appendFormat:@"- %@ Time: %@\n", NSLocalizedString(@"Generation Time", @"export header generation time label"), [NSDate date]];
 	[header appendString:@"-\n-->\n\n"];
 
@@ -2323,7 +2330,7 @@ set_input:
 		NSString *tag;
 
 		if (exportSource == SPTableExport) {
-			tag = [NSString stringWithFormat:@"<mysqldump xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n<database name=\"%@\">\n\n", [[self _exportDatabaseName] HTMLEscapeString]];
+			tag = [NSString stringWithFormat:@"<mysqldump xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n<database name=\"%@\">\n\n", [self.exportDatabaseName HTMLEscapeString]];
 		}
 		else {
 			NSString *queryString = [self _exportQueryForSource:exportSource];
@@ -2334,7 +2341,7 @@ set_input:
 		[header appendString:tag];
 	}
 	else {
-		[header appendFormat:@"<%@>\n\n", [[self _exportDatabaseName] HTMLEscapeString]];
+		[header appendFormat:@"<%@>\n\n", [self.exportDatabaseName HTMLEscapeString]];
 	}
 
 	[file writeData:[header dataUsingEncoding:NSUTF8StringEncoding]];
@@ -2561,6 +2568,8 @@ set_input:
  * Re-open the export sheet without resetting the interface - for use on error.
  */
 - (void)_openExportSheet {
+	self.exportDatabaseName = nil;
+
 	[[self _exportParentWindow] beginSheet:self.window completionHandler:^(NSModalResponse returnCode) {
 		// Perform the export
 		if (returnCode == NSModalResponseOK) {
@@ -2741,7 +2750,7 @@ set_input:
 			break;
 		case SPTableExport:
 			filename = [NSString stringWithFormat:@"%@_%@",
-						[self _exportDatabaseName],
+						(self.exportDatabaseName ?: [self _exportDatabaseName]),
 						[[NSDate date] stringWithFormat:@"yyyy-MM-dd"
 												 locale:[NSLocale autoupdatingCurrentLocale]
 											   timeZone:[NSTimeZone localTimeZone]]];
@@ -2825,7 +2834,7 @@ set_input:
 
 			}
 			else if ([tokenContent isEqualToString:SPFileNameDatabaseTokenName]) {
-				[string appendStringOrNil:[self _exportDatabaseName]];
+				[string appendStringOrNil:(self.exportDatabaseName ?: [self _exportDatabaseName])];
 
 			}
 			else if ([tokenContent isEqualToString:SPFileNameTableTokenName]) {
@@ -4198,7 +4207,7 @@ set_input:
 				string = (exportSource == SPTableExport) ? @"</database>\n</mysqldump>\n" : @"</resultset>\n";;
 			}
 			else if ([exporter xmlFormat] == SPXMLExportPlainFormat) {
-				string = [NSString stringWithFormat:@"</%@>\n", [[self _exportDatabaseName] HTMLEscapeString]];
+				string = [NSString stringWithFormat:@"</%@>\n", [self.exportDatabaseName HTMLEscapeString]];
 			}
 
 			[[exporter exportOutputFile] writeData:[string dataUsingEncoding:[connection stringEncoding]]];
@@ -4219,7 +4228,7 @@ set_input:
 			string = (exportSource == SPTableExport) ? @"</database>\n</mysqldump>\n" : @"</resultset>\n";;
 		}
 		else if ([exporter xmlFormat] == SPXMLExportPlainFormat) {
-			string = [NSString stringWithFormat:@"</%@>\n", [[self _exportDatabaseName] HTMLEscapeString]];
+			string = [NSString stringWithFormat:@"</%@>\n", [self.exportDatabaseName HTMLEscapeString]];
 		}
 
 		[[exporter exportOutputFile] writeData:[string dataUsingEncoding:[connection stringEncoding]]];

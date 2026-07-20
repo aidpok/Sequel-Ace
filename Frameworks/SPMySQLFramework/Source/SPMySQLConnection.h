@@ -28,7 +28,7 @@
 //
 //  More info at <https://github.com/sequelpro/sequelpro>
 
-@class SPMySQLKeepAliveTimer;
+@class SADatabaseAssertionState, SPMySQLKeepAliveTimer;
 
 #ifndef _mysql_h
 typedef struct st_mysql MYSQL;
@@ -85,6 +85,7 @@ typedef struct st_mysql MYSQL;
 
 	// Currently selected database
 	NSString *database, *databaseToRestore;
+	SADatabaseAssertionState *databaseAssertionState;
 
 	// Delegate connection lost decisions
 	NSUInteger reconnectionRetryAttempts;

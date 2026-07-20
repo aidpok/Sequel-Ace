@@ -405,25 +405,25 @@ extension SPWindowController {
         connectionContentView.removeFromSuperviewWithoutNeedingDisplay()
         lightweightShellView.removeFromSuperviewWithoutNeedingDisplay()
 
-        let document = SPDatabaseDocument(windowController: self)!
+        let document = SPDatabaseDocument(windowController: self)
         loadedDatabaseDocument = document
 
         if let activeConnectionInfo = activeConnectionInfo {
-            document.connectionController()?.applyLightweightConnectionInfo(activeConnectionInfo)
+            document.connectionController().applyLightweightConnectionInfo(activeConnectionInfo)
         }
         if let database = database ?? selectedDatabase {
-            document.connectionController()?.database = database
+            document.connectionController().database = database
         }
 
         document.updateWindowTitle(self)
 
         window?.contentView?.addSubview(document.databaseView())
-        document.databaseView()?.frame = window?.contentView?.frame ?? NSRect(x: 0, y: 0, width: 800, height: 400)
+        document.databaseView().frame = window?.contentView?.frame ?? NSRect(x: 0, y: 0, width: 800, height: 400)
 
         let connectedFallback = activeConnection != nil
 
         if let activeConnection = activeConnection {
-            document.connectionController()?.restoreDatabaseView()
+            document.connectionController().restoreDatabaseView()
             document.setConnection(activeConnection)
             self.activeConnection = nil
         }
